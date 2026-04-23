@@ -1,0 +1,29 @@
+{
+  "name": "bill-agent",
+  "version": "0.0.1",
+  "description": "Agent that finds errors in medical bills and drafts appeal letters",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "day1": "bun run scripts/day1-poc.ts",
+    "day2": "bun run scripts/day2-analyzer.ts",
+    "day3": "bun run scripts/day3-appeal.ts",
+    "day4": "bun run scripts/day4-negotiate-email.ts",
+    "day5": "bun run scripts/day5-voice-call.ts",
+    "bonsai": "bun run scripts/run-bonsai.ts",
+    "serve": "bun run src/server.ts",
+    "typecheck": "bunx --bun tsc --noEmit",
+    "test": "bun test",
+    "make-pdfs": "bun run scripts/make-fixture-pdfs.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "marked": "^14.1.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.7.2"
+  },
+  "trustedDependencies": []
+}

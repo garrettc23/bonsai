@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bonsai — every bill, audited &amp; negotiated</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="/assets/bonsai-logo.svg" alt="" />
+          </span>
+          <span class="wordmark">
+            <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+          </span>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-nav="overview">
+            <span class="nav-ic" data-icon="home"></span><span>Overview</span>
+            <span class="nav-count" id="nav-approval-count" hidden>0</span>
+          </button>
+          <button class="nav-item" data-nav="bills">
+            <span class="nav-ic" data-icon="inbox"></span><span>Bills</span>
+            <span class="nav-count" id="nav-bills-count">0</span>
+          </button>
+          <button class="nav-item" data-nav="offers">
+            <span class="nav-ic" data-icon="sparkle"></span><span>Offers</span>
+            <span class="nav-count soft" id="nav-offers-count">0</span>
+          </button>
+          <button class="nav-item" data-nav="settings">
+            <span class="nav-ic" data-icon="gear"></span><span>Settings</span>
+          </button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="tagline">
+            <span class="tagline-lead">The</span>
+            <span class="tagline-accent">agent</span>
+            <span class="tagline-lead">that saves you money.</span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="page-header" id="page-header">
+          <div class="page-header-lead">
+            <div class="eyebrow" id="ph-eyebrow">Bill audit &amp; negotiation</div>
+            <h1 class="page-title" id="ph-title">Audit &amp; negotiate any bill.</h1>
+          </div>
+          <div class="page-header-stats" id="ph-stats"></div>
+        </header>
+
+        <section class="content">
+          <!-- OVERVIEW : upload + approvals -->
+          <div class="view view-overview" id="view-overview">
+
+            <div class="approvals-block" id="approvals-block" hidden>
+              <div class="approvals-head">
+                <div>
+                  <div class="eyebrow eyebrow-red">Waiting on you</div>
+                  <div class="approvals-title" id="approvals-title"></div>
+                </div>
+              </div>
+              <div class="approvals-grid" id="approvals-grid"></div>
+            </div>
+
+            <div class="intake-grid">
+              <div class="dropzone" id="dropzone">
+                <div class="dz-icon" aria-hidden="true">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="15"/></svg>
+                </div>
+                <div class="dz-title">Drop any bill. We'll get it to the lowest price possible.</div>
+                <div class="dz-sub">Medical, dental, utilities, subscriptions, legal, contractor invoices. Bonsai reads it, flags every overcharge, and negotiates <em>by email, text, and phone</em> — persistently, until it hits the floor.</div>
+                <form id="upload-form" class="dz-form">
+                  <label class="file-field file-field-full">
+                    <input type="file" name="bill" accept="application/pdf" required />
+                  </label>
+                </form>
+                <div class="dz-sample-row">
+                  <span>No bill to hand?</span>
+                  <button id="run-fixture" class="dz-sample-link" type="button">Try a sample &nbsp;→</button>
+                  <select id="fixture" class="dz-sample-link-select" aria-label="Sample bill" hidden></select>
+                  <select id="channel" class="dz-sample-link-select" aria-label="Channel" hidden>
+                    <option value="persistent" selected>persistent</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="intake-aside">
+                <div class="eyebrow">How Bonsai works</div>
+                <ol class="how-list">
+                  <li><span class="how-num">01</span><div><div class="how-t">Extract</div><div class="how-s">Claude reads the bill (and any supporting docs), returns a grounded, line-item audit.</div></div></li>
+                  <li><span class="how-num">02</span><div><div class="how-t">Audit</div><div class="how-s">Overlap-aware totals. Only <em>duplicate</em>, <em>denied</em>, and <em>balance billing</em> ship as HIGH confidence.</div></div></li>
+                  <li><span class="how-num">03</span><div><div class="how-t">Negotiate</div><div class="how-s">High-stakes disputes go to voice. Everything else runs by email or text — Bonsai keeps pushing until it hits the floor.</div></div></li>
+                  <li><span class="how-num">04</span><div><div class="how-t">Finalize</div><div class="how-s">Signed report. Audit trail you can hand to anyone who asks.</div></div></li>
+                </ol>
+                <div class="aside-hint">Works on any bill. Optimized today for medical claims — cross-references bill and EOB line-by-line.</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- PROGRESS -->
+          <div class="view view-progress hidden" id="view-progress">
+            <div class="flow-stepper" id="flow-stepper"></div>
+            <div class="run-card">
+              <div class="run-head">
+                <div class="run-head-icon">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.3L22 9"/><path d="M22 3v6h-6"/><path d="M21 12a9 9 0 0 1-15.5 6.3L2 15"/><path d="M2 21v-6h6"/></svg>
+                </div>
+                <div class="run-head-text">
+                  <div class="run-head-title" id="run-head-title">Analyzing your bill</div>
+                  <div class="run-head-sub mono">
+                    <span class="pulse-dot"></span>
+                    <span id="run-head-sub">live · grounded tool-use loop</span>
+                  </div>
+                </div>
+              </div>
+              <div class="timeline" id="timeline"></div>
+            </div>
+          </div>
+
+          <!-- REVIEW : audit finished, user reviews findings + plan, asks questions, approves -->
+          <div class="view view-review hidden" id="view-review">
+            <div class="review-head">
+              <div class="eyebrow">Audit complete · review the plan</div>
+              <h2 class="review-title" id="review-title">Here's what we found.</h2>
+              <p class="review-sub" id="review-sub">—</p>
+            </div>
+
+            <div class="review-grid">
+              <section class="review-findings card">
+                <div class="eyebrow">Findings</div>
+                <div class="findings-sub mono" id="review-findings-sub">—</div>
+                <div id="review-findings-list"></div>
+              </section>
+
+              <section class="review-plan card">
+                <div class="eyebrow">Plan of attack</div>
+                <div class="plan-title" id="review-plan-title">—</div>
+                <p class="plan-reason" id="review-plan-reason">—</p>
+                <ul class="plan-steps" id="review-plan-steps"></ul>
+
+                <div class="plan-edit" hidden id="review-plan-edit-block">
+                  <label class="eyebrow" for="review-plan-edit">Your edits to the plan</label>
+                  <textarea id="review-plan-edit" rows="4" placeholder="e.g. Skip voice — email only. Floor is $400, not $600."></textarea>
+                </div>
+              </section>
+
+              <section class="review-qa card">
+                <div class="eyebrow">Ask a question</div>
+                <div class="qa-log" id="review-qa-log"></div>
+                <form class="qa-form" id="review-qa-form">
+                  <input type="text" id="review-qa-input" placeholder="What does 'balance billing' mean for this bill?" autocomplete="off" />
+                  <button type="submit" class="btn btn-ghost">Ask</button>
+                </form>
+              </section>
+            </div>
+
+            <div class="review-actions">
+              <button id="review-edit-btn" class="btn btn-ghost">Edit plan</button>
+              <button id="review-approve-btn" class="btn btn-primary">Approve &amp; run negotiation</button>
+            </div>
+          </div>
+
+          <!-- RESULTS -->
+          <div class="view view-results hidden" id="view-results">
+            <div class="hero-saved">
+              <div class="eyebrow" id="hero-eyebrow">Outcome</div>
+              <h2 class="hero-title" id="hero-title">Saved <span class="hero-amount">—</span></h2>
+              <p class="hero-sub" id="hero-sub">—</p>
+              <div class="stat-strip">
+                <div>
+                  <div class="eyebrow">Was</div>
+                  <div class="stat-val strike" id="stat-was">—</div>
+                </div>
+                <div>
+                  <div class="eyebrow">Now</div>
+                  <div class="stat-val" id="stat-now">—</div>
+                </div>
+                <div>
+                  <div class="eyebrow">Saved</div>
+                  <div class="stat-val stat-green" id="stat-saved">—</div>
+                </div>
+                <div>
+                  <div class="eyebrow">Channel</div>
+                  <div class="stat-val stat-small" id="stat-channel">—</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="tabs">
+              <button class="tab active" data-tab="findings">Findings</button>
+              <button class="tab" data-tab="letter">Appeal letter</button>
+              <button class="tab" data-tab="conversation">Negotiation</button>
+              <button class="tab" data-tab="raw">Raw report</button>
+            </div>
+            <div class="tab-body">
+              <div class="tab-panel active" id="tab-findings">
+                <div class="findings-head">
+                  <div class="eyebrow">Grounded line-item audit</div>
+                  <div class="findings-sub" id="findings-sub">—</div>
+                </div>
+                <div id="findings-list"></div>
+              </div>
+              <div class="tab-panel" id="tab-letter">
+                <div class="letter-layout">
+                  <div class="metadata-panel card" id="metadata-panel"></div>
+                  <pre class="letter-body" id="letter-body"></pre>
+                </div>
+              </div>
+              <div class="tab-panel" id="tab-conversation">
+                <div class="strategy-note card" id="strategy-note"></div>
+                <div id="conversation"></div>
+              </div>
+              <div class="tab-panel" id="tab-raw">
+                <pre class="raw" id="raw-json"></pre>
+              </div>
+            </div>
+
+            <div class="results-foot">
+              <button id="run-again" class="btn btn-ghost">Audit another bill</button>
+            </div>
+          </div>
+
+          <!-- ERROR -->
+          <div class="view view-error hidden" id="view-error">
+            <div class="card error-card">
+              <div class="eyebrow eyebrow-red">Something went wrong</div>
+              <pre id="error-body"></pre>
+              <button id="error-reset" class="btn btn-ghost">Back</button>
+            </div>
+          </div>
+
+          <!-- BILLS -->
+          <div class="view view-bills hidden" id="view-bills">
+            <div class="bills-stats" id="bills-stats"></div>
+            <div class="live-indicator">
+              <span class="pulse-dot"></span>
+              <span id="bills-live-text">Continuously price-checking your bills</span>
+            </div>
+            <div class="bills-filters" id="bills-filters">
+              <div class="filter-field">
+                <label class="eyebrow">Search</label>
+                <input type="search" id="bills-filter-q" placeholder="Provider or account…" />
+              </div>
+              <div class="filter-field">
+                <label class="eyebrow">Category</label>
+                <select id="bills-filter-category"><option value="">All</option></select>
+              </div>
+              <div class="filter-field">
+                <label class="eyebrow">Date</label>
+                <select id="bills-filter-date">
+                  <option value="">Any time</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="90d">Last 90 days</option>
+                  <option value="1y">Last 12 months</option>
+                </select>
+              </div>
+              <div class="filter-field">
+                <label class="eyebrow">Price</label>
+                <select id="bills-filter-price">
+                  <option value="">Any amount</option>
+                  <option value="0-100">Under $100</option>
+                  <option value="100-500">$100 – $500</option>
+                  <option value="500-2000">$500 – $2,000</option>
+                  <option value="2000-">$2,000+</option>
+                </select>
+              </div>
+              <div class="filter-field">
+                <label class="eyebrow">Price score</label>
+                <select id="bills-filter-score">
+                  <option value="">Any score</option>
+                  <option value="0-24">Greatly overpaying (0–24)</option>
+                  <option value="25-49">Overpaying (25–49)</option>
+                  <option value="50-69">Above market (50–69)</option>
+                  <option value="70-84">Fair price (70–84)</option>
+                  <option value="85-100">Best price (85–100)</option>
+                </select>
+              </div>
+              <button class="filter-reset" id="bills-filter-reset" type="button">Reset</button>
+            </div>
+            <div class="bills-table">
+              <div class="bills-row bills-header">
+                <div>Bill</div>
+                <div>Balance</div>
+                <div>Category</div>
+                <div>Price score</div>
+                <div>Auto-negotiate</div>
+                <div></div>
+              </div>
+              <div id="bills-rows"></div>
+            </div>
+          </div>
+
+          <!-- OFFERS -->
+          <div class="view view-offers hidden" id="view-offers">
+            <div class="live-indicator">
+              <span class="pulse-dot"></span>
+              <span id="offers-live-text">Agent hunting alternative coverage, charity care, and prescription discounts</span>
+            </div>
+            <div class="offers-banner">
+              <div class="banner-lead">
+                <div class="eyebrow eyebrow-inverted">If you accepted everything</div>
+                <div class="banner-amount" id="banner-amount">—</div>
+                <div class="banner-sub" id="banner-sub">—</div>
+              </div>
+              <button id="offers-accept-all" class="btn btn-ghost btn-on-dark">Accept all recommended</button>
+            </div>
+            <div class="offers-filters" id="offers-filters"></div>
+            <div class="offers-grid" id="offers-grid"></div>
+          </div>
+
+          <!-- SETTINGS -->
+          <div class="view view-settings hidden" id="view-settings">
+            <div id="settings-groups"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Bill detail drawer: CRM-style audit log -->
+    <div class="drawer-scrim" id="drawer-scrim" hidden></div>
+    <aside class="drawer" id="bill-drawer" hidden aria-hidden="true">
+      <header class="drawer-head">
+        <div class="drawer-head-lead">
+          <div class="eyebrow" id="drawer-eyebrow">Bill record</div>
+          <h2 class="drawer-title" id="drawer-title">—</h2>
+          <div class="drawer-sub mono" id="drawer-sub">—</div>
+        </div>
+        <button class="drawer-close" id="drawer-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </header>
+      <div class="drawer-stats" id="drawer-stats"></div>
+      <nav class="drawer-tabs">
+        <button class="drawer-tab active" data-dtab="activity">Activity</button>
+        <button class="drawer-tab" data-dtab="findings">Findings</button>
+        <button class="drawer-tab" data-dtab="messages">Messages</button>
+        <button class="drawer-tab" data-dtab="report">Report</button>
+      </nav>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

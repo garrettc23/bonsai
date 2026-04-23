@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+.next/
+*.log
+dist/
+fixtures/*.pdf
+!fixtures/.gitkeep
+.DS_Store
+
+# Runtime artifacts — negotiation threads, call transcripts, reports
+out/
