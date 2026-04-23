@@ -18,7 +18,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
+    "heic-convert": "^2.1.0",
     "marked": "^14.1.0",
+    "sharp": "^0.34.5",
     "zod": "^4.3.6"
   },
   "devDependencies": {

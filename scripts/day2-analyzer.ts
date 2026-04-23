@@ -8,26 +8,15 @@
  *   bun run day2 bill-002 eob-002      # override fixture names
  */
 import "../src/env.ts";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { analyze } from "../src/analyzer.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FIXTURES_DIR = join(__dirname, "..", "fixtures");
+import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";
 
-const billPdfPath = join(FIXTURES_DIR, `${billName}.pdf`);
-const eobPdfPath = join(FIXTURES_DIR, `${eobName}.pdf`);
-
 console.log(`Bonsai analyzer — ${billName}.pdf vs ${eobName}.pdf\n`);
 
-const result = await analyze({
-  billPdfPath,
-  eobPdfPath,
-  billFixtureName: billName,
-});
+const result = await analyze(await loadFixtureAnalyzeInput(billName, eobName));
 
 // Human-readable report.
 const rule = "─".repeat(72);

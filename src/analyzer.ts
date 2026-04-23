@@ -1,8 +1,9 @@
 /**
- * Bonsai analyzer — reads a bill + EOB, produces structured errors.
+ * Bonsai analyzer — reads a bill (and optionally an EOB), produces
+ * structured errors.
  *
  * Control flow:
- *   1. Send the system prompt + bill PDF + EOB PDF to Claude, with two
+ *   1. Send the system prompt + bill (+ optional EOB) to Claude, with two
  *      tools available: record_error, finalize_analysis.
  *   2. Loop on tool_use stop_reason:
  *      - For each record_error call, validate shape and grounding.
@@ -12,14 +13,15 @@
  *   3. If Claude hits end_turn without finalize, compute a summary from
  *      the accepted errors.
  *
- * The grounding check (line_quote must appear in the bill's markdown source)
- * is the whole point of Day 2. This is what lets downstream negotiation
- * send a billing department an email that quotes their own document back
- * at them, not a hallucinated paraphrase.
+ * The grounding check (line_quote must appear in the bill's ground-truth
+ * text) is the whole point. For shipped fixtures the ground truth comes
+ * from `fixtures/*.md`. For live uploads it comes from a pre-flight
+ * transcription call (see `src/lib/transcribe-bill.ts`). Either way this
+ * module just consumes a `GroundTruth` and doesn't care which.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { readFileSync } from "node:fs";
-import { loadGroundTruth, type GroundTruth } from "./lib/ground-truth.ts";
+import type { GroundTruth } from "./lib/ground-truth.ts";
+import type { NormalizedBill } from "./lib/extract-bill.ts";
 import {
   RECORD_ERROR_TOOL,
   executeRecordError,
@@ -38,11 +40,11 @@ import type {
   AnalysisSummary,
 } from "./types.ts";
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 4096;
 const MAX_TOOL_TURNS = 30;
 
-const SYSTEM_PROMPT = `You are Bonsai, a medical billing auditor. You are shown two PDFs:
+const SYSTEM_PROMPT_WITH_EOB = `You are Bonsai, a medical billing auditor. You are shown two documents:
 
 1. An itemized hospital bill (what the provider is charging the patient).
 2. An EOB (Explanation of Benefits) from the patient's insurance plan — what the insurer allowed, paid, denied, and calculated as the patient's true responsibility.
@@ -91,16 +93,54 @@ Every record_error call MUST include a line_quote that is a verbatim copy of tex
 
 ## Process
 
-1. Read both PDFs carefully. Cross-reference every bill line against the EOB.
+1. Read both documents carefully. Cross-reference every bill line against the EOB.
 2. Call record_bill_metadata ONCE with all bill/EOB metadata fields (nulls allowed).
-3. For each distinct error, call record_error.
+3. For each distinct error, call record_error. Emit ALL record_error calls in PARALLEL in one turn — make every tool call at once inside the same assistant message rather than one per turn. This cuts latency dramatically.
 4. After the last record_error, call finalize_analysis once. Then stop.
 
 Do not include prose commentary. The tool calls are your entire output.`;
 
-function loadPdfAsBase64(path: string): string {
-  return readFileSync(path).toString("base64");
-}
+const SYSTEM_PROMPT_BILL_ONLY = `You are Bonsai, a medical billing auditor. You are shown a single itemized hospital bill. NO EOB (Explanation of Benefits) was provided.
+
+Your job: identify every billing error you can defend from the bill alone, and flag items a typical insurance plan would likely adjust.
+
+## Tool-call order (strict)
+
+1. FIRST, call record_bill_metadata exactly once. For bill-side fields (patient, provider, bill_total, bill_current_balance_due, date_of_service) use values you can read on the bill. For EOB-side fields (eob_* anything) return null — you do not have an EOB. Do NOT invent values.
+2. THEN call record_error once per distinct error you find.
+3. FINALLY call finalize_analysis exactly once. Then stop.
+
+## Error types (pick the most specific)
+
+- duplicate: Same CPT+date charged twice in the bill. This is the only HIGH-confidence error type available without an EOB.
+- unbundling: A line that plan policy requires to be bundled into a facility fee or procedure (surgical trays, non-prescription meds, OTC meds, standard supplies, routine kits). Flag these as WORTH_REVIEWING.
+- overcharge: Line item whose dollar amount is clearly above a market benchmark (e.g. Medicare PFS). Use sparingly. WORTH_REVIEWING.
+- eob_mismatch / qty_mismatch / denied_service / balance_billing: Do NOT use these without an EOB — you have no ground-truth reference for them.
+
+## Confidence rubric (strict)
+
+- HIGH is reserved for duplicate only when you can point to two rows of the bill with the same CPT+date.
+- WORTH_REVIEWING for unbundling and overcharge. These surface in the UI but will not be sent to a billing department on their own.
+
+The tool will reject any HIGH-confidence finding that isn't a duplicate.
+
+## Grounding contract — CRITICAL
+
+Every record_error call MUST include a line_quote that is a verbatim copy of text from the bill (not a paraphrase). Include the whole row for table rows. If the grounding check fails, the tool will tell you the quote wasn't found; re-call record_error with the exact bill text.
+
+## Dollar figures
+
+- dollar_impact on each record_error is the amount the patient should NOT owe for that finding.
+- finalize_analysis totals: sum all HIGH for high_confidence_total, sum all WORTH_REVIEWING for worth_reviewing_total, and bill_total_disputed = high_confidence_total (no balance-billing envelope math applies without an EOB).
+
+## Process
+
+1. Read the bill carefully. Scan the itemized charges for duplicates and bundled/non-covered items.
+2. Call record_bill_metadata ONCE with all fields (nulls allowed; EOB fields must be null).
+3. For each distinct error, call record_error. Emit ALL record_error calls in PARALLEL in one turn — make every tool call at once inside the same assistant message rather than one per turn. This cuts latency dramatically.
+4. After the last record_error, call finalize_analysis once. Then stop.
+
+Do not include prose commentary. The tool calls are your entire output.`;
 
 /**
  * Overlap-aware total for HIGH-confidence findings.
@@ -128,18 +168,43 @@ export function computeDefensibleTotal(errors: BillingError[]): number {
 }
 
 export interface AnalyzeOptions {
-  billPdfPath: string;
-  eobPdfPath: string;
-  /** Name (or path) of the bill fixture whose .md is used as ground truth. */
-  billFixtureName: string;
+  /**
+   * Normalized bill ready to embed in a Claude message. Single file or an
+   * ordered array of pages/photos — all are shown to the model together as
+   * one bill.
+   */
+  bill: NormalizedBill | NormalizedBill[];
+  /** Normalized EOB. When omitted, analyzer runs in bill-only mode. */
+  eob?: NormalizedBill;
+  /** Ground truth text for line_quote validation. */
+  billGroundTruth: GroundTruth;
   anthropicClient?: Anthropic;
+}
+
+function billContentBlock(
+  bill: NormalizedBill,
+  title: string,
+  context: string,
+): Anthropic.Messages.ContentBlockParam {
+  if (bill.kind === "document") {
+    return {
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: bill.base64 },
+      title,
+      context,
+    };
+  }
+  return {
+    type: "image",
+    source: { type: "base64", media_type: bill.mediaType, data: bill.base64 },
+  };
 }
 
 export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
   const client = opts.anthropicClient ?? new Anthropic();
-  const billGroundTruth = loadGroundTruth(opts.billFixtureName);
-  const billB64 = loadPdfAsBase64(opts.billPdfPath);
-  const eobB64 = loadPdfAsBase64(opts.eobPdfPath);
+  const billGroundTruth = opts.billGroundTruth;
+  const hasEob = !!opts.eob;
+  const bills = Array.isArray(opts.bill) ? opts.bill : [opts.bill];
 
   const t0 = Date.now();
   const errors: BillingError[] = [];
@@ -150,35 +215,41 @@ export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
   let outputTokens = 0;
   let toolTurns = 0;
 
-  const messages: Anthropic.MessageParam[] = [
-    {
-      role: "user",
-      content: [
-        {
-          type: "document",
-          source: { type: "base64", media_type: "application/pdf", data: billB64 },
-          title: "Itemized Hospital Bill",
-          context: "The provider's charges. Treat every line as referenceable for line_quote.",
-        },
-        {
-          type: "document",
-          source: { type: "base64", media_type: "application/pdf", data: eobB64 },
-          title: "Insurance EOB",
-          context: "What the insurer allowed, paid, denied, and calculated as patient responsibility. Use this as ground truth for errors.",
-        },
-        {
-          type: "text",
-          text: "Audit this bill against the EOB. Call record_error for each error you find, then finalize_analysis once at the end.",
-        },
-      ],
-    },
-  ];
+  const userContent: Anthropic.Messages.ContentBlockParam[] = [];
+  bills.forEach((b, i) => {
+    const title =
+      bills.length === 1
+        ? "Itemized Hospital Bill"
+        : `Itemized Hospital Bill — page ${i + 1} of ${bills.length}`;
+    const context =
+      bills.length === 1
+        ? "The provider's charges. Treat every line as referenceable for line_quote."
+        : `Bill page ${i + 1}. All pages are parts of the same bill; cross-reference them and cite line_quote from any page.`;
+    userContent.push(billContentBlock(b, title, context));
+  });
+  if (opts.eob) {
+    userContent.push(
+      billContentBlock(
+        opts.eob,
+        "Insurance EOB",
+        "What the insurer allowed, paid, denied, and calculated as patient responsibility. Use this as ground truth for errors.",
+      ),
+    );
+  }
+  userContent.push({
+    type: "text",
+    text: hasEob
+      ? "Audit this bill against the EOB. Call record_error for each error you find, then finalize_analysis once at the end."
+      : "No EOB was provided. Audit the bill alone for duplicates and items a typical plan would bundle or not cover. Call record_error for each finding, then finalize_analysis once at the end.",
+  });
+
+  const messages: Anthropic.MessageParam[] = [{ role: "user", content: userContent }];
 
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: hasEob ? SYSTEM_PROMPT_WITH_EOB : SYSTEM_PROMPT_BILL_ONLY,
       tools: [RECORD_METADATA_TOOL, RECORD_ERROR_TOOL, FINALIZE_TOOL],
       messages,
     });
@@ -203,7 +274,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
 
       for (const block of toolUseBlocks) {
         if (block.name === "record_error") {
-          const result: RecordErrorResult = executeRecordError(block.input, billGroundTruth);
+          const result: RecordErrorResult = executeRecordError(block.input, billGroundTruth, errors);
           if (result.accepted && result.error) {
             errors.push(result.error);
             toolResults.push({

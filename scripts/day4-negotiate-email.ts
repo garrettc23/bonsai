@@ -16,9 +16,8 @@
  *   bun run day4 bill-001 eob-001 hostile # forces escalation
  */
 import "../src/env.ts";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { analyze } from "../src/analyzer.ts";
+import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 import { MockEmailClient, loadThread } from "../src/clients/email-mock.ts";
 import {
   startNegotiation,
@@ -28,9 +27,6 @@ import {
   type NegotiationOutcome,
 } from "../src/negotiate-email.ts";
 import { simulateReply, type Persona } from "../src/simulate-reply.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FIXTURES_DIR = join(__dirname, "..", "fixtures");
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";
@@ -43,11 +39,7 @@ const PROVIDER_EMAIL = "billing@stsyntheticregional.example.com";
 
 console.log(`Bonsai email negotiation — ${billName}/${eobName} persona=${persona}\n`);
 
-const analyzer = await analyze({
-  billPdfPath: join(FIXTURES_DIR, `${billName}.pdf`),
-  eobPdfPath: join(FIXTURES_DIR, `${eobName}.pdf`),
-  billFixtureName: billName,
-});
+const analyzer = await analyze(await loadFixtureAnalyzeInput(billName, eobName));
 
 console.log(`Analyzer: ${analyzer.summary.headline}`);
 console.log(`  HIGH=$${analyzer.summary.high_confidence_total.toFixed(2)} errors=${analyzer.errors.length}\n`);

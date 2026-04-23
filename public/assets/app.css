@@ -2251,3 +2251,381 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   .drawer { width: 100vw; }
   .drawer-stats { grid-template-columns: 1fr 1fr; }
 }
+
+/* ─── Multi-file staging ───────────────────────────────────── */
+.dz-staging {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-alt);
+  text-align: left;
+}
+.dz-staging-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.dz-staging-hint {
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  font-family: var(--font-mono);
+  letter-spacing: -0.005em;
+}
+.dz-staging-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+.dz-tile {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.dz-tile-thumb {
+  aspect-ratio: 4 / 3;
+  background: var(--surface-alt);
+  border-radius: 5px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-mute);
+  position: relative;
+}
+.dz-tile-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.dz-tile-thumb-doc {
+  background: var(--surface);
+}
+.dz-tile-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-alt);
+  color: var(--ink-mute);
+  letter-spacing: 0.06em;
+}
+.dz-tile-name {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dz-tile-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: 0;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0 2px;
+}
+.dz-tile-remove:hover { background: rgba(0, 0, 0, 0.85); }
+.dz-staging-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.dz-add-more {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+  padding: 8px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  transition: border-color 120ms ease;
+}
+.dz-add-more:hover { border-color: var(--ink-soft); color: var(--ink); }
+.dz-flash {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  padding: 6px 8px;
+  border-left: 2px solid var(--ink-mute);
+  background: var(--surface);
+}
+
+/* ─── Plan edit + view-bill button ─────────────────────────── */
+.plan-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+.btn-tight {
+  padding: 6px 10px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.plan-edit {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+.plan-edit label {
+  display: block;
+  margin-bottom: 6px;
+}
+.plan-edit textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  resize: vertical;
+}
+.plan-edit textarea:focus {
+  outline: none;
+  border-color: var(--ink-soft);
+  background: var(--surface);
+}
+
+/* ─── Chat-style plan editor ──────────────────────────────── */
+.plan-chat {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+.plan-chat-hint {
+  margin-top: 4px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--ink-mute);
+  font-style: italic;
+  line-height: 1.4;
+}
+.plan-chat-log {
+  margin-bottom: 10px;
+}
+.plan-chat-log:empty {
+  display: none;
+}
+
+/* ─── Chat-style Q&A composer ──────────────────────────────── */
+.qa-form-chat {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 4px 4px 16px;
+  gap: 6px;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+.qa-form-chat:focus-within {
+  border-color: var(--ink-soft);
+  background: var(--surface);
+}
+.qa-form-chat input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  padding: 10px 0;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  color: var(--ink);
+}
+.qa-form-chat input:focus { outline: none; background: transparent; border: 0; }
+.qa-send {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--ink);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 120ms ease, transform 120ms ease;
+}
+.qa-send:hover:not(:disabled) { background: #1a1a17; }
+.qa-send:disabled { opacity: 0.4; cursor: wait; }
+
+/* ─── Bill viewer modal ────────────────────────────────────── */
+.bill-viewer-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+.bill-viewer-scrim.open { opacity: 1; pointer-events: auto; }
+.bill-viewer-scrim[hidden] { display: none; }
+.bill-viewer[hidden] { display: none; }
+.bill-viewer {
+  position: fixed;
+  inset: 40px;
+  max-width: 1100px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(10px);
+  opacity: 0;
+  transition: transform 180ms ease, opacity 180ms ease;
+  overflow: hidden;
+}
+.bill-viewer.open { transform: translateY(0); opacity: 1; }
+.bill-viewer-head {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.bill-viewer-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  margin: 4px 0 2px;
+  line-height: 1.2;
+  word-break: break-all;
+}
+.bill-viewer-sub {
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+}
+.bill-viewer-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 16px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+}
+.bill-viewer-tabs:empty { display: none; }
+.bv-tab {
+  background: transparent;
+  border: 0;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+}
+.bv-tab:hover { color: var(--ink-soft); }
+.bv-tab.active {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.bill-viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  background: var(--surface-alt);
+  overflow: auto;
+  position: relative;
+}
+.bv-open-new {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 2;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 5px 10px;
+  text-decoration: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.bv-open-new:hover { border-color: var(--ink); }
+.bv-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+.bv-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #fff;
+  padding: 20px;
+  align-self: center;
+}
+.bv-loading, .bv-empty {
+  padding: 40px;
+  color: var(--ink-mute);
+  font-size: 13.5px;
+  align-self: center;
+  text-align: center;
+  max-width: 460px;
+}
+.bv-empty code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.bv-download {
+  display: inline-block;
+  margin-top: 12px;
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+@media (max-width: 640px) {
+  .bill-viewer { inset: 12px; }
+  .bill-viewer-head { padding: 14px 16px; }
+}

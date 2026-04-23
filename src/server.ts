@@ -26,6 +26,10 @@ import {
   type Channel,
   type BonsaiReport,
 } from "./orchestrator.ts";
+import { normalizeBillFile } from "./lib/extract-bill.ts";
+import { transcribeBill } from "./lib/transcribe-bill.ts";
+import { groundTruthFromText } from "./lib/ground-truth.ts";
+import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
 import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { SmsPersona } from "./simulate-sms-reply.ts";
@@ -43,6 +47,22 @@ const ROOT = join(__dirname, "..");
 const FIXTURES_DIR = join(ROOT, "fixtures");
 const UPLOAD_DIR = join(ROOT, "out", "uploads");
 const PUBLIC_DIR = join(ROOT, "public");
+
+function extensionOf(filename: string): string | null {
+  const m = filename.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Filesystem-safe identifier derived from an uploaded filename. Used as the
+ * base for `out/report-<id>.json` and related artifacts — so it must match
+ * `/[a-zA-Z0-9_-]/`. Falls back to the upload id on empty / pathological names.
+ */
+function safeIdFromFilename(filename: string, uploadId: string): string {
+  const bare = filename.replace(/\.[^./\\]+$/, "");
+  const cleaned = bare.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return cleaned.length >= 2 ? cleaned : uploadId;
+}
 
 function contentType(path: string): string {
   if (path.endsWith(".html")) return "text/html; charset=utf-8";
@@ -100,16 +120,35 @@ const PENDING_DIR = join(ROOT, "out", "pending");
 interface PendingRun {
   run_id: string;
   fixture_name: string; // the name used for final report-<name>.json output
-  bill_path: string;
-  eob_path: string;
+  bill_path: string; // first uploaded file — kept for orchestrator carry-through
+  bill_paths: string[]; // absolute paths of every uploaded bill page (1+)
+  bill_names: string[]; // original filenames, parallel to bill_paths (for viewer labels)
+  eob_path?: string;
+  eob_name?: string;
   channel: Channel;
   email_persona?: EmailPersona;
   voice_persona?: VoicePersona;
   sms_persona?: SmsPersona;
   partial_report: BonsaiReport;
-  plan_edits?: string; // user-provided edits to the auto-chosen plan
+  plan_edits?: string; // accumulated natural-language directives for negotiation agents
+  plan_chat?: Array<{ role: "user" | "assistant"; body: string; ts: string }>;
   qa: Array<{ q: string; a: string; ts: string }>;
   created_at: number;
+}
+
+const MAX_BILL_FILES = 10;
+
+function billMediaMime(ext: string): string {
+  const e = ext.toLowerCase();
+  if (e === "pdf") return "application/pdf";
+  if (e === "jpg" || e === "jpeg") return "image/jpeg";
+  if (e === "png") return "image/png";
+  if (e === "gif") return "image/gif";
+  if (e === "webp") return "image/webp";
+  if (e === "heic" || e === "heif") return "image/heic";
+  if (e === "tif" || e === "tiff") return "image/tiff";
+  if (e === "avif") return "image/avif";
+  return "application/octet-stream";
 }
 
 function newRunId(): string {
@@ -141,12 +180,16 @@ async function handleAudit(req: Request): Promise<Response> {
   //   2. application/json { fixture, eob?, channel? } → sample/fixture path
   const ctype = req.headers.get("content-type") ?? "";
   let billPath: string;
-  let eobPath: string;
+  let eobPath: string | undefined;
   let fixtureName: string;
   let channel: Channel = "persistent";
   let email_persona: EmailPersona | undefined;
   let voice_persona: VoicePersona | undefined;
   let sms_persona: SmsPersona | undefined;
+  let analyzeInput: AnalyzeInput | undefined;
+  let multipartMeta:
+    | { bill_paths: string[]; bill_names: string[]; eob_name?: string }
+    | undefined;
 
   if (ctype.includes("application/json")) {
     const body = (await req.json()) as {
@@ -169,41 +212,95 @@ async function handleAudit(req: Request): Promise<Response> {
     voice_persona = body.voice_persona;
     sms_persona = body.sms_persona;
   } else {
-    // multipart upload
+    // multipart upload — any file types. 1–N bill pages (all treated as one
+    // bill, fed to the analyzer as separate content blocks). Optional EOB.
+    // Normalize (HEIC→JPEG etc.), transcribe each page for grounding.
     const form = await req.formData();
-    const billFile = form.get("bill") as File | null;
-    const eobFile = form.get("eob") as File | null;
-    if (!billFile) return Response.json({ error: "Missing bill file" }, { status: 400 });
-    mkdirSync(UPLOAD_DIR, { recursive: true });
-    const uploadId = `upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    billPath = join(UPLOAD_DIR, `${uploadId}-bill.pdf`);
-    writeFileSync(billPath, new Uint8Array(await billFile.arrayBuffer()));
-    fixtureName = billFile.name.replace(/\.pdf$/i, "");
-    const groundTruthPath = join(FIXTURES_DIR, `${fixtureName}.md`);
-    if (!existsSync(groundTruthPath)) {
+    const billFiles = (form.getAll("bill") as unknown[]).filter(
+      (v): v is File => v instanceof File,
+    );
+    const eobFile = (form.get("eob") as unknown) instanceof File
+      ? (form.get("eob") as File)
+      : null;
+    if (billFiles.length === 0) {
+      return Response.json({ error: "Missing bill file" }, { status: 400 });
+    }
+    if (billFiles.length > MAX_BILL_FILES) {
       return Response.json(
-        {
-          error:
-            "Uploaded bill doesn't have a matching ground-truth markdown fixture. For the demo, upload a file named to match a shipped fixture. Live PDF text extraction is a follow-up.",
-          hint: `Expected fixtures/${fixtureName}.md`,
-        },
+        { error: `Too many bill files — max ${MAX_BILL_FILES}, got ${billFiles.length}.` },
         { status: 400 },
       );
     }
-    if (eobFile) {
-      eobPath = join(UPLOAD_DIR, `${uploadId}-eob.pdf`);
-      writeFileSync(eobPath, new Uint8Array(await eobFile.arrayBuffer()));
-    } else {
-      const fixtureEobName = fixtureName.replace(/^bill-/, "eob-");
-      const fixtureEobPath = join(FIXTURES_DIR, `${fixtureEobName}.pdf`);
-      if (!existsSync(fixtureEobPath)) {
-        return Response.json(
-          { error: `No supporting doc found. Expected fixtures/${fixtureEobName}.pdf` },
-          { status: 400 },
-        );
-      }
-      eobPath = fixtureEobPath;
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const uploadId = `upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const billPaths: string[] = [];
+    const billNames: string[] = [];
+    for (let i = 0; i < billFiles.length; i++) {
+      const f = billFiles[i];
+      const ext = extensionOf(f.name) ?? "bin";
+      const p = join(UPLOAD_DIR, `${uploadId}-bill-${i + 1}.${ext}`);
+      writeFileSync(p, new Uint8Array(await f.arrayBuffer()));
+      billPaths.push(p);
+      billNames.push(f.name);
     }
+    billPath = billPaths[0];
+    fixtureName = safeIdFromFilename(billFiles[0].name, uploadId);
+
+    let eobNormalized;
+    let eobName: string | undefined;
+    if (eobFile) {
+      const eobExt = extensionOf(eobFile.name) ?? "bin";
+      eobPath = join(UPLOAD_DIR, `${uploadId}-eob.${eobExt}`);
+      writeFileSync(eobPath, new Uint8Array(await eobFile.arrayBuffer()));
+      eobName = eobFile.name;
+      eobNormalized = await normalizeBillFile(eobPath, eobFile.name);
+    }
+
+    let billNormalizedList;
+    try {
+      billNormalizedList = await Promise.all(
+        billPaths.map((p, i) => normalizeBillFile(p, billNames[i])),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return Response.json({ error: msg }, { status: 400 });
+    }
+
+    let transcriptJoined: string;
+    try {
+      const transcripts = await Promise.all(
+        billNormalizedList.map((b) => transcribeBill({ bill: b, role: "bill" })),
+      );
+      transcriptJoined = transcripts
+        .map((t, i) =>
+          billNormalizedList.length === 1
+            ? t
+            : `\n\n--- PAGE ${i + 1} of ${billNormalizedList.length} (${billNames[i]}) ---\n\n${t}`,
+        )
+        .join("\n");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return Response.json(
+        { error: `Could not read the uploaded bill: ${msg}` },
+        { status: 400 },
+      );
+    }
+
+    analyzeInput = {
+      bill: billNormalizedList,
+      eob: eobNormalized,
+      billGroundTruth: groundTruthFromText(transcriptJoined, billPath),
+    };
+
+    // Stash collected metadata for the PendingRun assembled after audit.
+    // Using closure-scoped vars keeps the rest of the function unchanged.
+    multipartMeta = {
+      bill_paths: billPaths,
+      bill_names: billNames,
+      eob_name: eobName,
+    };
+
     const ch = form.get("channel");
     channel = (typeof ch === "string" && ch ? ch : "persistent") as Channel;
   }
@@ -212,17 +309,25 @@ async function handleAudit(req: Request): Promise<Response> {
     billPdfPath: billPath,
     eobPdfPath: eobPath,
     billFixtureName: fixtureName,
+    analyzeInput,
     channel,
     email_persona,
     voice_persona,
     sms_persona,
   });
 
+  const billPaths = multipartMeta?.bill_paths ?? [billPath];
+  const billNames = multipartMeta?.bill_names ?? [`${fixtureName}.pdf`];
+  const eobName = multipartMeta?.eob_name ?? (eobPath ? basename(eobPath) : undefined);
+
   const run: PendingRun = {
     run_id: newRunId(),
     fixture_name: fixtureName,
     bill_path: billPath,
+    bill_paths: billPaths,
+    bill_names: billNames,
     eob_path: eobPath,
+    eob_name: eobName,
     channel,
     email_persona,
     voice_persona,
@@ -295,6 +400,118 @@ async function handleAsk(req: Request): Promise<Response> {
     run.qa.push({ q: body.question.trim(), a: text, ts });
     savePending(run);
     return Response.json({ answer: text, ts });
+  } catch (err) {
+    return Response.json({ error: (err as Error).message }, { status: 500 });
+  }
+}
+
+/**
+ * Chat-style plan editor. The user talks to the agent about the negotiation
+ * plan; Opus replies AND returns a structured update to strategy.chosen,
+ * strategy.reason, and plan_edits (natural-language directives that the
+ * negotiation agents will honor on approve). Chat history is persisted on
+ * the PendingRun so the conversation has continuity across turns.
+ */
+async function handlePlanChat(req: Request): Promise<Response> {
+  const body = (await req.json()) as { run_id?: string; message?: string };
+  if (!body.run_id || !body.message?.trim()) {
+    return Response.json({ error: "Missing run_id or message" }, { status: 400 });
+  }
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+
+  const r = run.partial_report;
+  const findingsText = r.analyzer.errors
+    .map(
+      (e, i) =>
+        `${i + 1}. [${e.confidence.toUpperCase()} / ${e.error_type}] ${e.line_quote} — ${e.evidence ?? ""} ($${e.dollar_impact?.toFixed?.(2) ?? "?"})`,
+    )
+    .join("\n");
+  const defensible = r.summary.defensible_disputed ?? 0;
+  const floorEstimate = Math.max(0, (r.summary.original_balance ?? 0) - defensible);
+
+  const history = run.plan_chat ?? [];
+  const system = [
+    "You are Bonsai, helping the user refine the negotiation plan of attack before we contact the provider.",
+    "Tone: terse, direct, one small step at a time. The user is iterating — don't dump the whole plan, just respond to what they asked.",
+    "",
+    "Reply via the update_plan tool call (no prose outside the tool). The tool has four fields:",
+    "- chat_reply: 1-2 sentences acknowledging the change and asking what's next.",
+    "- strategy_chosen: one of email / voice / sms / persistent. Pick the channel that matches the user's intent. Default to the existing channel if the user didn't explicitly change it.",
+    "- strategy_reason: one short sentence explaining the chosen channel in light of all user input so far.",
+    "- plan_edits_append: the NEW directive in this turn only (prior directives are already on file). Empty string if this turn is just Q&A.",
+    "",
+    "FINDINGS:",
+    findingsText || "(no findings)",
+    `Defensible total: $${defensible.toFixed(2)}. Rough floor: $${floorEstimate.toFixed(2)}.`,
+    `Current channel: ${r.strategy.chosen}. Current reason: ${r.strategy.reason}`,
+  ].join("\n");
+
+  const messages: Anthropic.Messages.MessageParam[] = [];
+  for (const m of history) {
+    messages.push({ role: m.role === "user" ? "user" : "assistant", content: m.body });
+  }
+  messages.push({ role: "user", content: body.message.trim() });
+
+  const UPDATE_PLAN_TOOL: Anthropic.Tool = {
+    name: "update_plan",
+    description: "Acknowledge the user's plan-edit message and return the updated strategy.",
+    input_schema: {
+      type: "object",
+      required: ["chat_reply", "strategy_chosen", "strategy_reason", "plan_edits_append"],
+      properties: {
+        chat_reply: { type: "string", description: "1-2 sentence reply shown in the chat log." },
+        strategy_chosen: { type: "string", enum: ["email", "voice", "sms", "persistent"] },
+        strategy_reason: { type: "string", description: "One short sentence explaining the chosen channel." },
+        plan_edits_append: { type: "string", description: "New natural-language directive to append, or empty string." },
+      },
+    },
+  };
+
+  try {
+    const anthropic = new Anthropic();
+    const resp = await anthropic.messages.create({
+      model: "claude-opus-4-7",
+      max_tokens: 400,
+      system,
+      tools: [UPDATE_PLAN_TOOL],
+      tool_choice: { type: "tool", name: "update_plan" },
+      messages,
+    });
+    const toolBlock = resp.content.find(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "update_plan",
+    );
+    if (!toolBlock) {
+      return Response.json({ error: "Model did not return update_plan" }, { status: 502 });
+    }
+    const input = toolBlock.input as {
+      chat_reply: string;
+      strategy_chosen: "email" | "voice" | "sms" | "persistent";
+      strategy_reason: string;
+      plan_edits_append: string;
+    };
+
+    const ts = new Date().toISOString();
+    run.plan_chat = [
+      ...(run.plan_chat ?? []),
+      { role: "user", body: body.message.trim(), ts },
+      { role: "assistant", body: input.chat_reply, ts },
+    ];
+    // Channel + reason update live on the partial report so the UI re-renders.
+    run.partial_report.strategy.chosen = input.strategy_chosen;
+    run.partial_report.strategy.reason = input.strategy_reason;
+    // Append the new directive so negotiation agents get the full context.
+    const append = input.plan_edits_append?.trim();
+    if (append) {
+      run.plan_edits = run.plan_edits ? `${run.plan_edits}\n- ${append}` : `- ${append}`;
+    }
+    savePending(run);
+    return Response.json({
+      reply: input.chat_reply,
+      strategy: run.partial_report.strategy,
+      plan_edits: run.plan_edits ?? "",
+      ts,
+    });
   } catch (err) {
     return Response.json({ error: (err as Error).message }, { status: 500 });
   }
@@ -391,6 +608,57 @@ async function handleUpload(req: Request): Promise<Response> {
     channel,
   });
   return Response.json(report);
+}
+
+/**
+ * Serve an uploaded bill file back to the UI so the user can view what they
+ * dropped. Scoped to a live run_id — there is no directory listing and no
+ * arbitrary path access: the file must be registered in the PendingRun.
+ */
+async function handleViewBill(runId: string, indexStr: string): Promise<Response> {
+  const run = loadPending(runId);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+  const index = Number.parseInt(indexStr, 10);
+  if (!Number.isInteger(index) || index < 0 || index >= run.bill_paths.length) {
+    return Response.json({ error: "Bad bill index" }, { status: 400 });
+  }
+  const path = run.bill_paths[index];
+  // Defense in depth: the path must live under the uploads dir or the
+  // fixtures dir (fixture runs keep a reference to fixtures/<name>.pdf).
+  if (!path.startsWith(UPLOAD_DIR) && !path.startsWith(FIXTURES_DIR)) {
+    return Response.json({ error: "Forbidden" }, { status: 403 });
+  }
+  if (!existsSync(path)) return Response.json({ error: "File missing on disk" }, { status: 404 });
+  const ext = extensionOf(path) ?? "bin";
+  const name = run.bill_names[index] ?? basename(path);
+  return new Response(readFileSync(path), {
+    headers: {
+      "Content-Type": billMediaMime(ext),
+      "Content-Disposition": `inline; filename="${name.replace(/"/g, "")}"`,
+      "Cache-Control": "private, max-age=3600",
+    },
+  });
+}
+
+/** List the files registered to a run so the UI can render a viewer. */
+async function handleListBill(runId: string): Promise<Response> {
+  const run = loadPending(runId);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+  const files = run.bill_paths.map((p, i) => ({
+    index: i,
+    name: run.bill_names[i] ?? basename(p),
+    ext: extensionOf(p) ?? "bin",
+    mime: billMediaMime(extensionOf(p) ?? "bin"),
+    url: `/api/bill/${runId}/${i}`,
+  }));
+  const eob = run.eob_path
+    ? {
+        name: run.eob_name ?? basename(run.eob_path),
+        ext: extensionOf(run.eob_path) ?? "bin",
+        mime: billMediaMime(extensionOf(run.eob_path) ?? "bin"),
+      }
+    : null;
+  return Response.json({ files, eob });
 }
 
 async function handleStatic(pathname: string): Promise<Response> {
@@ -628,7 +896,13 @@ const server = Bun.serve({
       if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
       if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
       if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
+      if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
       if (req.method === "POST" && url.pathname === "/api/approve") return handleApprove(req);
+      const billListMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)$/);
+      if (req.method === "GET" && billListMatch) return handleListBill(billListMatch[1]);
+      const billViewMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/(\d+)$/);
+      if (req.method === "GET" && billViewMatch)
+        return handleViewBill(billViewMatch[1], billViewMatch[2]);
       if (req.method === "GET" || req.method === "HEAD") return handleStatic(url.pathname);
       return new Response("Method not allowed", { status: 405 });
     } catch (err) {

@@ -132,16 +132,22 @@ function renderFlowStepper(activeIndex) {
   });
 }
 
-function startTimeline() {
-  renderFlowStepper(0);
+function startTimeline(fromStage = 0) {
+  // Filter the timeline to steps at or beyond `fromStage`. When the user hits
+  // Approve after a completed audit, we skip Extract/Audit and start at
+  // Negotiate — the earlier stages are already done, and replaying them
+  // would be misleading.
+  const steps = TIMELINE_STEPS.filter((s) => s.stage >= fromStage);
+  const initialActive = steps.length > 0 ? steps[0].stage : fromStage;
+  renderFlowStepper(initialActive);
   const root = $("#timeline");
   root.innerHTML = "";
   let i = 0;
   const tick = () => {
-    if (i < TIMELINE_STEPS.length) {
+    if (i < steps.length) {
       const prev = root.querySelector(".tl-item.active");
       if (prev) { prev.classList.remove("active"); prev.classList.add("done"); }
-      const s = TIMELINE_STEPS[i];
+      const s = steps[i];
       const el = document.createElement("div");
       el.className = "tl-item active";
       el.innerHTML = `
@@ -161,7 +167,7 @@ function startTimeline() {
   tick();
   const gaps = [2200, 3200, 4200, 6000, 5500, 7000, 9000, 12000];
   const schedule = () => {
-    if (i >= TIMELINE_STEPS.length) return;
+    if (i >= steps.length) return;
     const gap = gaps[Math.min(i, gaps.length - 1)];
     timelineTimer = setTimeout(() => { tick(); schedule(); }, gap);
   };
@@ -229,24 +235,191 @@ async function init() {
     await runPhasedFromSample(fixture, channel);
   });
 
-  // Kick off the audit the moment a bill lands — no button required.
+  // ─── Multi-file staging: drop/pick up to 10 files, review, then "Next" ──
   const uploadForm = $("#upload-form");
-  let autoStartedOnce = false;
-  async function autoStartUpload() {
-    if (autoStartedOnce) return;
-    const billInput = $('input[name="bill"]');
-    if (!billInput?.files?.length) return;
-    autoStartedOnce = true;
-    const form = new FormData(uploadForm);
-    if (!form.get("channel")) form.set("channel", "persistent");
-    await runPhasedFromUpload(form);
+  const MAX_BILL_FILES = 10;
+  /** @type {File[]} Files queued for upload, in order. */
+  let stagedFiles = [];
+  let uploadSubmittedOnce = false;
+
+  // Speculative audit: we kick off /api/audit as soon as files are staged.
+  // Users almost never change their mind after dropping, so starting early
+  // swaps a ~30-45s wait after "Next" for a near-instant hand-off into review.
+  // prefetchPromise resolves to { run_id, report }. prefetchController lets
+  // us cancel on the client when the file set changes.
+  let prefetchController = null;
+  let prefetchPromise = null;
+  let prefetchDebounce = null;
+
+  function cancelPrefetch() {
+    if (prefetchDebounce) { clearTimeout(prefetchDebounce); prefetchDebounce = null; }
+    if (prefetchController) {
+      try { prefetchController.abort(); } catch {}
+      prefetchController = null;
+    }
+    prefetchPromise = null;
+  }
+
+  function kickoffPrefetch() {
+    cancelPrefetch();
+    if (stagedFiles.length === 0) return;
+    // Debounce so a burst of add-more clicks only kicks off one audit.
+    prefetchDebounce = setTimeout(() => {
+      prefetchDebounce = null;
+      const controller = new AbortController();
+      prefetchController = controller;
+      const form = new FormData();
+      stagedFiles.forEach((f) => form.append("bill", f, f.name));
+      form.set("channel", "persistent");
+      prefetchPromise = fetch("/api/audit", { method: "POST", body: form, signal: controller.signal })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await res.text());
+          return res.json();
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") return null;
+          // Surface the error when Next is clicked; don't blow up the staging UI.
+          return { __error: err };
+        });
+    }, 350);
+  }
+
+  function fileKey(f) { return `${f.name}|${f.size}|${f.lastModified ?? 0}`; }
+
+  function stageFiles(incoming) {
+    if (!incoming || incoming.length === 0) return;
+    const seen = new Set(stagedFiles.map(fileKey));
+    let added = 0;
+    let skipped = 0;
+    for (const f of incoming) {
+      if (stagedFiles.length >= MAX_BILL_FILES) { skipped++; continue; }
+      const k = fileKey(f);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      stagedFiles.push(f);
+      added++;
+    }
+    if (skipped > 0) {
+      flashStagingMessage(`Max ${MAX_BILL_FILES} files. Ignored the extras.`);
+    }
+    renderStaging();
+    if (added > 0) kickoffPrefetch();
+  }
+
+  function removeStagedAt(i) {
+    stagedFiles.splice(i, 1);
+    renderStaging();
+    kickoffPrefetch();
+  }
+
+  function clearStaging() {
+    stagedFiles = [];
+    cancelPrefetch();
+    renderStaging();
+  }
+
+  function flashStagingMessage(msg) {
+    const grid = $("#dz-staging-grid");
+    if (!grid) return;
+    const m = document.createElement("div");
+    m.className = "dz-flash";
+    m.textContent = msg;
+    grid.parentElement.appendChild(m);
+    setTimeout(() => m.remove(), 2500);
+  }
+
+  function renderStaging() {
+    const block = $("#dz-staging");
+    const grid = $("#dz-staging-grid");
+    const count = $("#dz-staging-count");
+    if (!block || !grid || !count) return;
+    if (stagedFiles.length === 0) {
+      block.hidden = true;
+      grid.innerHTML = "";
+      count.textContent = "0";
+      return;
+    }
+    block.hidden = false;
+    count.textContent = String(stagedFiles.length);
+    grid.innerHTML = "";
+    stagedFiles.forEach((f, i) => {
+      const tile = document.createElement("div");
+      tile.className = "dz-tile";
+      const thumb = document.createElement("div");
+      thumb.className = "dz-tile-thumb";
+      const isImage = (f.type || "").startsWith("image/") ||
+        /\.(jpe?g|png|gif|webp|heic|heif|avif|tiff?)$/i.test(f.name);
+      if (isImage) {
+        const img = document.createElement("img");
+        img.alt = "";
+        try {
+          img.src = URL.createObjectURL(f);
+          img.onload = () => URL.revokeObjectURL(img.src);
+        } catch { /* HEIC has no browser preview — fall through to icon */ }
+        thumb.appendChild(img);
+        if (/\.(heic|heif)$/i.test(f.name)) {
+          // Some browsers won't render HEIC — paint a fallback label.
+          const fallback = document.createElement("span");
+          fallback.className = "dz-tile-fallback";
+          fallback.textContent = "HEIC";
+          thumb.appendChild(fallback);
+        }
+      } else {
+        thumb.classList.add("dz-tile-thumb-doc");
+        thumb.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+      }
+      const nameEl = document.createElement("div");
+      nameEl.className = "dz-tile-name";
+      nameEl.textContent = f.name;
+      nameEl.title = f.name;
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "dz-tile-remove";
+      rm.setAttribute("aria-label", `Remove ${f.name}`);
+      rm.innerHTML = "×";
+      rm.addEventListener("click", (ev) => { ev.stopPropagation(); removeStagedAt(i); });
+      tile.appendChild(thumb);
+      tile.appendChild(nameEl);
+      tile.appendChild(rm);
+      grid.appendChild(tile);
+    });
+  }
+
+  async function submitStagedUpload() {
+    if (uploadSubmittedOnce || stagedFiles.length === 0) return;
+    uploadSubmittedOnce = true;
+    // Prefer the speculative prefetch if one is in flight or done.
+    if (prefetchPromise) {
+      await runPhasedFromPrefetch(prefetchPromise);
+    } else {
+      const form = new FormData();
+      stagedFiles.forEach((f) => form.append("bill", f, f.name));
+      form.set("channel", "persistent");
+      await runPhasedFromUpload(form);
+    }
   }
 
   uploadForm.addEventListener("submit", (ev) => {
     ev.preventDefault();
-    autoStartUpload();
+    submitStagedUpload();
   });
-  $('input[name="bill"]')?.addEventListener("change", autoStartUpload);
+  // Primary input: pick one or many files; they accumulate rather than auto-post.
+  $('input[name="bill"]')?.addEventListener("change", (ev) => {
+    const input = ev.currentTarget;
+    if (input.files && input.files.length > 0) {
+      stageFiles(Array.from(input.files));
+      input.value = ""; // reset so re-picking the same file stages again after removal
+    }
+  });
+  // Add-more picker inside the staging area.
+  $("#dz-add-input")?.addEventListener("change", (ev) => {
+    const input = ev.currentTarget;
+    if (input.files && input.files.length > 0) {
+      stageFiles(Array.from(input.files));
+      input.value = "";
+    }
+  });
+  $("#dz-next")?.addEventListener("click", submitStagedUpload);
 
   const dz = $("#dropzone");
   if (dz) {
@@ -259,29 +432,30 @@ async function init() {
     dz.addEventListener("drop", (ev) => {
       const files = ev.dataTransfer?.files;
       if (!files || files.length === 0) return;
-      const billInput = $('input[name="bill"]');
-      if (billInput && !billInput.files.length && files[0]) {
-        const dt = new DataTransfer(); dt.items.add(files[0]); billInput.files = dt.files;
-        autoStartUpload();
-      }
+      stageFiles(Array.from(files));
     });
   }
 
   $("#error-reset").addEventListener("click", () => { showNav("overview"); });
   $("#run-again")?.addEventListener("click", () => {
-    autoStartedOnce = false;
+    uploadSubmittedOnce = false;
+    clearStaging();
     const fi = $('input[name="bill"]'); if (fi) fi.value = "";
     showNav("overview");
   });
 
-  // Review view: approve, edit, ask
+  // Review view: approve, ask, view-bill
   $("#review-approve-btn")?.addEventListener("click", approveAndRun);
-  $("#review-edit-btn")?.addEventListener("click", () => {
-    const block = $("#review-plan-edit-block");
-    block.hidden = !block.hidden;
-    if (!block.hidden) $("#review-plan-edit").focus();
-  });
   $("#review-qa-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitQuestion(); });
+  $("#review-plan-chat-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitPlanMessage(); });
+  $("#review-view-bill-btn")?.addEventListener("click", () => {
+    if (reviewState?.run_id) openBillViewer(reviewState.run_id);
+  });
+  $("#bill-viewer-close")?.addEventListener("click", closeBillViewer);
+  $("#bill-viewer-scrim")?.addEventListener("click", closeBillViewer);
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !$("#bill-viewer").hidden) closeBillViewer();
+  });
 
   for (const tab of $$(".tab")) {
     tab.addEventListener("click", () => {
@@ -477,6 +651,31 @@ async function runPhasedFromUpload(formData) {
   }
 }
 
+// Resume a speculative audit kicked off when files were dropped. If the
+// audit already finished, this hand-off is near-instant. If it's still in
+// flight, the progress view animates while we await it.
+async function runPhasedFromPrefetch(promise) {
+  setWorkflowView("progress");
+  updatePageHeader({
+    eyebrow: "Audit in progress",
+    title: "Reading the bill &amp; finding every overcharge.",
+  });
+  startTimeline();
+  try {
+    const data = await promise;
+    if (!data || data.__error) throw data?.__error ?? new Error("Audit cancelled");
+    const { run_id, report } = data;
+    stopTimeline();
+    reviewState = { run_id, partial_report: report };
+    renderReviewView(report);
+    setWorkflowView("review");
+  } catch (err) {
+    stopTimeline();
+    $("#error-body").textContent = String(err?.message ?? err);
+    setWorkflowView("error");
+  }
+}
+
 function renderReviewView(report) {
   const { analyzer, appeal, strategy, summary } = report;
   updatePageHeader({
@@ -518,7 +717,19 @@ function renderReviewView(report) {
     root.appendChild(p);
   }
 
-  // Plan of attack card
+  // Plan of attack card (title / reason / steps) — factored so the chat
+  // editor can re-render in place after each turn.
+  renderPlanCard(strategy, summary, appeal);
+
+  // Reset chat + QA state. The plan-edit interface is a chat now; blank
+  // the logs and inputs so a fresh review starts clean.
+  $("#review-plan-chat-log").innerHTML = "";
+  $("#review-plan-chat-input").value = "";
+  $("#review-qa-log").innerHTML = "";
+  $("#review-qa-input").value = "";
+}
+
+function renderPlanCard(strategy, summary, appeal) {
   const channel = strategy.chosen;
   const channelLabel = {
     email: "Email first", sms: "Text first", voice: "Call first",
@@ -526,8 +737,6 @@ function renderReviewView(report) {
   }[channel] ?? channel;
   $("#review-plan-title").textContent = channelLabel;
   $("#review-plan-reason").textContent = strategy.reason;
-
-  // Step list — walk the operator through what will happen if they approve.
   const steps = buildPlanSteps(channel, summary, appeal);
   const ul = $("#review-plan-steps");
   ul.innerHTML = "";
@@ -536,12 +745,6 @@ function renderReviewView(report) {
     li.innerHTML = `<span class="plan-num">${String(i + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(s.t)}</strong> — <em>${escapeHtml(s.d)}</em></div>`;
     ul.appendChild(li);
   });
-
-  // Reset plan edit + QA state
-  $("#review-plan-edit-block").hidden = true;
-  $("#review-plan-edit").value = "";
-  $("#review-qa-log").innerHTML = "";
-  $("#review-qa-input").value = "";
 }
 
 function buildPlanSteps(channel, summary, appeal) {
@@ -614,20 +817,74 @@ async function submitQuestion() {
   }
 }
 
+async function submitPlanMessage() {
+  if (!reviewState) return;
+  const input = $("#review-plan-chat-input");
+  const msg = input.value.trim();
+  if (!msg) return;
+  const log = $("#review-plan-chat-log");
+  const qDiv = document.createElement("div");
+  qDiv.className = "qa-msg q";
+  qDiv.innerHTML = `<div class="qa-role">You</div><div class="qa-body"></div>`;
+  qDiv.querySelector(".qa-body").textContent = msg;
+  log.appendChild(qDiv);
+  input.value = "";
+  input.disabled = true;
+  const btn = $("#review-plan-chat-form button");
+  if (btn) btn.disabled = true;
+  const thinking = document.createElement("div");
+  thinking.className = "qa-msg a";
+  thinking.innerHTML = `<div class="qa-role">Bonsai</div><div class="qa-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+  log.appendChild(thinking);
+  log.scrollTop = log.scrollHeight;
+
+  try {
+    const res = await fetch("/api/plan-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: reviewState.run_id, message: msg }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { reply, strategy } = await res.json();
+    thinking.querySelector(".qa-body").textContent = reply;
+    // Re-render plan title/reason/steps using the updated strategy.
+    if (strategy && reviewState.partial_report) {
+      reviewState.partial_report.strategy = strategy;
+      const { summary, appeal } = reviewState.partial_report;
+      renderPlanCard(strategy, summary, appeal);
+    }
+  } catch (err) {
+    thinking.querySelector(".qa-body").textContent = `Error: ${err.message ?? err}`;
+    thinking.classList.add("error");
+  } finally {
+    input.disabled = false;
+    if (btn) btn.disabled = false;
+    input.focus();
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
 async function approveAndRun() {
   if (!reviewState) return;
-  const edits = $("#review-plan-edit-block").hidden ? "" : $("#review-plan-edit").value.trim();
+  // Plan edits are accumulated server-side through /api/plan-chat — no need
+  // to pass anything here; handleApprove reads run.plan_edits from the
+  // PendingRun.
   setWorkflowView("progress");
   updatePageHeader({
     eyebrow: "Negotiation in progress",
     title: "Bonsai is on it.",
   });
-  startTimeline();
+  const runTitle = $("#run-head-title");
+  const runSub = $("#run-head-sub");
+  if (runTitle) runTitle.textContent = "Negotiating with the provider";
+  if (runSub) runSub.textContent = "live · opening channel, dispatching against the rep";
+  // Extract + Audit already ran — skip to Negotiate.
+  startTimeline(2);
   try {
     const res = await fetch("/api/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: reviewState.run_id, plan_edits: edits || undefined }),
+      body: JSON.stringify({ run_id: reviewState.run_id }),
     });
     if (!res.ok) throw new Error(await res.text());
     const report = await res.json();
@@ -1836,6 +2093,113 @@ function closeBillDrawer() {
       scrim.hidden = true;
     }
   }, 280);
+}
+
+// ─── Bill viewer (modal showing the uploaded bill files) ─────────
+let billViewerState = null;
+
+async function openBillViewer(runId) {
+  const modal = $("#bill-viewer");
+  const scrim = $("#bill-viewer-scrim");
+  const body = $("#bill-viewer-body");
+  const tabs = $("#bill-viewer-tabs");
+  $("#bill-viewer-title").textContent = "Loading…";
+  $("#bill-viewer-sub").textContent = "";
+  tabs.innerHTML = "";
+  body.innerHTML = '<div class="bv-loading">Loading your bill…</div>';
+  scrim.hidden = false;
+  modal.hidden = false;
+  requestAnimationFrame(() => {
+    scrim.classList.add("open");
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+  });
+  try {
+    const res = await fetch(`/api/bill/${encodeURIComponent(runId)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    billViewerState = { runId, files: data.files || [], index: 0 };
+    if (billViewerState.files.length === 0) {
+      $("#bill-viewer-title").textContent = "No file on record";
+      body.innerHTML = '<div class="bv-empty">This run has no uploaded files attached.</div>';
+      return;
+    }
+    $("#bill-viewer-title").textContent = billViewerState.files[0].name;
+    $("#bill-viewer-sub").textContent = `${billViewerState.files.length} file${billViewerState.files.length === 1 ? "" : "s"} · click a tab to switch`;
+    if (billViewerState.files.length > 1) {
+      billViewerState.files.forEach((f, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "bv-tab" + (i === 0 ? " active" : "");
+        b.textContent = `${i + 1}. ${f.name}`;
+        b.addEventListener("click", () => showBillViewerIndex(i));
+        tabs.appendChild(b);
+      });
+    }
+    showBillViewerIndex(0);
+  } catch (err) {
+    body.innerHTML = `<div class="bv-empty">Could not load: ${escapeHtml(String(err?.message ?? err))}</div>`;
+  }
+}
+
+function showBillViewerIndex(i) {
+  if (!billViewerState) return;
+  billViewerState.index = i;
+  const f = billViewerState.files[i];
+  const body = $("#bill-viewer-body");
+  $("#bill-viewer-title").textContent = f.name;
+  for (const t of document.querySelectorAll(".bv-tab")) t.classList.remove("active");
+  const active = document.querySelectorAll(".bv-tab")[i];
+  if (active) active.classList.add("active");
+  body.innerHTML = "";
+
+  // Always give the user an escape hatch: a top-right "Open in new tab" link.
+  // Browser PDF plugins sometimes refuse to render inside an iframe, and
+  // some image formats (HEIC, TIFF) can't render inline at all. The link
+  // guarantees the bill is accessible.
+  const openLink = document.createElement("a");
+  openLink.className = "bv-open-new";
+  openLink.href = f.url;
+  openLink.target = "_blank";
+  openLink.rel = "noopener";
+  openLink.textContent = "Open in new tab ↗";
+  body.appendChild(openLink);
+
+  if (f.mime === "application/pdf") {
+    const frame = document.createElement("iframe");
+    frame.className = "bv-frame";
+    frame.src = f.url;
+    frame.title = f.name;
+    body.appendChild(frame);
+  } else if (f.mime.startsWith("image/") && f.mime !== "image/heic" && f.mime !== "image/heif" && f.mime !== "image/tiff") {
+    const img = document.createElement("img");
+    img.className = "bv-img";
+    img.alt = f.name;
+    img.src = f.url;
+    body.appendChild(img);
+  } else {
+    // Browsers generally can't render HEIC/HEIF/TIFF inline.
+    const box = document.createElement("div");
+    box.className = "bv-empty";
+    box.innerHTML = `Your browser can't preview <code>${escapeHtml(f.ext.toUpperCase())}</code> files inline. Use <strong>Open in new tab</strong> above, or <a class="bv-download" href="${escapeHtml(f.url)}" download="${escapeHtml(f.name)}">download ${escapeHtml(f.name)}</a>.`;
+    body.appendChild(box);
+  }
+}
+
+function closeBillViewer() {
+  const modal = $("#bill-viewer");
+  const scrim = $("#bill-viewer-scrim");
+  if (!modal) return;
+  modal.classList.remove("open");
+  scrim.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+  setTimeout(() => {
+    if (!modal.classList.contains("open")) {
+      modal.hidden = true;
+      scrim.hidden = true;
+      $("#bill-viewer-body").innerHTML = "";
+    }
+  }, 200);
 }
 
 function bindDrawerTabs() {

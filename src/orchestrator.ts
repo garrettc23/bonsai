@@ -19,6 +19,7 @@
 import { analyze } from "./analyzer.ts";
 import { generateAppealLetter, type AppealLetter } from "./appeal-letter.ts";
 import type { AnalyzerResult } from "./types.ts";
+import { loadFixtureAnalyzeInput, type AnalyzeInput } from "./lib/fixture-audit.ts";
 import { MockEmailClient, loadThread } from "./clients/email-mock.ts";
 import {
   startNegotiation,
@@ -42,9 +43,25 @@ import { runNegotiationAgent, type PersistentNegotiationResult } from "./negotia
 export type Channel = "email" | "voice" | "sms" | "persistent" | "auto";
 
 export interface RunBonsaiOpts {
-  billPdfPath: string;
-  eobPdfPath: string;
+  /**
+   * File paths for the original bill / EOB. Optional — when omitted, the
+   * fixture at `fixtures/<billFixtureName>.pdf` is used. These paths are
+   * carried into the negotiation phase for potential future use but are
+   * not opened directly by the negotiation code.
+   */
+  billPdfPath?: string;
+  eobPdfPath?: string;
+  /**
+   * Identifier used for output filenames (out/report-<name>.json) and for
+   * default fixture lookup when `analyzeInput` is not provided.
+   */
   billFixtureName: string;
+  /**
+   * Pre-built analyzer input — normalized bill (+ optional EOB) and the
+   * pre-loaded ground truth for line_quote validation. When set, the
+   * analyzer runs against these instead of loading from fixtures.
+   */
+  analyzeInput?: AnalyzeInput;
   patient_email?: string;
   provider_email?: string;
   patient_phone?: string;
@@ -137,10 +154,16 @@ export function chooseChannel(
  * plan before we reach out to the provider.
  */
 export async function runAuditPhase(opts: RunBonsaiOpts): Promise<BonsaiReport> {
+  const input =
+    opts.analyzeInput ??
+    (await loadFixtureAnalyzeInput(
+      opts.billFixtureName,
+      opts.billFixtureName.replace(/^bill-/, "eob-"),
+    ));
   const analyzer = await analyze({
-    billPdfPath: opts.billPdfPath,
-    eobPdfPath: opts.eobPdfPath,
-    billFixtureName: opts.billFixtureName,
+    bill: input.bill,
+    eob: input.eob,
+    billGroundTruth: input.billGroundTruth,
   });
 
   const appeal = generateAppealLetter(analyzer);
