@@ -1367,6 +1367,25 @@ async function handleSettings(): Promise<Response> {
 
 const PORT = Number(process.env.PORT ?? 3333);
 
+// The sample-bill flow reads fixtures/<name>.pdf, but those PDFs are
+// .gitignored build artifacts generated from fixtures/*.md by
+// scripts/make-fixture-pdfs.ts. On a fresh clone they don't exist yet,
+// which silently breaks the "Try a sample →" onboarding affordance.
+// Regenerate any missing PDFs at startup so the feature auto-heals.
+try {
+  const { generateFixturePdfs } = await import("../scripts/make-fixture-pdfs.ts");
+  const { generated } = await generateFixturePdfs({ onlyMissing: true });
+  if (generated.length > 0) {
+    console.log(`[fixtures] generated ${generated.length} PDF(s) from markdown: ${generated.join(", ")}`);
+  }
+} catch (err) {
+  console.warn(
+    "[fixtures] could not generate sample PDFs — 'Try a sample' may 404. " +
+      "Install Google Chrome, or run `bun run make-pdfs` manually. Error:",
+    (err as Error).message,
+  );
+}
+
 const server = Bun.serve({
   port: PORT,
   idleTimeout: 240,

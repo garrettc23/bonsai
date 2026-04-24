@@ -1407,7 +1407,7 @@ const MOCK_RECURRING_BILLS = [
     lastCheck: "3 minutes ago",
     addedAt: Date.now() - 45 * 24 * 3600 * 1000,
     balance: 187, rate: "/mo",
-    category: "Cell phone/Landline",
+    category: "Cell phone",
     score: 58,
     auto: true,
   },
@@ -1417,7 +1417,7 @@ const MOCK_RECURRING_BILLS = [
     lastCheck: "18 minutes ago",
     addedAt: Date.now() - 12 * 24 * 3600 * 1000,
     balance: 159, rate: "/mo",
-    category: "Cable/Internet",
+    category: "Internet",
     score: 32,
     auto: true,
   },
@@ -1450,6 +1450,16 @@ const MOCK_RECURRING_BILLS = [
     category: "Car insurance",
     score: 44,
     auto: true,
+  },
+  {
+    id: "mock-other-1", kind: "other", vendor: "Planet Fitness",
+    account: "Black Card · annual renewal",
+    lastCheck: "6 hours ago",
+    addedAt: Date.now() - 20 * 24 * 3600 * 1000,
+    balance: 25, rate: "/mo",
+    category: "Other",
+    score: 66,
+    auto: false,
   },
 ];
 // Fill in derived scoreLabel so existing callers that reference row.scoreLabel keep working.
@@ -1808,13 +1818,13 @@ function relTime(ms) {
 
 function inferCategory(a) {
   const n = (a.provider_name ?? a.name ?? "").toLowerCase();
-  // Cell phone / landline
+  // Cell phone
   if (/verizon|at&?t|t-?mobile|sprint|mint mobile|cricket|metro|visible|us cellular|xfinity mobile|google fi|boost/.test(n)) {
-    return "Cell phone/Landline";
+    return "Cell phone";
   }
-  // Cable / internet
+  // Internet
   if (/comcast|xfinity|spectrum|cox|optimum|fios|frontier|wow|cablevision|directv|dish/.test(n)) {
-    return "Cable/Internet";
+    return "Internet";
   }
   // Security system
   if (/adt|simplisafe|ring|vivint|frontpoint|brinks|xfinity home|abode|cove/.test(n)) {

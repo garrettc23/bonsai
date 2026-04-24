@@ -5,7 +5,7 @@
  * Run once after creating or editing markdown fixtures.
  */
 import { marked } from "marked";
-import { readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -41,26 +41,58 @@ function wrapHtml(body: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>${body}</body></html>`;
 }
 
-const mdFiles = readdirSync(FIXTURES_DIR).filter((f) => f.endsWith(".md"));
-if (mdFiles.length === 0) {
-  console.error("No .md fixtures found in", FIXTURES_DIR);
-  process.exit(1);
+export interface GenerateFixturePdfsOptions {
+  /** When true, skip markdown files whose matching PDF already exists. */
+  onlyMissing?: boolean;
 }
 
-for (const name of mdFiles) {
-  const src = join(FIXTURES_DIR, name);
-  const pdfDst = join(FIXTURES_DIR, name.replace(/\.md$/, ".pdf"));
-
-  // Strip YAML front matter (Chrome doesn't care about md-to-pdf config).
-  const raw = readFileSync(src, "utf8").replace(/^---[\s\S]*?---\n/, "");
-  const html = wrapHtml(marked.parse(raw) as string);
-
-  // Write a temp HTML file; Chrome prints from file URLs.
-  const htmlPath = join(tmpdir(), `bill-agent-${Date.now()}-${name}.html`);
-  writeFileSync(htmlPath, html, "utf8");
-
-  await $`${CHROME} --headless --disable-gpu --no-pdf-header-footer --print-to-pdf=${pdfDst} ${`file://${htmlPath}`}`.quiet();
-  rmSync(htmlPath, { force: true });
-  console.log(`  ${name}  →  ${name.replace(/\.md$/, ".pdf")}`);
+export interface GenerateFixturePdfsResult {
+  generated: string[];
+  skipped: string[];
 }
-console.log("Done.");
+
+export async function generateFixturePdfs(
+  opts: GenerateFixturePdfsOptions = {},
+): Promise<GenerateFixturePdfsResult> {
+  const generated: string[] = [];
+  const skipped: string[] = [];
+  const mdFiles = readdirSync(FIXTURES_DIR).filter((f) => f.endsWith(".md"));
+
+  for (const name of mdFiles) {
+    const src = join(FIXTURES_DIR, name);
+    const pdfDst = join(FIXTURES_DIR, name.replace(/\.md$/, ".pdf"));
+
+    if (opts.onlyMissing && existsSync(pdfDst)) {
+      skipped.push(name);
+      continue;
+    }
+
+    // Strip YAML front matter (Chrome doesn't care about md-to-pdf config).
+    const raw = readFileSync(src, "utf8").replace(/^---[\s\S]*?---\n/, "");
+    const html = wrapHtml(marked.parse(raw) as string);
+
+    // Write a temp HTML file; Chrome prints from file URLs.
+    const htmlPath = join(tmpdir(), `bill-agent-${Date.now()}-${name}.html`);
+    writeFileSync(htmlPath, html, "utf8");
+
+    await $`${CHROME} --headless --disable-gpu --no-pdf-header-footer --print-to-pdf=${pdfDst} ${`file://${htmlPath}`}`.quiet();
+    rmSync(htmlPath, { force: true });
+    generated.push(name);
+  }
+
+  return { generated, skipped };
+}
+
+// Script entry point: convert every markdown fixture, overwriting existing PDFs.
+if (import.meta.main) {
+  const mdFiles = readdirSync(FIXTURES_DIR).filter((f) => f.endsWith(".md"));
+  if (mdFiles.length === 0) {
+    console.error("No .md fixtures found in", FIXTURES_DIR);
+    process.exit(1);
+  }
+  const { generated } = await generateFixturePdfs({ onlyMissing: false });
+  for (const name of generated) {
+    console.log(`  ${name}  →  ${name.replace(/\.md$/, ".pdf")}`);
+  }
+  console.log("Done.");
+}
