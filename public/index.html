@@ -22,7 +22,7 @@
         </div>
         <nav class="nav">
           <button class="nav-item active" data-nav="overview">
-            <span class="nav-ic" data-icon="home"></span><span>Overview</span>
+            <span class="nav-ic" data-icon="home"></span><span>Home</span>
             <span class="nav-count" id="nav-approval-count" hidden>0</span>
           </button>
           <button class="nav-item" data-nav="bills">
@@ -30,7 +30,7 @@
             <span class="nav-count" id="nav-bills-count">0</span>
           </button>
           <button class="nav-item" data-nav="offers">
-            <span class="nav-ic" data-icon="sparkle"></span><span>Offers</span>
+            <span class="nav-ic" data-icon="sparkle"></span><span>Comparison</span>
             <span class="nav-count soft" id="nav-offers-count">0</span>
           </button>
           <button class="nav-item" data-nav="settings">
@@ -49,8 +49,8 @@
       <main class="main">
         <header class="page-header" id="page-header">
           <div class="page-header-lead">
-            <div class="eyebrow" id="ph-eyebrow">Bill audit &amp; negotiation</div>
-            <h1 class="page-title" id="ph-title">Audit &amp; negotiate any bill.</h1>
+            <div class="eyebrow" id="ph-eyebrow" hidden></div>
+            <h1 class="page-title" id="ph-title"></h1>
           </div>
           <div class="page-header-stats" id="ph-stats"></div>
         </header>
@@ -74,15 +74,29 @@
                 <div class="dz-icon" aria-hidden="true">
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="15"/></svg>
                 </div>
-                <div class="dz-title">Drop any bill. We'll get it to the lowest price possible.</div>
-                <div class="dz-sub">Medical, dental, utilities, subscriptions, legal, contractor invoices. Bonsai reads it, flags every overcharge, and negotiates <em>by email, text, and phone</em> — persistently, until it hits the floor.</div>
+                <div class="dz-title">Drop any bill. We get you the lowest price possible while you sleep.</div>
+                <div class="dz-sub">Every expense in your life, from medical to insurance to subscriptions, automatically negotiated until you're paying the lowest price possible.</div>
                 <form id="upload-form" class="dz-form">
                   <label class="file-field file-field-full">
-                    <input type="file" name="bill" accept="application/pdf" required />
+                    <input type="file" name="bill" multiple required />
                   </label>
                 </form>
+                <div class="dz-staging" id="dz-staging" hidden>
+                  <div class="dz-staging-head">
+                    <div class="eyebrow">Uploaded <span id="dz-staging-count">0</span> of 10</div>
+                    <div class="dz-staging-hint">Drag more files or click below. All pages will be audited together.</div>
+                  </div>
+                  <div class="dz-staging-grid" id="dz-staging-grid"></div>
+                  <div class="dz-staging-actions">
+                    <label class="dz-add-more" id="dz-add-more">
+                      <input type="file" id="dz-add-input" multiple hidden />
+                      <span>+ Add more files</span>
+                    </label>
+                    <button type="button" id="dz-next" class="btn btn-primary">Next → audit the bill</button>
+                  </div>
+                </div>
                 <div class="dz-sample-row">
-                  <span>No bill to hand?</span>
+                  <span>No bill handy?</span>
                   <button id="run-fixture" class="dz-sample-link" type="button">Try a sample &nbsp;→</button>
                   <select id="fixture" class="dz-sample-link-select" aria-label="Sample bill" hidden></select>
                   <select id="channel" class="dz-sample-link-select" aria-label="Channel" hidden>
@@ -94,12 +108,11 @@
               <div class="intake-aside">
                 <div class="eyebrow">How Bonsai works</div>
                 <ol class="how-list">
-                  <li><span class="how-num">01</span><div><div class="how-t">Extract</div><div class="how-s">Claude reads the bill (and any supporting docs), returns a grounded, line-item audit.</div></div></li>
-                  <li><span class="how-num">02</span><div><div class="how-t">Audit</div><div class="how-s">Overlap-aware totals. Only <em>duplicate</em>, <em>denied</em>, and <em>balance billing</em> ship as HIGH confidence.</div></div></li>
-                  <li><span class="how-num">03</span><div><div class="how-t">Negotiate</div><div class="how-s">High-stakes disputes go to voice. Everything else runs by email or text — Bonsai keeps pushing until it hits the floor.</div></div></li>
-                  <li><span class="how-num">04</span><div><div class="how-t">Finalize</div><div class="how-s">Signed report. Audit trail you can hand to anyone who asks.</div></div></li>
+                  <li><span class="how-num">01</span><div><div class="how-t">Read</div><div class="how-s">Drop any bill. Bonsai reads every line item and flags what doesn't look right.</div></div></li>
+                  <li><span class="how-num">02</span><div><div class="how-t">Check</div><div class="how-s">We compare your bill to what others pay, dig through the provider's own terms, and find every discount, loophole, and policy you qualify for.</div></div></li>
+                  <li><span class="how-num">03</span><div><div class="how-t">Negotiate</div><div class="how-s">Bonsai autonomously disputes by emailing or calling your provider to get you the lowest price possible.</div></div></li>
+                  <li><span class="how-num">04</span><div><div class="how-t">Report</div><div class="how-s">You get a lower bill and a full paper trail. Hundreds saved, zero work.</div></div></li>
                 </ol>
-                <div class="aside-hint">Works on any bill. Optimized today for medical claims — cross-references bill and EOB line-by-line.</div>
               </div>
             </div>
           </div>
@@ -124,46 +137,64 @@
             </div>
           </div>
 
-          <!-- REVIEW : audit finished, user reviews findings + plan, asks questions, approves -->
+          <!-- REVIEW : post-audit receipt + opportunities + accept/customize -->
           <div class="view view-review hidden" id="view-review">
             <div class="review-head">
-              <div class="eyebrow">Audit complete · review the plan</div>
+              <div class="eyebrow">Audit complete</div>
               <h2 class="review-title" id="review-title">Here's what we found.</h2>
               <p class="review-sub" id="review-sub">—</p>
             </div>
 
-            <div class="review-grid">
-              <section class="review-findings card">
-                <div class="eyebrow">Findings</div>
-                <div class="findings-sub mono" id="review-findings-sub">—</div>
-                <div id="review-findings-list"></div>
-              </section>
-
-              <section class="review-plan card">
-                <div class="eyebrow">Plan of attack</div>
-                <div class="plan-title" id="review-plan-title">—</div>
-                <p class="plan-reason" id="review-plan-reason">—</p>
-                <ul class="plan-steps" id="review-plan-steps"></ul>
-
-                <div class="plan-edit" hidden id="review-plan-edit-block">
-                  <label class="eyebrow" for="review-plan-edit">Your edits to the plan</label>
-                  <textarea id="review-plan-edit" rows="4" placeholder="e.g. Skip voice — email only. Floor is $400, not $600."></textarea>
+            <div class="review-split">
+              <!-- LEFT: Receipt — the bill as Bonsai read it -->
+              <section class="receipt card">
+                <div class="receipt-head">
+                  <div>
+                    <div class="eyebrow">Bill</div>
+                    <div class="receipt-provider" id="receipt-provider">—</div>
+                    <div class="receipt-meta mono" id="receipt-meta">—</div>
+                  </div>
+                  <button type="button" id="review-view-bill-btn" class="btn btn-ghost btn-tight" title="View the uploaded file">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    <span>View file</span>
+                  </button>
                 </div>
+                <ul class="receipt-items" id="receipt-items"></ul>
+                <div class="receipt-totals" id="receipt-totals"></div>
               </section>
 
-              <section class="review-qa card">
-                <div class="eyebrow">Ask a question</div>
-                <div class="qa-log" id="review-qa-log"></div>
-                <form class="qa-form" id="review-qa-form">
-                  <input type="text" id="review-qa-input" placeholder="What does 'balance billing' mean for this bill?" autocomplete="off" />
-                  <button type="submit" class="btn btn-ghost">Ask</button>
-                </form>
+              <!-- RIGHT: Opportunities — strategies + total we think we can save -->
+              <section class="opps card">
+                <div class="opps-head">
+                  <div>
+                    <div class="eyebrow">Opportunities to lower this bill</div>
+                    <div class="opps-title">We think we can save you</div>
+                  </div>
+                  <div class="opps-total" id="opps-total">—</div>
+                </div>
+                <ul class="opps-list" id="opps-list"></ul>
               </section>
             </div>
 
+            <!-- Plan customization + ask: a single chat panel below. -->
+            <section class="review-chat card">
+              <div class="review-chat-head">
+                <div>
+                  <div class="eyebrow">Customize the plan</div>
+                  <div class="review-chat-sub">Accept below to start, or tell Bonsai what to change or ask anything about the bill.</div>
+                </div>
+              </div>
+              <div class="qa-log" id="review-plan-chat-log"></div>
+              <form class="qa-form qa-form-chat" id="review-plan-chat-form">
+                <input type="text" id="review-plan-chat-input" placeholder="e.g. 'Skip voice, email only' · 'What's the biggest error?' · 'Floor is $400'" autocomplete="off" />
+                <button type="submit" class="qa-send" aria-label="Send">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                </button>
+              </form>
+            </section>
+
             <div class="review-actions">
-              <button id="review-edit-btn" class="btn btn-ghost">Edit plan</button>
-              <button id="review-approve-btn" class="btn btn-primary">Approve &amp; run negotiation</button>
+              <button id="review-approve-btn" class="btn btn-primary">Accept &amp; start the plan</button>
             </div>
           </div>
 
@@ -239,9 +270,9 @@
           <!-- BILLS -->
           <div class="view view-bills hidden" id="view-bills">
             <div class="bills-stats" id="bills-stats"></div>
-            <div class="live-indicator">
+            <div class="live-indicator" hidden>
               <span class="pulse-dot"></span>
-              <span id="bills-live-text">Continuously price-checking your bills</span>
+              <span id="bills-live-text"></span>
             </div>
             <div class="bills-filters" id="bills-filters">
               <div class="filter-field">
@@ -288,10 +319,15 @@
             <div class="bills-table">
               <div class="bills-row bills-header">
                 <div>Bill</div>
-                <div>Balance</div>
+                <div>Amount</div>
                 <div>Category</div>
-                <div>Price score</div>
-                <div>Auto-negotiate</div>
+                <div class="with-help">
+                  <span>Price score</span>
+                  <span class="help-tip" tabindex="0" aria-label="Price score — compared to peers. 100 = you're paying the best price. 0 = greatly overpaying vs. benchmarks.">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                    <span class="help-tip-bubble">Compared to peers. <strong>100</strong> means you're paying the best price. <strong>0</strong> means greatly overpaying vs. benchmarks.</span>
+                  </span>
+                </div>
                 <div></div>
               </div>
               <div id="bills-rows"></div>
@@ -302,7 +338,7 @@
           <div class="view view-offers hidden" id="view-offers">
             <div class="live-indicator">
               <span class="pulse-dot"></span>
-              <span id="offers-live-text">Agent hunting alternative coverage, charity care, and prescription discounts</span>
+              <span id="offers-live-text">Agent hunting alternatives, discounts, and loopholes across your bills</span>
             </div>
             <div class="offers-banner">
               <div class="banner-lead">
@@ -329,7 +365,6 @@
     <aside class="drawer" id="bill-drawer" hidden aria-hidden="true">
       <header class="drawer-head">
         <div class="drawer-head-lead">
-          <div class="eyebrow" id="drawer-eyebrow">Bill record</div>
           <h2 class="drawer-title" id="drawer-title">—</h2>
           <div class="drawer-sub mono" id="drawer-sub">—</div>
         </div>
@@ -338,14 +373,68 @@
         </button>
       </header>
       <div class="drawer-stats" id="drawer-stats"></div>
+      <div class="drawer-controls">
+        <label class="drawer-control">
+          <span class="eyebrow">Negotiation Frequency</span>
+          <select id="drawer-frequency" class="drawer-select">
+            <option value="once">One-time</option>
+            <option value="monthly" selected>Monthly</option>
+            <option value="quarterly">Quarterly</option>
+            <option value="semiannually">Semi-annually</option>
+            <option value="annually">Annually</option>
+          </select>
+        </label>
+        <button type="button" id="drawer-agent-btn" class="drawer-agent-btn" hidden></button>
+      </div>
+      <div class="drawer-feedback" id="drawer-feedback" hidden>
+        <div class="drawer-feedback-head">
+          <div class="eyebrow">Feedback for next round</div>
+          <div class="drawer-feedback-sub">The agent's paused on this bill. Tell it what to change — it'll apply your notes on resume.</div>
+        </div>
+        <div class="qa-log" id="drawer-feedback-log"></div>
+        <form class="qa-form qa-form-chat" id="drawer-feedback-form">
+          <input type="text" id="drawer-feedback-input" placeholder="e.g. 'Stop being aggressive' · 'Only email, no calls' · 'Don't mention my hardship yet'" autocomplete="off" />
+          <button type="submit" class="qa-send" aria-label="Send feedback">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+          </button>
+        </form>
+      </div>
       <nav class="drawer-tabs">
         <button class="drawer-tab active" data-dtab="activity">Activity</button>
-        <button class="drawer-tab" data-dtab="findings">Findings</button>
         <button class="drawer-tab" data-dtab="messages">Messages</button>
-        <button class="drawer-tab" data-dtab="report">Report</button>
       </nav>
       <div class="drawer-body" id="drawer-body"></div>
     </aside>
+
+    <!-- Bill viewer: modal that shows the uploaded bill files -->
+    <div class="bill-viewer-scrim" id="bill-viewer-scrim" hidden></div>
+    <aside class="bill-viewer" id="bill-viewer" hidden aria-hidden="true" role="dialog" aria-label="Uploaded bill">
+      <header class="bill-viewer-head">
+        <div>
+          <div class="eyebrow">Uploaded bill</div>
+          <h2 class="bill-viewer-title" id="bill-viewer-title">—</h2>
+          <div class="bill-viewer-sub mono" id="bill-viewer-sub">—</div>
+        </div>
+        <button class="drawer-close" id="bill-viewer-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </header>
+      <nav class="bill-viewer-tabs" id="bill-viewer-tabs"></nav>
+      <div class="bill-viewer-body" id="bill-viewer-body"></div>
+    </aside>
+
+    <!-- Confirm delete modal -->
+    <div class="confirm-scrim" id="confirm-scrim" hidden></div>
+    <div class="confirm-modal" id="confirm-modal" hidden role="dialog" aria-labelledby="confirm-title">
+      <div class="confirm-body">
+        <h3 class="confirm-title" id="confirm-title">Delete this bill?</h3>
+        <p class="confirm-sub" id="confirm-sub">This removes the audit, appeal letter, and uploaded files. Can't be undone.</p>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirm-ok">Delete</button>
+      </div>
+    </div>
 
     <script src="/assets/app.js"></script>
   </body>

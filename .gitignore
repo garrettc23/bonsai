@@ -10,3 +10,4 @@ fixtures/*.pdf
 
 # Runtime artifacts — negotiation threads, call transcripts, reports
 out/
+.gstack/

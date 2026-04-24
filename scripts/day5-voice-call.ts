@@ -14,13 +14,9 @@
  *   bun run day5 bill-001 eob-001 voicemail
  */
 import "../src/env.ts";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { analyze } from "../src/analyzer.ts";
+import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 import { simulateCall, type RepPersona } from "../src/voice/simulator.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FIXTURES_DIR = join(__dirname, "..", "fixtures");
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";
@@ -28,11 +24,7 @@ const persona = (process.argv[4] as RepPersona) ?? "cooperative";
 
 console.log(`Bonsai voice call simulator — ${billName}/${eobName} rep=${persona}\n`);
 
-const analyzer = await analyze({
-  billPdfPath: join(FIXTURES_DIR, `${billName}.pdf`),
-  eobPdfPath: join(FIXTURES_DIR, `${eobName}.pdf`),
-  billFixtureName: billName,
-});
+const analyzer = await analyze(await loadFixtureAnalyzeInput(billName, eobName));
 
 console.log(`Analyzer: ${analyzer.summary.headline}`);
 console.log(`  HIGH=$${analyzer.summary.high_confidence_total.toFixed(2)} errors=${analyzer.errors.length}\n`);

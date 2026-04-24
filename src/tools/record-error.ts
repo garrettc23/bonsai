@@ -13,6 +13,15 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { BillingError, HIGH_CONFIDENCE_TYPES, type ErrorType, type Confidence } from "../types.ts";
 import { quoteAppearsIn, type GroundTruth } from "../lib/ground-truth.ts";
 
+/**
+ * Normalize line_quote for dedup comparison: collapse whitespace, lowercase.
+ * Keeps the surface form distinct enough to catch the common case where
+ * Claude double-records the same line.
+ */
+function normalizeQuote(s: string): string {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 export const RECORD_ERROR_TOOL: Anthropic.Tool = {
   name: "record_error",
   description:
@@ -99,6 +108,7 @@ export interface RecordErrorResult {
 export function executeRecordError(
   input: unknown,
   billGroundTruth: GroundTruth,
+  existing: readonly BillingError[] = [],
 ): RecordErrorResult {
   const parsed = BillingError.safeParse(input);
   if (!parsed.success) {
@@ -123,6 +133,26 @@ export function executeRecordError(
     return {
       accepted: false,
       reason: grounding.reason ?? "line_quote not grounded in bill",
+    };
+  }
+
+  // Dedup: reject a second call that names the same bill line with the same
+  // error_type. For a "duplicate" finding in particular, Claude often tries
+  // to record both occurrences of the CPT separately — but one finding
+  // already captures the whole dispute, so the second call is noise that
+  // would inflate the negotiable list.
+  const newQuote = normalizeQuote(err.line_quote);
+  const newCpt = (err.cpt_code ?? "").toUpperCase();
+  const dup = existing.find(
+    (e) =>
+      e.error_type === err.error_type &&
+      ((e.cpt_code ?? "").toUpperCase() === newCpt && newCpt !== "" ||
+        normalizeQuote(e.line_quote) === newQuote),
+  );
+  if (dup) {
+    return {
+      accepted: false,
+      reason: `Already recorded. An error of type "${err.error_type}" for this line (${err.cpt_code ?? "no-cpt"}) is on file from an earlier record_error call. One finding is enough — we will negotiate it as a single line.`,
     };
   }
 

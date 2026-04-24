@@ -60,6 +60,19 @@ export function loadGroundTruth(fixtureName: string): GroundTruth {
 }
 
 /**
+ * Build a GroundTruth from already-extracted text (e.g. a Claude transcript
+ * of an uploaded image/PDF). Same grounding contract as loadGroundTruth —
+ * every record_error line_quote will be checked against `text`.
+ */
+export function groundTruthFromText(text: string, source: string): GroundTruth {
+  return {
+    text,
+    normalized: normalize(text),
+    source,
+  };
+}
+
+/**
  * Check whether a quoted string appears in the ground truth.
  * Returns `{ found: true }` on success, or `{ found: false, reason }` on failure.
  *

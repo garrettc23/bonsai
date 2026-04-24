@@ -16,25 +16,18 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyze } from "../src/analyzer.ts";
 import { generateAppealLetter } from "../src/appeal-letter.ts";
+import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
-const FIXTURES_DIR = join(ROOT, "fixtures");
 const OUT_DIR = join(ROOT, "out");
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";
 
-const billPdfPath = join(FIXTURES_DIR, `${billName}.pdf`);
-const eobPdfPath = join(FIXTURES_DIR, `${eobName}.pdf`);
-
 console.log(`Bonsai appeal letter — ${billName}.pdf vs ${eobName}.pdf\n`);
 
-const result = await analyze({
-  billPdfPath,
-  eobPdfPath,
-  billFixtureName: billName,
-});
+const result = await analyze(await loadFixtureAnalyzeInput(billName, eobName));
 
 const rule = "─".repeat(72);
 console.log(rule);
