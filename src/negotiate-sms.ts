@@ -26,6 +26,8 @@ import type { SmsClient, OutboundSms, SentSms, InboundSms } from "./clients/sms.
 import type { AnalyzerResult } from "./types.ts";
 import { loadSmsThread } from "./clients/sms-mock.ts";
 import { newSmsId } from "./clients/sms.ts";
+import type { AgentTone } from "./lib/user-settings.ts";
+import { toneGuidance } from "./lib/feedback-parser.ts";
 
 const MODEL = "claude-sonnet-4-5";
 const MAX_TOKENS = 1024;
@@ -46,6 +48,25 @@ export interface SmsNegotiationState {
   final_acceptable_floor: number;
   last_seen_inbound_ts: string;
   outcome: SmsNegotiationOutcome;
+  user_directives?: string;
+  agent_tone?: AgentTone;
+}
+
+function buildSmsSystemPrompt(
+  state: Pick<SmsNegotiationState, "user_directives" | "agent_tone">,
+): string {
+  const parts: string[] = [SYSTEM_PROMPT];
+  if (state.agent_tone) {
+    parts.push(
+      `\n\n## User-specified tone: ${state.agent_tone}\n\n${toneGuidance(state.agent_tone)}`,
+    );
+  }
+  if (state.user_directives && state.user_directives.trim()) {
+    parts.push(
+      `\n\n## User directives (from the patient — must be honored)\n\n${state.user_directives.trim()}`,
+    );
+  }
+  return parts.join("");
 }
 
 const SYSTEM_PROMPT = `You are Bonsai, a medical-billing negotiator texting with a hospital billing department on behalf of a patient. Your goal: reduce the patient's balance to the EOB-stated patient responsibility, or as close as possible without exceeding final_acceptable_floor.
@@ -193,6 +214,8 @@ export interface StartSmsOpts {
   patient_phone: string;
   provider_phone: string;
   final_acceptable_floor?: number;
+  user_directives?: string;
+  agent_tone?: AgentTone;
   anthropic?: Anthropic;
 }
 
@@ -221,12 +244,13 @@ export async function startSmsNegotiation(opts: StartSmsOpts): Promise<StartSmsR
     },
   ];
 
+  const openerState = { user_directives: opts.user_directives, agent_tone: opts.agent_tone };
   let opener: SentSms | null = null;
   for (let turn = 0; turn < 2; turn++) {
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: buildSmsSystemPrompt(openerState),
       tools: [SEND_SMS_TOOL],
       tool_choice: { type: "tool", name: "send_sms" },
       messages,
@@ -262,6 +286,8 @@ export async function startSmsNegotiation(opts: StartSmsOpts): Promise<StartSmsR
     final_acceptable_floor: floor,
     last_seen_inbound_ts: new Date(0).toISOString(),
     outcome: { status: "in_progress" },
+    user_directives: opts.user_directives,
+    agent_tone: opts.agent_tone,
   };
   return { thread_id, sent: opener, state };
 }
@@ -303,7 +329,7 @@ export async function stepSmsNegotiation(opts: StepSmsOpts): Promise<SmsNegotiat
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: buildSmsSystemPrompt(state),
       tools: [SEND_SMS_TOOL, MARK_RESOLVED_TOOL, ESCALATE_HUMAN_TOOL, ESCALATE_TO_VOICE_TOOL],
       messages,
     });

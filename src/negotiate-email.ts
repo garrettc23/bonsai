@@ -26,6 +26,8 @@ import type { AnalyzerResult } from "./types.ts";
 import { generateAppealLetter } from "./appeal-letter.ts";
 import { loadThread, saveThread } from "./clients/email-mock.ts";
 import { newId } from "./clients/email.ts";
+import type { AgentTone } from "./lib/user-settings.ts";
+import { toneGuidance } from "./lib/feedback-parser.ts";
 
 const MODEL = "claude-sonnet-4-5";
 const MAX_TOKENS = 2048;
@@ -46,6 +48,27 @@ export interface NegotiationState {
   /** History of message ids seen, to drive loop termination. */
   last_seen_inbound_ts: string;
   outcome: NegotiationOutcome;
+  /** Free-form user directives from the feedback drawer (e.g. "only email, no
+   * calls", "don't mention hardship yet"). Prepended to the system prompt on
+   * every turn so the agent actually honors them. */
+  user_directives?: string;
+  /** Tone the user asked the agent to strike. Adjusts system prompt wording. */
+  agent_tone?: AgentTone;
+}
+
+function buildSystemPrompt(state: Pick<NegotiationState, "user_directives" | "agent_tone">): string {
+  const parts: string[] = [SYSTEM_PROMPT];
+  if (state.agent_tone) {
+    parts.push(
+      `\n\n## User-specified tone: ${state.agent_tone}\n\n${toneGuidance(state.agent_tone)}`,
+    );
+  }
+  if (state.user_directives && state.user_directives.trim()) {
+    parts.push(
+      `\n\n## User directives (from the patient — must be honored)\n\n${state.user_directives.trim()}`,
+    );
+  }
+  return parts.join("");
 }
 
 const SYSTEM_PROMPT = `You are Bonsai, a medical-billing negotiator acting on behalf of a patient. You exchange email with a hospital billing department over multiple rounds. Your single goal: reduce the patient's balance due to no more than the EOB-stated patient responsibility, plus legitimately un-disputed charges.
@@ -198,6 +221,8 @@ export interface StartOpts {
   patient_email: string;
   provider_email: string;
   final_acceptable_floor?: number; // defaults to eob patient responsibility
+  user_directives?: string;
+  agent_tone?: AgentTone;
 }
 
 export interface StartResult {
@@ -234,6 +259,8 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     final_acceptable_floor: floor,
     last_seen_inbound_ts: new Date(0).toISOString(),
     outcome: { status: "in_progress" },
+    user_directives: opts.user_directives,
+    agent_tone: opts.agent_tone,
   };
   return { thread_id, sent, state };
 }
@@ -281,7 +308,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
     const response = await anthropic.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(state),
       tools: [SEND_EMAIL_TOOL, MARK_RESOLVED_TOOL, ESCALATE_HUMAN_TOOL],
       messages,
     });

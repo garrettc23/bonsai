@@ -73,6 +73,12 @@ export interface RunBonsaiOpts {
   final_acceptable_floor?: number;
   max_email_rounds?: number;
   max_sms_rounds?: number;
+  /** Per-run channel gating. Overrides default email→sms→voice order. */
+  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  /** Free-form user directives piped into every negotiator's system prompt. */
+  user_directives?: string;
+  /** Tone the user asked the agent to strike. */
+  agent_tone?: "polite" | "firm" | "aggressive";
 }
 
 export interface ThreadMessage {
@@ -220,6 +226,9 @@ export async function runNegotiationPhase(
       final_acceptable_floor: opts.final_acceptable_floor,
       max_email_rounds: opts.max_email_rounds,
       max_sms_rounds: opts.max_sms_rounds,
+      channels_enabled: opts.channels_enabled,
+      user_directives: opts.user_directives,
+      agent_tone: opts.agent_tone,
     });
     report.persistent_run = run;
     // Surface the transcripts in the existing thread fields so the current
@@ -260,6 +269,8 @@ export async function runNegotiationPhase(
       patient_email: patientEmail,
       provider_email: providerEmail,
       final_acceptable_floor: opts.final_acceptable_floor,
+      user_directives: opts.user_directives,
+      agent_tone: opts.agent_tone,
     });
     let state = initState;
     saveNegotiationState(state);
@@ -316,6 +327,8 @@ export async function runNegotiationPhase(
       patient_phone: patientPhone,
       provider_phone: providerPhone,
       final_acceptable_floor: opts.final_acceptable_floor,
+      user_directives: opts.user_directives,
+      agent_tone: opts.agent_tone,
     });
     let smsState = initSmsState;
     saveSmsNegotiationState(smsState);

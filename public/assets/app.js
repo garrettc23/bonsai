@@ -28,6 +28,7 @@ const NAV_ICONS = {
   home: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9"/><path d="M5 10v10h14V10"/></svg>',
   inbox: ICONS.inbox,
   sparkle: ICONS.sparkle,
+  user: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
   gear: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
 };
 
@@ -86,7 +87,7 @@ function showNav(name) {
     n.classList.toggle("active", n.dataset.nav === name);
   }
   // Hide every view; the nav-specific ones get revealed below
-  for (const v of ["overview", "progress", "review", "results", "error", "bills", "offers", "settings"]) {
+  for (const v of ["overview", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
     $(`#view-${v}`)?.classList.add("hidden");
   }
   if (name === "overview") {
@@ -104,6 +105,9 @@ function showNav(name) {
     renderOffers();
     markOffersSeen();
     updateNavCounts();
+  } else if (name === "profile") {
+    $("#view-profile").classList.remove("hidden");
+    renderProfile();
   } else if (name === "settings") {
     $("#view-settings").classList.remove("hidden");
     renderSettings();
@@ -610,7 +614,7 @@ async function runAndRender(fn) {
   setWorkflowView("progress");
   updatePageHeader({
     eyebrow: "Run in progress",
-    title: "Auditing the bill &amp; running grounded negotiation.",
+    title: "Auditing the bill &amp; running grounded negotiation",
   });
   startTimeline();
   try {
@@ -636,7 +640,7 @@ async function runPhasedFromSample(fixture, channel) {
   setWorkflowView("progress");
   updatePageHeader({
     eyebrow: "Audit in progress",
-    title: "Reading the bill &amp; finding every overcharge.",
+    title: "Reading the bill &amp; finding every overcharge",
   });
   startTimeline();
   try {
@@ -662,7 +666,7 @@ async function runPhasedFromUpload(formData) {
   setWorkflowView("progress");
   updatePageHeader({
     eyebrow: "Audit in progress",
-    title: "Reading the bill &amp; finding every overcharge.",
+    title: "Reading the bill &amp; finding every overcharge",
   });
   startTimeline();
   try {
@@ -687,7 +691,7 @@ async function runPhasedFromPrefetch(promise) {
   setWorkflowView("progress");
   updatePageHeader({
     eyebrow: "Audit in progress",
-    title: "Reading the bill &amp; finding every overcharge.",
+    title: "Reading the bill &amp; finding every overcharge",
   });
   startTimeline();
   try {
@@ -1048,13 +1052,13 @@ function resetPageHeader() {
   } else if (currentNav === "offers") {
     updatePageHeader({
       eyebrow: "Offers",
-      title: "Cheaper alternatives, found for you.",
+      title: "Cheaper alternatives, found for you",
       stats: null,
     });
   } else if (currentNav === "settings") {
     updatePageHeader({
       eyebrow: "Settings",
-      title: "Tune the agent.",
+      title: "Tune your agent",
       stats: null,
     });
   }
@@ -1106,8 +1110,8 @@ function render(report) {
   updatePageHeader({
     eyebrow: "Audit complete",
     title: report.analyzer.metadata.provider_name
-      ? `${escapeHtml(report.analyzer.metadata.provider_name)}.`
-      : "Audit results.",
+      ? escapeHtml(report.analyzer.metadata.provider_name)
+      : "Audit results",
     stats: [
       { label: "Defensible", value: fmt$2(report.analyzer.summary.high_confidence_total), tone: "green" },
       { label: "Findings", value: String(report.analyzer.errors.length) },
@@ -1891,7 +1895,7 @@ function renderOffers() {
 
   updatePageHeader({
     eyebrow: "Offers",
-    title: "Cheaper alternatives, found for you.",
+    title: "Cheaper alternatives, found for you",
     stats: [
       { label: "Opportunities", value: String(MOCK_OFFERS.length) },
       { label: "Recommended", value: String(MOCK_OFFERS.filter((o) => o.recommended).length), tone: "green" },
@@ -2054,12 +2058,293 @@ function renderHuntPanel(data) {
     </div>`;
 }
 
-// ─── Settings ──────────────────────────────────────────────────
+// Modal dialog confirming account deletion. Two-step affordance: must type
+// DELETE into the input before the confirm button enables.
+function openDeleteAccountModal() {
+  // Tear down a stale modal, if any.
+  document.querySelector("#delete-account-modal")?.remove();
+
+  const wrap = document.createElement("div");
+  wrap.id = "delete-account-modal";
+  wrap.className = "modal-scrim";
+  wrap.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-modal-title">
+      <h2 class="modal-title" id="del-modal-title">Delete your account?</h2>
+      <p class="modal-body">
+        This permanently removes every bill, EOB, appeal letter, negotiation transcript,
+        profile field, and tuning preference stored locally. We can't recover any of it.
+      </p>
+      <p class="modal-body" style="margin-top:8px">
+        Type <strong>DELETE</strong> below to confirm.
+      </p>
+      <input type="text" id="del-modal-input" class="settings-input" autocomplete="off" placeholder="DELETE" />
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="del-modal-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="del-modal-confirm" disabled style="background:var(--red,#8b1e2e)">Delete account</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const input = wrap.querySelector("#del-modal-input");
+  const confirm = wrap.querySelector("#del-modal-confirm");
+  const cancel = wrap.querySelector("#del-modal-cancel");
+
+  const close = () => wrap.remove();
+  cancel.addEventListener("click", close);
+  wrap.addEventListener("click", (ev) => {
+    if (ev.target === wrap) close();
+  });
+  document.addEventListener(
+    "keydown",
+    function onKey(ev) {
+      if (ev.key === "Escape") {
+        close();
+        document.removeEventListener("keydown", onKey);
+      }
+    },
+  );
+
+  input.addEventListener("input", () => {
+    confirm.disabled = input.value.trim() !== "DELETE";
+  });
+  setTimeout(() => input.focus(), 50);
+
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    confirm.textContent = "Deleting…";
+    try {
+      const res = await fetch("/api/account/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "DELETE" }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      close();
+      // Reload so every cached view (bills, settings, profile) reflects the wipe.
+      location.reload();
+    } catch (err) {
+      confirm.textContent = "Delete account";
+      confirm.disabled = false;
+      alert(`Delete failed: ${err?.message ?? err}`);
+    }
+  });
+}
+
+// Show a "Saved ✓" status pill, then fade it out after 3s. Used by every
+// settings-style save button so the user gets confirmation without it lingering.
+function flashSavedThenFade(statusEl) {
+  statusEl.textContent = "Saved ✓";
+  statusEl.className = "tg-save-status ok";
+  // Cancel any prior fade timer so a second save doesn't get cut short.
+  if (statusEl._fadeTimer) clearTimeout(statusEl._fadeTimer);
+  if (statusEl._clearTimer) clearTimeout(statusEl._clearTimer);
+  statusEl._fadeTimer = setTimeout(() => {
+    statusEl.classList.add("fading");
+  }, 3000);
+  statusEl._clearTimer = setTimeout(() => {
+    statusEl.textContent = "";
+    statusEl.className = "tg-save-status";
+  }, 3600);
+}
+
+// ─── Profile ──────────────────────────────────────────────────
+
+async function renderProfile() {
+  updatePageHeader({
+    eyebrow: "Profile",
+    title: "Who you are",
+    stats: null,
+  });
+  const root = $("#profile-groups");
+  root.innerHTML = '<div class="tl-sub">Loading…</div>';
+
+  let sdata;
+  try {
+    sdata = await fetch("/api/settings").then((r) => r.json());
+  } catch {
+    sdata = { profile: {} };
+  }
+  const profile = sdata.profile ?? {};
+
+  root.innerHTML = "";
+  root.appendChild(mkProfileCard(profile));
+}
+
+function mkProfileCard(p) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const authorized = !!p.authorized;
+  const hipaaAcked = !!p.hipaa_acknowledged;
+  g.innerHTML = `
+    <div class="settings-group-title">Personal details</div>
+    <div class="settings-card">
+      <div class="settings-row settings-row-split">
+        <div class="settings-row-main">
+          <div class="settings-row-label">First name</div>
+          <input type="text" id="prof-first" class="settings-input" value="${escapeHtml(p.first_name ?? "")}" placeholder="Jane" autocomplete="given-name" />
+        </div>
+        <div class="settings-row-main">
+          <div class="settings-row-label">Last name</div>
+          <input type="text" id="prof-last" class="settings-input" value="${escapeHtml(p.last_name ?? "")}" placeholder="Doe" autocomplete="family-name" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Email</div>
+          <div class="settings-row-help">Inbound replies from companies route here. Used as your contact email on every appeal.</div>
+          <input type="email" id="prof-email" class="settings-input" value="${escapeHtml(p.email ?? "")}" placeholder="you@example.com" autocomplete="email" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Mobile</div>
+          <div class="settings-row-help">Only used for real-time alerts.</div>
+          <input type="tel" id="prof-phone" class="settings-input" value="${escapeHtml(p.phone ?? "")}" placeholder="+1 (415) 555-0134" autocomplete="tel" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Address</div>
+          <div class="settings-row-help">Billing address on file. Used on appeal letters and dispute correspondence.</div>
+          <input type="text" id="prof-address" class="settings-input" value="${escapeHtml(p.address ?? "")}" placeholder="123 Main St, Apt 4, Oakland, CA 94612" autocomplete="street-address" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Date of birth</div>
+          <div class="settings-row-help">Some accounts require this to verify your identity. Never used for marketing.</div>
+          <input type="date" id="prof-dob" class="settings-input" value="${escapeHtml(p.dob ?? "")}" autocomplete="bday" />
+        </div>
+      </div>
+      <div class="settings-row settings-row-split">
+        <div class="settings-row-main">
+          <div class="settings-row-label">SSN (last 4)</div>
+          <div class="settings-row-help">Some accounts require this to pull your record. Stored locally; never shown in transcripts.</div>
+          <input type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" id="prof-ssn" class="settings-input" value="${escapeHtml(p.ssn_last4 ?? "")}" placeholder="1234" autocomplete="off" />
+        </div>
+        <div class="settings-row-main">
+          <div class="settings-row-label">Driver's license</div>
+          <div class="settings-row-help">Used when a company asks for an ID to verify identity.</div>
+          <input type="text" id="prof-dl" class="settings-input" value="${escapeHtml(p.drivers_license ?? "")}" placeholder="D1234567" autocomplete="off" />
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-group-title" style="margin-top:24px">Authorization</div>
+    <div class="settings-card">
+      <div class="settings-row settings-row-checkbox">
+        <label class="consent-row">
+          <input type="checkbox" id="prof-authorized" ${authorized ? "checked" : ""} />
+          <span>
+            <span class="settings-row-label">I authorize Bonsai to act on my behalf</span>
+            <span class="settings-row-help">
+              Includes requesting bills, negotiating balances, and contacting billing departments,
+              providers, insurers, and collections agents about the bills you upload — across medical,
+              utility, subscription, financial, and other accounts. You can revoke this at any time.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      <div class="hipaa-panel ${authorized ? "open" : ""}" id="prof-hipaa-panel">
+        <div class="hipaa-eyebrow">HIPAA Authorization</div>
+        <div class="hipaa-body">
+          <p>
+            By checking the box above, you also authorize Bonsai (the "Agent") and its operators to
+            request, receive, and use your <strong>protected health information (PHI)</strong> — including
+            itemized bills, EOBs, claim numbers, dates of service, CPT/HCPCS codes, diagnoses, treatment
+            details, and insurer correspondence — strictly for the purpose of auditing and negotiating
+            the bills you upload.
+          </p>
+          <p>
+            This authorization complies with <strong>45 CFR § 164.508</strong>. It is voluntary and
+            revocable in writing at any time, except for disclosures already made in reliance on it.
+            Bonsai will not sell your PHI, use it for marketing, or share it with parties unrelated to
+            your bill.
+          </p>
+        </div>
+        <label class="consent-row hipaa-ack">
+          <input type="checkbox" id="prof-hipaa" ${hipaaAcked ? "checked" : ""} />
+          <span>
+            <span class="settings-row-label">I acknowledge and agree to the HIPAA authorization above</span>
+            <span class="settings-row-help">Required before Bonsai can request medical records on your behalf. Signed: ${
+              p.hipaa_acknowledged_at
+                ? new Date(p.hipaa_acknowledged_at).toLocaleString()
+                : "not yet"
+            }.</span>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="settings-row" style="justify-content:flex-end;gap:10px;margin-top:16px">
+      <span id="prof-save-status" class="tg-save-status"></span>
+      <button class="btn btn-primary" id="prof-save-btn" type="button">Save profile</button>
+    </div>`;
+
+  // HIPAA panel reveals only when the main authorization box is checked.
+  // Unchecking the auth box also clears the HIPAA acknowledgment so the user
+  // re-acknowledges if they re-authorize later.
+  const authBox = g.querySelector("#prof-authorized");
+  const hipaaPanel = g.querySelector("#prof-hipaa-panel");
+  const hipaaBox = g.querySelector("#prof-hipaa");
+  authBox.addEventListener("change", () => {
+    if (authBox.checked) {
+      hipaaPanel.classList.add("open");
+    } else {
+      hipaaPanel.classList.remove("open");
+      hipaaBox.checked = false;
+    }
+  });
+
+  // SSN: digits only.
+  const ssnInput = g.querySelector("#prof-ssn");
+  ssnInput.addEventListener("input", () => {
+    ssnInput.value = ssnInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+
+  const saveBtn = g.querySelector("#prof-save-btn");
+  const status = g.querySelector("#prof-save-status");
+  saveBtn.addEventListener("click", async () => {
+    const body = {
+      first_name: g.querySelector("#prof-first").value.trim(),
+      last_name: g.querySelector("#prof-last").value.trim(),
+      email: g.querySelector("#prof-email").value.trim(),
+      phone: g.querySelector("#prof-phone").value.trim(),
+      address: g.querySelector("#prof-address").value.trim(),
+      dob: g.querySelector("#prof-dob").value.trim(),
+      ssn_last4: ssnInput.value.trim(),
+      drivers_license: g.querySelector("#prof-dl").value.trim(),
+      authorized: authBox.checked,
+      hipaa_acknowledged: hipaaBox.checked,
+    };
+    saveBtn.disabled = true;
+    status.textContent = "Saving…";
+    status.className = "tg-save-status";
+    try {
+      const res = await fetch("/api/settings/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      flashSavedThenFade(status);
+    } catch (err) {
+      status.textContent = `Error: ${err?.message ?? err}`;
+      status.className = "tg-save-status err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  return g;
+}
+
+// ─── Tune your agent ───────────────────────────────────────────
 
 async function renderSettings() {
   updatePageHeader({
     eyebrow: "Settings",
-    title: "Tune the agent.",
+    title: "Tune your agent",
     stats: null,
   });
   const root = $("#settings-groups");
@@ -2069,25 +2354,21 @@ async function renderSettings() {
   try {
     sdata = await fetch("/api/settings").then((r) => r.json());
   } catch {
-    sdata = { integrations: [], fixtures: { count: 0 }, port: 3333 };
+    sdata = { tune: {}, integrations: [], fixtures: { count: 0 }, port: 3333 };
   }
 
   root.innerHTML = "";
 
-  // Account — editable name, email + digest toggle, phone + mobile alert toggle.
-  root.appendChild(mkAccountCard(sdata.account ?? {}));
+  // Tune — tone, channels, floor, notifications.
+  const tune = mkTuneCard(sdata.tune ?? {});
+  root.appendChild(tune.el);
 
-  // Telegram — editable credentials card.
-  root.appendChild(mkTelegramCard(sdata.telegram ?? {}));
-
-  // Connected accounts — real integration statuses from /api/settings
-  const integRows = (sdata.integrations ?? [])
-    .filter((i) => i.key !== "telegram") // telegram has its own editable card above
-    .map((i) => ({
-      label: i.label,
-      help: i.detail,
-      value: mkStatusPill(i.status),
-    }));
+  // Connected accounts — read-only integration statuses.
+  const integRows = (sdata.integrations ?? []).map((i) => ({
+    label: i.label,
+    help: i.detail,
+    value: mkStatusPill(i.status),
+  }));
   if (integRows.length === 0) {
     integRows.push({ label: "No integrations detected", help: "Set ANTHROPIC_API_KEY to enable the agent.", value: mkStatusPill("missing") });
   }
@@ -2102,182 +2383,164 @@ async function renderSettings() {
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Export all data</div>
-          <div class="settings-row-help">Download every audit, letter, and transcript as a ZIP.</div>
+          <div class="settings-row-help">Download every audit, letter, and transcript as a single JSON file.</div>
         </div>
-        <button class="btn btn-ghost">Export</button>
+        <button class="btn btn-ghost" id="data-export-btn" type="button">Export</button>
       </div>
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Delete account</div>
           <div class="settings-row-help">Removes stored bills, EOBs, and negotiation history. Irreversible.</div>
         </div>
-        <button class="btn btn-ghost" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
+        <button class="btn btn-ghost" id="data-delete-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
       </div>
     </div>`;
   root.appendChild(dataGroup);
 
-  // Wire toggles
-  for (const t of root.querySelectorAll(".toggle")) {
-    t.addEventListener("click", () => t.classList.toggle("on"));
+  dataGroup.querySelector("#data-export-btn").addEventListener("click", async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = "Exporting…";
+    try {
+      const res = await fetch("/api/export");
+      if (!res.ok) throw new Error(await res.text());
+      const blob = await res.blob();
+      const cd = res.headers.get("Content-Disposition") ?? "";
+      const m = cd.match(/filename="([^"]+)"/);
+      const filename = m?.[1] ?? `bonsai-export-${new Date().toISOString().slice(0, 10)}.json`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(`Export failed: ${err?.message ?? err}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+  dataGroup.querySelector("#data-delete-btn").addEventListener("click", () => {
+    openDeleteAccountModal();
+  });
+
+  // Save row — pinned to the very bottom of the Settings page.
+  const saveRow = document.createElement("div");
+  saveRow.className = "settings-save-row";
+  saveRow.innerHTML = `
+    <span id="tune-save-status" class="tg-save-status"></span>
+    <button class="btn btn-primary" id="tune-save-btn" type="button">Save</button>`;
+  root.appendChild(saveRow);
+
+  const saveBtn = saveRow.querySelector("#tune-save-btn");
+  const status = saveRow.querySelector("#tune-save-status");
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    status.textContent = "Saving…";
+    status.className = "tg-save-status";
+    try {
+      const res = await fetch("/api/settings/tune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(tune.getValues()),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      flashSavedThenFade(status);
+    } catch (err) {
+      status.textContent = `Error: ${err?.message ?? err}`;
+      status.className = "tg-save-status err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+}
+
+function mkTuneCard(tune) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const tone = tune.tone ?? "firm";
+  const channels = tune.channels ?? { email: true, sms: true, voice: true };
+  const digestOn = tune.email_digest !== false;
+  const mobileOn = tune.mobile_alerts !== false;
+  const toneOpt = (v, label, help) =>
+    `<label class="tone-opt ${tone === v ? "tone-opt-sel" : ""}">
+       <input type="radio" name="tune-tone" value="${v}" ${tone === v ? "checked" : ""} />
+       <span class="tone-opt-label">${label}</span>
+       <span class="tone-opt-help">${help}</span>
+     </label>`;
+  g.innerHTML = `
+    <div class="settings-group-title">Negotiation style</div>
+    <div class="settings-card">
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Tone</div>
+          <div class="settings-row-help">How hard the agent pushes. You can always override per-bill in the feedback drawer.</div>
+          <div class="tone-picker">
+            ${toneOpt("polite", "Polite", "Lead with cooperation. Soft asks, patient timelines.")}
+            ${toneOpt("firm", "Firm", "Clear asks, direct deadlines. Default.")}
+            ${toneOpt("aggressive", "Aggressive", "Hard deadlines, explicit consequences (regulatory complaints, BBB, retention threats).")}
+          </div>
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Channels</div>
+          <div class="settings-row-help">Which channels the agent may use. Disabled channels are skipped entirely.</div>
+          <div class="channel-toggles">
+            <label class="channel-toggle"><input type="checkbox" id="tune-ch-email" ${channels.email !== false ? "checked" : ""} /> <span>Email</span></label>
+            <label class="channel-toggle"><input type="checkbox" id="tune-ch-sms" ${channels.sms !== false ? "checked" : ""} /> <span>SMS</span></label>
+            <label class="channel-toggle"><input type="checkbox" id="tune-ch-voice" ${channels.voice !== false ? "checked" : ""} /> <span>Voice</span></label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-group-title" style="margin-top:24px">Notifications</div>
+    <div class="settings-card">
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Weekly digest</div>
+          <div class="settings-row-help">Summary of savings + what the agent is working on, delivered to your profile email.</div>
+        </div>
+        <button type="button" class="toggle ${digestOn ? "on" : ""}" id="tune-digest" aria-label="Weekly digest"><span class="toggle-dot"></span></button>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Real-time alerts</div>
+          <div class="settings-row-help">Text alerts to your profile mobile number when the agent needs approval.</div>
+        </div>
+        <button type="button" class="toggle ${mobileOn ? "on" : ""}" id="tune-alerts" aria-label="Real-time alerts"><span class="toggle-dot"></span></button>
+      </div>
+    </div>`;
+
+  // Tone radios: keep selected-style class in sync.
+  for (const opt of g.querySelectorAll(".tone-opt")) {
+    const input = opt.querySelector("input");
+    input.addEventListener("change", () => {
+      for (const o of g.querySelectorAll(".tone-opt")) o.classList.remove("tone-opt-sel");
+      opt.classList.add("tone-opt-sel");
+    });
   }
-}
-
-function mkAccountCard(acc) {
-  const g = document.createElement("div");
-  g.className = "settings-group";
-  const digestOn = acc.email_digest !== false;
-  const mobileOn = acc.mobile_alerts !== false;
-  g.innerHTML = `
-    <div class="settings-group-title">Account</div>
-    <div class="settings-card">
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="settings-row-label">Name</div>
-          <div class="settings-row-help">Shown on appeal letters and outreach.</div>
-          <input type="text" id="acc-name" class="settings-input" value="${escapeHtml(acc.name ?? "")}" placeholder="Jane Doe" autocomplete="name" />
-        </div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="acc-label-row">
-            <div class="settings-row-label">Email</div>
-            <div class="acc-toggle-group">
-              <span class="acc-toggle-label">Weekly digest</span>
-              <button type="button" class="toggle ${digestOn ? "on" : ""}" id="acc-digest-toggle" aria-label="Email digest"></button>
-            </div>
-          </div>
-          <div class="settings-row-help">Inbound replies from providers and your weekly summary both route here.</div>
-          <input type="email" id="acc-email" class="settings-input" value="${escapeHtml(acc.email ?? "")}" placeholder="you@example.com" autocomplete="email" />
-        </div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="acc-label-row">
-            <div class="settings-row-label">Phone</div>
-            <div class="acc-toggle-group">
-              <span class="acc-toggle-label">Real-time alerts</span>
-              <button type="button" class="toggle ${mobileOn ? "on" : ""}" id="acc-mobile-toggle" aria-label="Mobile alerts"></button>
-            </div>
-          </div>
-          <div class="settings-row-help">Voice calls from the agent and real-time approval alerts both go to this number.</div>
-          <input type="tel" id="acc-phone" class="settings-input" value="${escapeHtml(acc.phone ?? "")}" placeholder="+1 (415) 555-0134" autocomplete="tel" />
-        </div>
-      </div>
-      <div class="settings-row" style="justify-content:flex-end;gap:10px">
-        <span id="acc-save-status" class="tg-save-status"></span>
-        <button class="btn btn-primary" id="acc-save-btn" type="button">Save</button>
-      </div>
-    </div>`;
-  // Toggles flip in-place; server save happens on explicit Save click.
-  g.querySelector("#acc-digest-toggle").addEventListener("click", (ev) => {
-    ev.currentTarget.classList.toggle("on");
+  // Notification toggles.
+  for (const id of ["#tune-digest", "#tune-alerts"]) {
+    g.querySelector(id).addEventListener("click", (ev) => ev.currentTarget.classList.toggle("on"));
+  }
+  const getValues = () => ({
+    tone: g.querySelector('input[name="tune-tone"]:checked')?.value ?? "firm",
+    channels: {
+      email: g.querySelector("#tune-ch-email").checked,
+      sms: g.querySelector("#tune-ch-sms").checked,
+      voice: g.querySelector("#tune-ch-voice").checked,
+    },
+    email_digest: g.querySelector("#tune-digest").classList.contains("on"),
+    mobile_alerts: g.querySelector("#tune-alerts").classList.contains("on"),
   });
-  g.querySelector("#acc-mobile-toggle").addEventListener("click", (ev) => {
-    ev.currentTarget.classList.toggle("on");
-  });
-  const saveBtn = g.querySelector("#acc-save-btn");
-  const status = g.querySelector("#acc-save-status");
-  saveBtn.addEventListener("click", async () => {
-    const body = {
-      name: g.querySelector("#acc-name").value.trim(),
-      email: g.querySelector("#acc-email").value.trim(),
-      phone: g.querySelector("#acc-phone").value.trim(),
-      email_digest: g.querySelector("#acc-digest-toggle").classList.contains("on"),
-      mobile_alerts: g.querySelector("#acc-mobile-toggle").classList.contains("on"),
-    };
-    saveBtn.disabled = true;
-    status.textContent = "Saving…";
-    status.className = "tg-save-status";
-    try {
-      const res = await fetch("/api/settings/account", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      status.textContent = "Saved ✓";
-      status.className = "tg-save-status ok";
-    } catch (err) {
-      status.textContent = `Error: ${err?.message ?? err}`;
-      status.className = "tg-save-status err";
-    } finally {
-      saveBtn.disabled = false;
-    }
-  });
-  return g;
-}
-
-function mkTelegramCard(tg) {
-  const g = document.createElement("div");
-  g.className = "settings-group";
-  const connected = !!(tg.bot_token_set && tg.chat_id_set);
-  g.innerHTML = `
-    <div class="settings-group-title">Telegram</div>
-    <div class="settings-card">
-      <div class="settings-row tg-row-help">
-        <div class="settings-row-main">
-          <div class="settings-row-label">Text your agent</div>
-          <div class="settings-row-help">
-            Get live updates on negotiations and reply to approve, stop, or ask anything.
-            <ol class="tg-help-steps">
-              <li>Open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> in Telegram → <code>/newbot</code> → follow prompts → copy the token.</li>
-              <li>Start a chat with your new bot (search for its @handle) and send any message.</li>
-              <li>Paste the token below and click Save. Bonsai will auto-detect your chat ID from your first message.</li>
-            </ol>
-          </div>
-        </div>
-        <span class="tag tag-mono ${connected ? "tag-green" : "tag-red"}">${connected ? "Connected" : "Not connected"}</span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="settings-row-label">Bot token</div>
-          <div class="settings-row-help">Keep this private. Stored locally in out/user-settings.json.</div>
-          <input type="password" id="tg-bot-token" class="settings-input" placeholder="${tg.bot_token_set ? "•••••••• (already set — paste to replace)" : "123456:ABC-…"}" autocomplete="off" />
-        </div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="settings-row-label">Chat ID</div>
-          <div class="settings-row-help">Your personal chat with the bot. Leave blank and send the bot a message — we'll fill this in automatically on first message.</div>
-          <input type="text" id="tg-chat-id" class="settings-input" value="${escapeHtml(tg.chat_id_preview ?? "")}" placeholder="123456789" autocomplete="off" />
-        </div>
-      </div>
-      <div class="settings-row" style="justify-content:flex-end;gap:10px">
-        <span id="tg-save-status" class="tg-save-status"></span>
-        <button class="btn btn-primary" id="tg-save-btn" type="button">Save</button>
-      </div>
-    </div>`;
-  // Wire save handler
-  const saveBtn = g.querySelector("#tg-save-btn");
-  const status = g.querySelector("#tg-save-status");
-  saveBtn.addEventListener("click", async () => {
-    const botTokenInput = g.querySelector("#tg-bot-token").value.trim();
-    const chatIdInput = g.querySelector("#tg-chat-id").value.trim();
-    saveBtn.disabled = true;
-    status.textContent = "Saving…";
-    status.className = "tg-save-status";
-    try {
-      const body = {};
-      if (botTokenInput) body.botToken = botTokenInput;
-      // Chat ID: explicitly send (even if blank — allows clearing).
-      body.chatId = chatIdInput;
-      const res = await fetch("/api/settings/telegram", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      status.textContent = "Saved ✓";
-      status.className = "tg-save-status ok";
-      setTimeout(() => renderSettings(), 600); // refresh to reflect connected state
-    } catch (err) {
-      status.textContent = `Error: ${err?.message ?? err}`;
-      status.className = "tg-save-status err";
-    } finally {
-      saveBtn.disabled = false;
-    }
-  });
-  return g;
+  return { el: g, getValues };
 }
 
 function mkSettingsGroup(title, rows) {
