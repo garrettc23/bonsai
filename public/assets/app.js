@@ -32,22 +32,22 @@ const NAV_ICONS = {
 };
 
 const TIMELINE_STEPS = [
-  { stage: 0, kind: "scan",  title: "Reading itemized bill",
-    sub: "Extracting CPT/HCPCS codes, line amounts, provider metadata." },
-  { stage: 0, kind: "doc",   title: "Cross-referencing EOB",
-    sub: "Allowed vs billed, patient responsibility, denial reasons." },
-  { stage: 1, kind: "shield",title: "Running grounding contract",
-    sub: "Every flagged line must quote a verbatim row from the bill — hallucinations rejected, Claude retries." },
-  { stage: 1, kind: "pulse", title: "Scoring errors",
-    sub: "Duplicate / denied-service / balance-billing → HIGH. Everything else → worth reviewing." },
-  { stage: 1, kind: "check", title: "Applying overlap-aware total",
-    sub: "Balance-billing is an envelope — we don't double-count line items it subsumes." },
-  { stage: 2, kind: "mail",  title: "Choosing channel",
-    sub: "auto + balance-billing ≥ $1,500 → voice. Else → email." },
+  { stage: 0, kind: "scan",  title: "Reading the bill",
+    sub: "Pulling the provider, date, line items, and totals off the document." },
+  { stage: 0, kind: "doc",   title: "Cross-referencing supporting docs",
+    sub: "Any attachments, prior bills, or statements — lining them up against the main bill." },
+  { stage: 1, kind: "shield",title: "Grounding every claim",
+    sub: "Every flag has to quote a verbatim line from the bill. Anything that can't be cited gets dropped." },
+  { stage: 1, kind: "pulse", title: "Finding overcharges & errors",
+    sub: "Duplicates, denied items, markups, bundled-in fees, rate mismatches — everything that shouldn't be there." },
+  { stage: 1, kind: "check", title: "Sizing the opportunity",
+    sub: "Dollar impact per finding, overlap-aware, so we don't double-count the same dispute twice." },
+  { stage: 2, kind: "mail",  title: "Picking the channel",
+    sub: "Email, SMS, or phone — choosing the fastest path to the person who can say yes." },
   { stage: 2, kind: "phone", title: "Opening negotiation",
-    sub: "Real tool calls dispatch against the rep persona simulator." },
-  { stage: 3, kind: "check", title: "Building report",
-    sub: "Findings, appeal letter, thread/transcript, savings summary." },
+    sub: "Real outbound: email sent, call placed, or text thread started with the provider's billing contact." },
+  { stage: 3, kind: "check", title: "Building your report",
+    sub: "Findings, appeal letter, and savings summary — ready for you to review or sign." },
 ];
 
 let timelineTimer = null;
@@ -80,6 +80,7 @@ function setWorkflowView(view) {
 
 function showNav(name) {
   currentNav = name;
+  if (name !== "bills") stopBillsPoll();
   // Toggle sidebar nav active state
   for (const n of $$(".nav-item")) {
     n.classList.toggle("active", n.dataset.nav === name);
@@ -286,6 +287,25 @@ async function init() {
 
   function fileKey(f) { return `${f.name}|${f.size}|${f.lastModified ?? 0}`; }
 
+  // HEIC/HEIF/TIFF thumbnails are transcoded server-side. Cache by fileKey so
+  // re-renders of the staging grid don't refetch the same bytes.
+  const thumbnailCache = new Map();
+  async function fetchThumbnail(file) {
+    const key = fileKey(file);
+    if (thumbnailCache.has(key)) return thumbnailCache.get(key);
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const p = fetch("/api/thumbnail", { method: "POST", body: form })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return URL.createObjectURL(blob);
+      })
+      .catch(() => null);
+    thumbnailCache.set(key, p);
+    return p;
+  }
+
   function stageFiles(incoming) {
     if (!incoming || incoming.length === 0) return;
     const seen = new Set(stagedFiles.map(fileKey));
@@ -349,21 +369,28 @@ async function init() {
       thumb.className = "dz-tile-thumb";
       const isImage = (f.type || "").startsWith("image/") ||
         /\.(jpe?g|png|gif|webp|heic|heif|avif|tiff?)$/i.test(f.name);
+      const needsServerThumb = /\.(heic|heif|tiff?)$/i.test(f.name);
       if (isImage) {
         const img = document.createElement("img");
         img.alt = "";
-        try {
-          img.src = URL.createObjectURL(f);
-          img.onload = () => URL.revokeObjectURL(img.src);
-        } catch { /* HEIC has no browser preview — fall through to icon */ }
-        thumb.appendChild(img);
-        if (/\.(heic|heif)$/i.test(f.name)) {
-          // Some browsers won't render HEIC — paint a fallback label.
-          const fallback = document.createElement("span");
-          fallback.className = "dz-tile-fallback";
-          fallback.textContent = "HEIC";
-          thumb.appendChild(fallback);
+        if (needsServerThumb) {
+          // Browsers can't render HEIC/HEIF/TIFF natively. Ask the server
+          // to transcode a small JPEG preview. Show a subtle spinner state
+          // on the tile while we wait.
+          thumb.classList.add("dz-tile-thumb-loading");
+          fetchThumbnail(f).then((url) => {
+            if (!url) return;
+            img.src = url;
+            img.onload = () => { thumb.classList.remove("dz-tile-thumb-loading"); };
+            img.onerror = () => { thumb.classList.remove("dz-tile-thumb-loading"); };
+          }).catch(() => { thumb.classList.remove("dz-tile-thumb-loading"); });
+        } else {
+          try {
+            img.src = URL.createObjectURL(f);
+            img.onload = () => URL.revokeObjectURL(img.src);
+          } catch { /* fall through to icon */ }
         }
+        thumb.appendChild(img);
       } else {
         thumb.classList.add("dz-tile-thumb-doc");
         thumb.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
@@ -446,7 +473,9 @@ async function init() {
 
   // Review view: approve, ask, view-bill
   $("#review-approve-btn")?.addEventListener("click", approveAndRun);
-  $("#review-qa-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitQuestion(); });
+  // The review view has a single unified chat panel (plan-chat). Q&A is
+  // folded into it — the routing brain figures out whether the message is
+  // a question or a plan edit.
   $("#review-plan-chat-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitPlanMessage(); });
   $("#review-view-bill-btn")?.addEventListener("click", () => {
     if (reviewState?.run_id) openBillViewer(reviewState.run_id);
@@ -677,145 +706,261 @@ async function runPhasedFromPrefetch(promise) {
 }
 
 function renderReviewView(report) {
-  const { analyzer, appeal, strategy, summary } = report;
-  updatePageHeader({
-    eyebrow: "Review the plan",
-    title: "Findings are in. Ask us anything, then approve.",
-    stats: null,
-  });
-
-  // Title + subtitle
-  const high = analyzer.errors.filter((e) => e.confidence === "high");
-  const worth = analyzer.errors.filter((e) => e.confidence === "worth_reviewing");
+  const { analyzer, summary } = report;
   const provider = analyzer.metadata?.provider_name ?? "the provider";
-  $("#review-title").textContent = `We found ${high.length} defensible overcharge${high.length === 1 ? "" : "s"} on this bill.`;
-  $("#review-sub").textContent = `${provider}. Defensible disputable total ${fmt$2(summary.defensible_disputed)} out of ${fmt$2(summary.original_balance)}. Review below, ask any questions, then approve to let Bonsai push back.`;
 
-  // Findings (reuse existing finding renderer into the review panel root)
-  const root = $("#review-findings-list");
-  root.innerHTML = "";
-  $("#review-findings-sub").textContent = analyzer.summary.headline
-    || `${high.length} high-confidence · ${worth.length} worth reviewing`;
-  const mkGroup = (label) => {
-    const h = document.createElement("div");
-    h.className = "findings-group-title";
-    h.textContent = label;
-    return h;
-  };
-  if (high.length) {
-    root.appendChild(mkGroup(`High confidence (${high.length}) — ready to ship to billing`));
-    for (const e of high) root.appendChild(renderFinding(e, false));
-  }
-  if (worth.length) {
-    root.appendChild(mkGroup(`Worth reviewing (${worth.length}) — patient-side only`));
-    for (const e of worth) root.appendChild(renderFinding(e, true));
-  }
-  if (!high.length && !worth.length) {
-    const p = document.createElement("p");
-    p.className = "tl-sub";
-    p.textContent = "No findings — the bill looks clean.";
-    root.appendChild(p);
-  }
+  $("#review-title").textContent = "Reading the angles on this bill…";
+  $("#review-sub").textContent = `${provider}. Original ${fmt$2(summary.original_balance ?? 0)}. Accept the plan or chat with Bonsai below to customize.`;
 
-  // Plan of attack card (title / reason / steps) — factored so the chat
-  // editor can re-render in place after each turn.
-  renderPlanCard(strategy, summary, appeal);
+  renderReceipt(report);
+  renderOpportunitiesSkeleton();
 
-  // Reset chat + QA state. The plan-edit interface is a chat now; blank
-  // the logs and inputs so a fresh review starts clean.
+  // Reset chat state.
   $("#review-plan-chat-log").innerHTML = "";
   $("#review-plan-chat-input").value = "";
-  $("#review-qa-log").innerHTML = "";
-  $("#review-qa-input").value = "";
+
+  // Fetch bill-specific strategies from the server. Falls back to the
+  // synthesized list if the endpoint errors — the demo should never show
+  // an empty opportunities panel.
+  void loadOpportunities(report);
 }
 
-function renderPlanCard(strategy, summary, appeal) {
-  const channel = strategy.chosen;
-  const channelLabel = {
-    email: "Email first", sms: "Text first", voice: "Call first",
-    persistent: "Persistent: email → SMS → voice",
-  }[channel] ?? channel;
-  $("#review-plan-title").textContent = channelLabel;
-  $("#review-plan-reason").textContent = strategy.reason;
-  const steps = buildPlanSteps(channel, summary, appeal);
-  const ul = $("#review-plan-steps");
+async function loadOpportunities(report) {
+  const runId = reviewState?.run_id;
+  if (!runId) return;
+  try {
+    const res = await fetch("/api/opportunities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { opportunities } = await res.json();
+    // Guard: if the current reviewState has moved on, bail.
+    if (reviewState?.run_id !== runId) return;
+    const normalized = (opportunities ?? []).map((o) => ({
+      icon: ICONS[o.icon] ?? ICONS.pulse,
+      title: o.title,
+      desc: o.description,
+      estimate: Number(o.dollar_estimate) || 0,
+    }));
+    const total = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const provider = report.analyzer?.metadata?.provider_name ?? "the provider";
+    $("#review-title").textContent = total > 0
+      ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
+      : "Bill reviewed — a few angles to try.";
+    $("#review-sub").textContent = `${provider}. Original ${fmt$2(report.summary.original_balance ?? 0)}. Accept the plan or chat with Bonsai below to customize.`;
+    renderOpportunities(normalized, total);
+  } catch (err) {
+    console.warn("[opps] falling back to synthesized", err);
+    const fallback = buildOpportunities(report);
+    const total = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    $("#review-title").textContent = total > 0
+      ? `We think we can save you ${fmt$(total)} on this bill.`
+      : "Bill reviewed — a few angles to try.";
+    renderOpportunities(fallback, total);
+  }
+}
+
+function providerKindLabel() {
+  // Keep the headline neutral for now. Could detect category later and say
+  // "this dental bill" vs "this utility bill", but the provider name in
+  // the subtitle already anchors the user.
+  return "bill";
+}
+
+function renderOpportunitiesSkeleton() {
+  $("#opps-total").textContent = "—";
+  const ul = $("#opps-list");
   ul.innerHTML = "";
-  steps.forEach((s, i) => {
+  for (let i = 0; i < 3; i++) {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="plan-num">${String(i + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(s.t)}</strong> — <em>${escapeHtml(s.d)}</em></div>`;
+    li.className = "opp-item opp-skel";
+    li.innerHTML = `
+      <div class="opp-icon opp-skel-bar"></div>
+      <div class="opp-body">
+        <div class="opp-title opp-skel-bar" style="width:55%"></div>
+        <div class="opp-desc opp-skel-bar" style="width:90%;margin-top:6px"></div>
+      </div>
+      <div class="opp-amount opp-skel-bar" style="width:40px"></div>`;
     ul.appendChild(li);
+  }
+}
+
+/* ─── Receipt (left panel) ─────────────────────────────────────────── */
+
+function renderReceipt(report) {
+  const { analyzer, summary } = report;
+  const meta = analyzer.metadata ?? {};
+  const items = deriveReceiptItems(report);
+
+  $("#receipt-provider").textContent = meta.provider_name ?? "Unknown provider";
+  const metaBits = [
+    meta.patient_name ? `For ${meta.patient_name}` : null,
+    meta.date_of_service ? `Dated ${meta.date_of_service}` : null,
+    meta.claim_number ? `Claim ${meta.claim_number}` : null,
+  ].filter(Boolean);
+  $("#receipt-meta").textContent = metaBits.join(" · ") || "—";
+
+  const ul = $("#receipt-items");
+  ul.innerHTML = "";
+  if (items.length === 0) {
+    const li = document.createElement("li");
+    li.className = "receipt-empty";
+    li.textContent = "No itemized line items detected. Totals below are from the summary section of the bill.";
+    ul.appendChild(li);
+  } else {
+    for (const it of items) {
+      const li = document.createElement("li");
+      li.className = "receipt-item";
+      li.innerHTML = `
+        <span class="receipt-item-label">${escapeHtml(it.label)}${it.detail ? `<span class="receipt-item-detail">${escapeHtml(it.detail)}</span>` : ""}</span>
+        <span class="receipt-item-amt">${fmt$2(it.amount)}</span>`;
+      ul.appendChild(li);
+    }
+  }
+
+  // Totals block — show the structure the user expects.
+  const totalsEl = $("#receipt-totals");
+  const original = summary.original_balance ?? 0;
+  const insurancePaid = (meta.eob_total_plan_paid ?? null);
+  const patientOwes = (meta.eob_patient_responsibility ?? meta.bill_current_balance_due ?? summary.original_balance ?? null);
+  const lines = [];
+  lines.push(`<div class="receipt-total-line"><span>Total charges</span><span>${fmt$2(original)}</span></div>`);
+  if (insurancePaid != null && insurancePaid > 0) {
+    lines.push(`<div class="receipt-total-line"><span>Insurance paid</span><span class="minus">− ${fmt$2(insurancePaid)}</span></div>`);
+  }
+  if (patientOwes != null) {
+    lines.push(`<div class="receipt-total-line receipt-total-due"><span>You owe</span><span>${fmt$2(patientOwes)}</span></div>`);
+  }
+  totalsEl.innerHTML = lines.join("");
+}
+
+/**
+ * Best-effort line items from whatever the analyzer pulled out. For medical
+ * bills with an itemized section this comes from `analyzer.metadata.line_items`
+ * or similar; we fall back to synthesizing rows from the flagged findings
+ * (at least the user sees the lines Bonsai cares about).
+ */
+function deriveReceiptItems(report) {
+  const meta = report.analyzer?.metadata ?? {};
+  // Prefer a real itemized list if the analyzer returned one.
+  if (Array.isArray(meta.line_items) && meta.line_items.length > 0) {
+    return meta.line_items
+      .filter((li) => li && typeof li.amount === "number")
+      .map((li) => ({
+        label: li.label ?? li.description ?? li.cpt_code ?? "Line item",
+        detail: li.cpt_code && li.label ? `Code ${li.cpt_code}` : (li.date ?? null),
+        amount: li.amount,
+      }));
+  }
+  // Fallback: surface each flagged finding as a row so at least the trouble
+  // lines are visible with amounts. Good enough for the MVP.
+  const errors = report.analyzer?.errors ?? [];
+  return errors.slice(0, 12).map((e) => {
+    const firstLine = (e.line_quote ?? "").split("\n")[0].trim();
+    return {
+      label: firstLine.slice(0, 70) || e.error_type,
+      detail: e.cpt_code ? `Code ${e.cpt_code}` : e.error_type,
+      amount: e.dollar_impact ?? 0,
+    };
   });
 }
 
-function buildPlanSteps(channel, summary, appeal) {
-  const defensible = fmt$2(summary.defensible_disputed);
-  const floor = fmt$2(Math.max(0, (summary.original_balance - summary.defensible_disputed)));
-  if (channel === "persistent") {
-    return [
-      { t: "Email the billing department", d: `Send the appeal letter ("${appeal.subject}") with grounded citations.` },
-      { t: "Escalate to SMS if stalled", d: "If no movement after 2 rounds, switch to SMS with the billing contact." },
-      { t: "Call on balance billing", d: `Voice-agent call if dispute is still open — converts better on disputes above $1,500.` },
-      { t: "Stop when floor is hit", d: `Accept once the provider drops to ${floor} or lower (dispute of ${defensible}).` },
-    ];
+/* ─── Opportunities (right panel) ──────────────────────────────────── */
+
+function renderOpportunities(opps, total) {
+  $("#opps-total").textContent = total > 0 ? fmt$(total) : "—";
+  const ul = $("#opps-list");
+  ul.innerHTML = "";
+  if (opps.length === 0) {
+    const li = document.createElement("li");
+    li.className = "opp-empty";
+    li.textContent = "No clear savings angles on this one — the provider seems to be charging fairly. We'll still try a prompt-pay ask.";
+    ul.appendChild(li);
+    return;
   }
-  if (channel === "email") return [
-    { t: "Send appeal email", d: `Subject: "${appeal.subject}".` },
-    { t: "Respond to their reply", d: "Keep pushing with citations until they drop or we exhaust rounds." },
-    { t: "Stop when floor is hit", d: `Accept once they drop to ${floor}.` },
-  ];
-  if (channel === "voice") return [
-    { t: "Call billing department", d: "Voice-agent opens the dispute with the CPT codes and evidence cited." },
-    { t: "Negotiate in real time", d: "Handle objections, push for supervisor escalation if needed." },
-    { t: "Stop when floor is hit", d: `Accept commitment at ${floor} or below.` },
-  ];
-  if (channel === "sms") return [
-    { t: "Open an SMS thread", d: "Short, polite opener with the top-line dispute amount." },
-    { t: "Trade messages until resolved", d: "Hand off to voice if SMS stalls." },
-    { t: "Stop when floor is hit", d: `Accept once the agent confirms ${floor}.` },
-  ];
-  return [];
+  for (const o of opps) {
+    const li = document.createElement("li");
+    li.className = "opp-item";
+    li.innerHTML = `
+      <div class="opp-icon">${o.icon ?? ICONS.pulse}</div>
+      <div class="opp-body">
+        <div class="opp-title">${escapeHtml(o.title)}</div>
+        <div class="opp-desc">${escapeHtml(o.desc)}</div>
+      </div>
+      <div class="opp-amount">${o.estimate > 0 ? fmt$(o.estimate) : "—"}</div>`;
+    ul.appendChild(li);
+  }
 }
 
-async function submitQuestion() {
-  if (!reviewState) return;
-  const input = $("#review-qa-input");
-  const q = input.value.trim();
-  if (!q) return;
-  const log = $("#review-qa-log");
-  const qDiv = document.createElement("div");
-  qDiv.className = "qa-msg q";
-  qDiv.innerHTML = `<div class="qa-role">You</div><div class="qa-body"></div>`;
-  qDiv.querySelector(".qa-body").textContent = q;
-  log.appendChild(qDiv);
-  input.value = "";
-  input.disabled = true;
-  const btn = $("#review-qa-form button");
-  if (btn) btn.disabled = true;
-  const thinking = document.createElement("div");
-  thinking.className = "qa-msg a";
-  thinking.innerHTML = `<div class="qa-role">Bonsai</div><div class="qa-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
-  log.appendChild(thinking);
-  log.scrollTop = log.scrollHeight;
+/**
+ * Synthesize a list of strategies to lower this bill with dollar estimates.
+ * Pulls from analyzer findings where available, then layers on universal
+ * levers (prompt-pay, competitor threat, financial hardship) so the user
+ * always sees multiple angles — not just billing errors.
+ */
+function buildOpportunities(report) {
+  const out = [];
+  const summary = report.summary ?? {};
+  const analyzer = report.analyzer ?? {};
+  const defensible = summary.defensible_disputed ?? 0;
+  const original = summary.original_balance ?? 0;
+  const remainingAfterDispute = Math.max(0, original - defensible);
+  const high = (analyzer.errors ?? []).filter((e) => e.confidence === "high");
+  const worth = (analyzer.errors ?? []).filter((e) => e.confidence === "worth_reviewing");
 
-  try {
-    const res = await fetch("/api/ask", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: reviewState.run_id, question: q }),
+  // 1. Grounded billing errors (highest-signal)
+  if (high.length > 0 && defensible > 0) {
+    out.push({
+      icon: ICONS.shield,
+      title: `Dispute ${high.length} billing error${high.length === 1 ? "" : "s"}`,
+      desc: "Grounded citations against the bill. Duplicates, denied services, and balance-billing overlap all defensible on paper.",
+      estimate: defensible,
     });
-    if (!res.ok) throw new Error(await res.text());
-    const { answer } = await res.json();
-    thinking.querySelector(".qa-body").textContent = answer;
-  } catch (err) {
-    thinking.querySelector(".qa-body").textContent = `Error: ${err.message ?? err}`;
-    thinking.classList.add("error");
-  } finally {
-    input.disabled = false;
-    if (btn) btn.disabled = false;
-    input.focus();
-    log.scrollTop = log.scrollHeight;
   }
+
+  // 2. Worth-reviewing items — lower confidence but worth surfacing
+  if (worth.length > 0) {
+    const worthTotal = worth.reduce((s, e) => s + (e.dollar_impact ?? 0), 0);
+    out.push({
+      icon: ICONS.scan,
+      title: `Challenge ${worth.length} questionable charge${worth.length === 1 ? "" : "s"}`,
+      desc: "Unbundling, markup, and other soft flags. Lower win rate, but often negotiable.",
+      estimate: Math.round(worthTotal * 0.5),
+    });
+  }
+
+  // 3. Prompt-pay / negotiate the remaining balance
+  if (remainingAfterDispute > 200) {
+    const estimate = Math.round(remainingAfterDispute * 0.15);
+    out.push({
+      icon: ICONS.pulse,
+      title: "Negotiate the remaining balance",
+      desc: "Ask for a prompt-pay discount (10–20% is typical) and a single-settlement write-off on whatever's left.",
+      estimate,
+    });
+  }
+
+  // 4. Terms & loopholes
+  out.push({
+    icon: ICONS.doc,
+    title: "Hunt for T&C loopholes",
+    desc: "Review the provider's own policy — late-fee caps, good-faith-estimate discrepancies (No Surprises Act), charity care thresholds, or hidden itemization rules.",
+    estimate: Math.round(original * 0.05),
+  });
+
+  // 5. Competitor leverage / threat to cancel
+  out.push({
+    icon: ICONS.phone,
+    title: "Leverage a competitor offer",
+    desc: "If there's a cheaper provider or a cancel-threat angle (subscriptions, utilities, pet insurance), we use it.",
+    estimate: Math.round(original * 0.08),
+  });
+
+  return out;
 }
+
 
 async function submitPlanMessage() {
   if (!reviewState) return;
@@ -847,11 +992,11 @@ async function submitPlanMessage() {
     if (!res.ok) throw new Error(await res.text());
     const { reply, strategy } = await res.json();
     thinking.querySelector(".qa-body").textContent = reply;
-    // Re-render plan title/reason/steps using the updated strategy.
     if (strategy && reviewState.partial_report) {
+      // Store the new strategy on the report so approve() picks it up. The
+      // receipt + opportunities panels don't depend on channel choice, so
+      // no re-render is needed here.
       reviewState.partial_report.strategy = strategy;
-      const { summary, appeal } = reviewState.partial_report;
-      renderPlanCard(strategy, summary, appeal);
     }
   } catch (err) {
     thinking.querySelector(".qa-body").textContent = `Error: ${err.message ?? err}`;
@@ -866,20 +1011,9 @@ async function submitPlanMessage() {
 
 async function approveAndRun() {
   if (!reviewState) return;
-  // Plan edits are accumulated server-side through /api/plan-chat — no need
-  // to pass anything here; handleApprove reads run.plan_edits from the
-  // PendingRun.
-  setWorkflowView("progress");
-  updatePageHeader({
-    eyebrow: "Negotiation in progress",
-    title: "Bonsai is on it.",
-  });
-  const runTitle = $("#run-head-title");
-  const runSub = $("#run-head-sub");
-  if (runTitle) runTitle.textContent = "Negotiating with the provider";
-  if (runSub) runSub.textContent = "live · opening channel, dispatching against the rep";
-  // Extract + Audit already ran — skip to Negotiate.
-  startTimeline(2);
+  // Negotiation runs in the background. Kick it off, then hand the user
+  // off to the Bills view — updates will stream in as the bg job progresses
+  // (polled via /api/history).
   try {
     const res = await fetch("/api/approve", {
       method: "POST",
@@ -887,15 +1021,12 @@ async function approveAndRun() {
       body: JSON.stringify({ run_id: reviewState.run_id }),
     });
     if (!res.ok) throw new Error(await res.text());
-    const report = await res.json();
-    stopTimeline();
-    render(report);
-    setWorkflowView("results");
+    await res.json();
     reviewState = null;
     await loadHistory();
     updateNavCounts();
+    showNav("bills");
   } catch (err) {
-    stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
     setWorkflowView("error");
   }
@@ -904,20 +1035,20 @@ async function approveAndRun() {
 function resetPageHeader() {
   if (currentNav === "overview") {
     updatePageHeader({
-      eyebrow: "Bill audit & negotiation",
-      title: "Audit &amp; negotiate any bill.",
+      eyebrow: "Home",
+      title: "Agents to manage your personal expenses",
       stats: null,
     });
   } else if (currentNav === "bills") {
     updatePageHeader({
       eyebrow: "Bills",
-      title: "Every bill, price-checked.",
+      title: "Every bill monitored",
       stats: null,
     });
   } else if (currentNav === "offers") {
     updatePageHeader({
       eyebrow: "Offers",
-      title: "Cheaper care, found for you.",
+      title: "Cheaper alternatives, found for you.",
       stats: null,
     });
   } else if (currentNav === "settings") {
@@ -1271,43 +1402,53 @@ function renderApprovalsOnOverview() {
 
 const MOCK_RECURRING_BILLS = [
   {
-    id: "mock-premium-1", kind: "premium", vendor: "Blue Shield PPO",
-    account: "Family plan · policy 4419-X",
+    id: "mock-cell-1", kind: "cell", vendor: "Verizon Wireless",
+    account: "4 lines · unlimited plan",
     lastCheck: "3 minutes ago",
     addedAt: Date.now() - 45 * 24 * 3600 * 1000,
-    balance: 487, rate: "/mo",
-    category: "Premium",
+    balance: 187, rate: "/mo",
+    category: "Cell phone/Landline",
     score: 58,
     auto: true,
   },
   {
-    id: "mock-rx-1", kind: "rx", vendor: "CVS Specialty",
-    account: "3 maintenance scripts",
+    id: "mock-cable-1", kind: "cable", vendor: "Xfinity",
+    account: "Gigabit internet + TV bundle",
     lastCheck: "18 minutes ago",
     addedAt: Date.now() - 12 * 24 * 3600 * 1000,
-    balance: 214, rate: "/mo",
-    category: "Prescriptions",
+    balance: 159, rate: "/mo",
+    category: "Cable/Internet",
     score: 32,
     auto: true,
   },
   {
-    id: "mock-dental-1", kind: "dental", vendor: "Delta Dental",
-    account: "Family · annual",
+    id: "mock-security-1", kind: "security", vendor: "ADT Home Security",
+    account: "Monitored alarm · 24/7",
     lastCheck: "1 hour ago",
     addedAt: Date.now() - 75 * 24 * 3600 * 1000,
-    balance: 82, rate: "/mo",
-    category: "Premium",
+    balance: 52, rate: "/mo",
+    category: "Security system",
     score: 78,
     auto: false,
   },
   {
-    id: "mock-lab-1", kind: "lab", vendor: "Quest Diagnostics",
-    account: "CBC + lipid panel · Mar 18",
+    id: "mock-electric-1", kind: "electricity", vendor: "PG&E",
+    account: "Residential · account 8821-A",
     lastCheck: "42 minutes ago",
     addedAt: Date.now() - 6 * 24 * 3600 * 1000,
-    balance: 186, rate: "",
-    category: "Lab",
+    balance: 234, rate: "/mo",
+    category: "Electricity",
     score: 48,
+    auto: true,
+  },
+  {
+    id: "mock-carins-1", kind: "car-insurance", vendor: "Geico",
+    account: "2 vehicles · full coverage",
+    lastCheck: "2 hours ago",
+    addedAt: Date.now() - 90 * 24 * 3600 * 1000,
+    balance: 168, rate: "/mo",
+    category: "Car insurance",
+    score: 44,
     auto: true,
   },
 ];
@@ -1317,11 +1458,12 @@ for (const b of MOCK_RECURRING_BILLS) {
 }
 
 const KIND_ICON = {
-  premium: ICONS.shield,
-  rx: ICONS.pill,
-  dental: ICONS.shield,
-  lab: ICONS.doc,
-  audit: ICONS.hospital,
+  cell: ICONS.phone,
+  cable: ICONS.pulse,
+  security: ICONS.shield,
+  electricity: ICONS.pulse,
+  "car-insurance": ICONS.shield,
+  audit: ICONS.doc,
 };
 
 // Each offer carries a backend `baseline` so "Switch for me" runs a real
@@ -1430,17 +1572,55 @@ const MOCK_OFFERS = [
 
 const BILLS_FILTER = { q: "", category: "", date: "", price: "", score: "" };
 let billsFiltersBound = false;
+let billsPollTimer = null;
+
+function stopBillsPoll() {
+  if (billsPollTimer) { clearTimeout(billsPollTimer); billsPollTimer = null; }
+}
+
+function scheduleBillsPoll() {
+  stopBillsPoll();
+  // Only poll while the Bills view is active AND there's at least one
+  // in-progress bill. Otherwise sit quiet.
+  if (currentNav !== "bills") return;
+  const anyInflight = (historyCache?.audits ?? []).some(
+    (a) => a.status === "negotiating" || a.outcome === "negotiating",
+  );
+  if (!anyInflight) return;
+  billsPollTimer = setTimeout(async () => {
+    try {
+      await loadHistory();
+      updateNavCounts();
+      if (currentNav === "bills") renderBills();
+    } catch { /* swallow and retry next tick */ }
+    scheduleBillsPoll();
+  }, 4000);
+}
 
 function renderBills() {
   updatePageHeader({
     eyebrow: "Bills",
-    title: "Every bill, price-checked.",
+    title: "Every bill monitored",
     stats: null,
   });
 
   const audits = historyCache?.audits ?? [];
   const auditRows = audits.map((a) => {
     const score = scoreFromAudit(a);
+    const isNegotiating = a.status === "negotiating" || a.outcome === "negotiating";
+    const isFailed = a.status === "failed" || a.outcome === "failed";
+    const isCancelled = a.status === "cancelled" || a.outcome === "cancelled";
+    const isEscalated = a.outcome === "escalated";
+    const isResolved = a.outcome === "resolved";
+    // Traffic-light bucket:
+    //   active    = yellow, negotiation in progress
+    //   resolved  = green,  provider agreed / saved money
+    //   attention = red,    needs a human (failed, escalated, or not-yet-started)
+    let lifecycle;
+    if (isNegotiating) lifecycle = "active";
+    else if (isResolved) lifecycle = "resolved";
+    else if (isFailed || isEscalated || isCancelled) lifecycle = "attention";
+    else lifecycle = "attention"; // audited but no negotiation dispatched yet
     return {
       id: `audit-${a.name}`,
       kind: "audit",
@@ -1455,36 +1635,30 @@ function renderBills() {
       scoreLabel: scoreLabelFor(score),
       auto: true,
       audit: a,
+      status: isNegotiating ? "negotiating" : (isCancelled ? "cancelled" : (isFailed ? "failed" : "completed")),
+      lifecycle,
     };
   });
   const rows = [...auditRows, ...MOCK_RECURRING_BILLS];
 
-  // Stats strip — computed from the full (unfiltered) set.
-  const totalSavedYtd = audits.reduce((s, a) => s + (a.patient_saved ?? 0), 0);
-  const annualized = MOCK_OFFERS
-    .filter((o) => o.recommended)
-    .reduce((s, o) => s + (o.unit === "/mo" ? o.saves * 12 : o.saves), 0);
-  const monthlyRun = rows
-    .filter((r) => r.rate === "/mo")
-    .reduce((s, r) => s + r.balance, 0);
-  const onAuto = rows.filter((r) => r.auto).length;
+  // Three numbers the user cares about: how many negotiations are running,
+  // how many need attention, and total saved lifetime.
+  const activeCount = auditRows.filter((r) => r.lifecycle === "active").length;
+  const attentionCount = auditRows.filter((r) => r.lifecycle === "attention").length;
+  const totalSaved = audits.reduce((s, a) => s + (a.patient_saved ?? 0), 0);
 
   $("#bills-stats").innerHTML = `
     <div>
-      <div class="eyebrow">Saved YTD</div>
-      <div class="stat-val stat-green">${fmt$(totalSavedYtd)}</div>
+      <div class="eyebrow">Active negotiations</div>
+      <div class="stat-val">${activeCount}</div>
     </div>
     <div>
-      <div class="eyebrow">Annualized savings</div>
-      <div class="stat-val">${fmt$(annualized)}</div>
+      <div class="eyebrow">Needs attention</div>
+      <div class="stat-val${attentionCount > 0 ? " stat-red" : ""}">${attentionCount}</div>
     </div>
     <div>
-      <div class="eyebrow">Monthly run-rate</div>
-      <div class="stat-val">${fmt$(monthlyRun)}</div>
-    </div>
-    <div>
-      <div class="eyebrow">On auto-negotiate</div>
-      <div class="stat-val">${onAuto} <span class="of">/ ${rows.length}</span></div>
+      <div class="eyebrow">Total saved</div>
+      <div class="stat-val stat-green">${fmt$(totalSaved)}</div>
     </div>`;
 
   // Populate the category dropdown from the live set of categories.
@@ -1503,6 +1677,7 @@ function renderBills() {
   }
 
   renderBillsRows(rows);
+  scheduleBillsPoll();
 }
 
 function bindBillsFilters(allRowsRef) {
@@ -1561,9 +1736,11 @@ function filterBillsRows(rows) {
 
 function renderBillsRows(allRows) {
   const visible = filterBillsRows(allRows);
-  $("#bills-live-text").textContent = visible.length === allRows.length
-    ? `Continuously price-checking ${allRows.length} bills`
-    : `Showing ${visible.length} of ${allRows.length} bills`;
+  // The live indicator strip used to announce active negotiations up top.
+  // It ended up feeling like noise — the per-row yellow dot + inline
+  // "Negotiating" pill already carries that signal. Keep the strip hidden.
+  const liveWrap = $("#bills-live-text")?.closest(".live-indicator");
+  if (liveWrap) liveWrap.hidden = true;
 
   const root = $("#bills-rows");
   root.innerHTML = "";
@@ -1580,13 +1757,21 @@ function renderBillsRows(allRows) {
 
   for (const r of visible) {
     const row = document.createElement("div");
-    row.className = "bills-row bill-item";
+    row.className = "bills-row bill-item" + (r.lifecycle === "active" ? " bill-item-active" : "");
+    const activePill = r.lifecycle === "active"
+      ? `<span class="bill-inline-active"><span class="status-dot"></span>Negotiating</span>`
+      : "";
     const barColor = r.score >= 70 ? "var(--green)" : r.score >= 50 ? "var(--amber)" : "var(--red)";
+    const scoreCell = `<div class="bill-score-head">
+              <span class="bill-score-num">${r.score}</span>
+              <span class="mono" style="font-size:10.5px;color:var(--ink-mute);letter-spacing:.04em;text-transform:uppercase">${r.scoreLabel}</span>
+            </div>
+            <div class="bill-score-bar"><div class="bill-score-fill" style="width:${r.score}%;background:${barColor}"></div></div>`;
     row.innerHTML = `
       <div class="bill-main">
         <div class="bill-ic">${KIND_ICON[r.kind] ?? ICONS.doc}</div>
         <div style="min-width:0">
-          <div class="bill-name">${escapeHtml(r.vendor)}</div>
+          <div class="bill-name">${escapeHtml(r.vendor)}${activePill}</div>
           <div class="bill-account mono">${escapeHtml(r.account)} · ${r.lastCheck}</div>
         </div>
       </div>
@@ -1596,20 +1781,9 @@ function renderBillsRows(allRows) {
       </div>
       <div class="bill-category"><span class="tag tag-mono">${escapeHtml(r.category.toUpperCase())}</span></div>
       <div class="bill-score">
-        <div class="bill-score-head">
-          <span class="bill-score-num">${r.score}</span>
-          <span class="mono" style="font-size:10.5px;color:var(--ink-mute);letter-spacing:.04em;text-transform:uppercase">${r.scoreLabel}</span>
-        </div>
-        <div class="bill-score-bar"><div class="bill-score-fill" style="width:${r.score}%;background:${barColor}"></div></div>
-      </div>
-      <div>
-        <button class="toggle ${r.auto ? "on" : ""}" data-bill="${r.id}" aria-label="Auto-negotiate"></button>
+        ${scoreCell}
       </div>
       <div class="bill-arrow">${ICONS.arrow}</div>`;
-    row.querySelector(".toggle").addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      ev.currentTarget.classList.toggle("on");
-    });
     row.addEventListener("click", () => openBillDrawer(r));
     root.appendChild(row);
   }
@@ -1634,10 +1808,31 @@ function relTime(ms) {
 
 function inferCategory(a) {
   const n = (a.provider_name ?? a.name ?? "").toLowerCase();
-  if (n.includes("er") || n.includes("emergency")) return "ER";
-  if (n.includes("lab") || n.includes("quest")) return "Lab";
-  if (n.includes("pharm") || n.includes("cvs")) return "Rx";
-  return "Hospital";
+  // Cell phone / landline
+  if (/verizon|at&?t|t-?mobile|sprint|mint mobile|cricket|metro|visible|us cellular|xfinity mobile|google fi|boost/.test(n)) {
+    return "Cell phone/Landline";
+  }
+  // Cable / internet
+  if (/comcast|xfinity|spectrum|cox|optimum|fios|frontier|wow|cablevision|directv|dish/.test(n)) {
+    return "Cable/Internet";
+  }
+  // Security system
+  if (/adt|simplisafe|ring|vivint|frontpoint|brinks|xfinity home|abode|cove/.test(n)) {
+    return "Security system";
+  }
+  // Electricity / utilities
+  if (/pg&?e|edison|duke energy|con ?edison|pepco|national grid|pse&g|eversource|dominion|xcel energy|electric|power|utility/.test(n)) {
+    return "Electricity";
+  }
+  // Car insurance
+  if (/geico|progressive|allstate|state farm|liberty mutual|farmers|nationwide|usaa|esurance|travelers|the general|metromile/.test(n)) {
+    return "Car insurance";
+  }
+  // Medical (broad net — hospital, clinic, health system, ER, lab, pharmacy, doctor/dr, dental, urgent care)
+  if (/hospital|clinic|health|medical|er |emergency|urgent care|doctor|dr\.|md|dds|dental|pediatric|surgery|quest|labcorp|cvs|walgreens|regional|memorial|medic/.test(n)) {
+    return "Medical bills";
+  }
+  return "Other";
 }
 
 // Gamified price score: 0 = greatly overpaying, 100 = at the best price possible.
@@ -1686,7 +1881,7 @@ function renderOffers() {
 
   updatePageHeader({
     eyebrow: "Offers",
-    title: "Cheaper care, found for you.",
+    title: "Cheaper alternatives, found for you.",
     stats: [
       { label: "Opportunities", value: String(MOCK_OFFERS.length) },
       { label: "Recommended", value: String(MOCK_OFFERS.filter((o) => o.recommended).length), tone: "green" },
@@ -1869,35 +2064,20 @@ async function renderSettings() {
 
   root.innerHTML = "";
 
-  // Account
-  root.appendChild(mkSettingsGroup("Account", [
-    { label: "Name", help: "Shown on appeal letters.", value: "Garrett Cahill" },
-    { label: "Email", help: "Inbound replies route here.", value: "garrett@cointracker.com" },
-    { label: "Phone", help: "Voice calls from the agent arrive here.", value: "(415) 555-0134" },
-  ]));
+  // Account — editable name, email + digest toggle, phone + mobile alert toggle.
+  root.appendChild(mkAccountCard(sdata.account ?? {}));
 
-  // Auto-negotiation
-  const autoGroup = mkSettingsGroup("Auto-negotiation", [
-    { label: "Global auto-negotiate", help: "Agent negotiates without asking when confidence is HIGH and savings are below threshold.", value: mkToggle(true) },
-    { label: "Approval threshold", help: "Above this, the agent pauses and asks you to approve the counter-offer.", isRange: true, value: 1500, min: 0, max: 5000, step: 100, prefix: "$" },
-    { label: "Default channel", help: "Auto picks voice for balance-billing ≥ $1,500, email otherwise.", value: mkSelect(["Auto (recommended)", "Email only", "Voice only"]) },
-    { label: "Check cadence", help: "How often the agent re-scores bills and hunts new offers.", value: mkSelect(["Every hour", "Every 6 hours", "Daily", "Weekly"]) },
-  ]);
-  root.appendChild(autoGroup);
-
-  // Notifications
-  root.appendChild(mkSettingsGroup("Notifications", [
-    { label: "Email digest", help: "Daily summary of savings and pending approvals.", value: mkToggle(true) },
-    { label: "Push (mobile)", help: "Real-time alerts when an approval is needed.", value: mkToggle(false) },
-    { label: "SMS alerts", help: "Text on approvals only. Premium.", value: mkToggle(false) },
-  ]));
+  // Telegram — editable credentials card.
+  root.appendChild(mkTelegramCard(sdata.telegram ?? {}));
 
   // Connected accounts — real integration statuses from /api/settings
-  const integRows = (sdata.integrations ?? []).map((i) => ({
-    label: i.label,
-    help: i.detail,
-    value: mkStatusPill(i.status),
-  }));
+  const integRows = (sdata.integrations ?? [])
+    .filter((i) => i.key !== "telegram") // telegram has its own editable card above
+    .map((i) => ({
+      label: i.label,
+      help: i.detail,
+      value: mkStatusPill(i.status),
+    }));
   if (integRows.length === 0) {
     integRows.push({ label: "No integrations detected", help: "Set ANTHROPIC_API_KEY to enable the agent.", value: mkStatusPill("missing") });
   }
@@ -1930,6 +2110,164 @@ async function renderSettings() {
   for (const t of root.querySelectorAll(".toggle")) {
     t.addEventListener("click", () => t.classList.toggle("on"));
   }
+}
+
+function mkAccountCard(acc) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const digestOn = acc.email_digest !== false;
+  const mobileOn = acc.mobile_alerts !== false;
+  g.innerHTML = `
+    <div class="settings-group-title">Account</div>
+    <div class="settings-card">
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Name</div>
+          <div class="settings-row-help">Shown on appeal letters and outreach.</div>
+          <input type="text" id="acc-name" class="settings-input" value="${escapeHtml(acc.name ?? "")}" placeholder="Jane Doe" autocomplete="name" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="acc-label-row">
+            <div class="settings-row-label">Email</div>
+            <div class="acc-toggle-group">
+              <span class="acc-toggle-label">Weekly digest</span>
+              <button type="button" class="toggle ${digestOn ? "on" : ""}" id="acc-digest-toggle" aria-label="Email digest"></button>
+            </div>
+          </div>
+          <div class="settings-row-help">Inbound replies from providers and your weekly summary both route here.</div>
+          <input type="email" id="acc-email" class="settings-input" value="${escapeHtml(acc.email ?? "")}" placeholder="you@example.com" autocomplete="email" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="acc-label-row">
+            <div class="settings-row-label">Phone</div>
+            <div class="acc-toggle-group">
+              <span class="acc-toggle-label">Real-time alerts</span>
+              <button type="button" class="toggle ${mobileOn ? "on" : ""}" id="acc-mobile-toggle" aria-label="Mobile alerts"></button>
+            </div>
+          </div>
+          <div class="settings-row-help">Voice calls from the agent and real-time approval alerts both go to this number.</div>
+          <input type="tel" id="acc-phone" class="settings-input" value="${escapeHtml(acc.phone ?? "")}" placeholder="+1 (415) 555-0134" autocomplete="tel" />
+        </div>
+      </div>
+      <div class="settings-row" style="justify-content:flex-end;gap:10px">
+        <span id="acc-save-status" class="tg-save-status"></span>
+        <button class="btn btn-primary" id="acc-save-btn" type="button">Save</button>
+      </div>
+    </div>`;
+  // Toggles flip in-place; server save happens on explicit Save click.
+  g.querySelector("#acc-digest-toggle").addEventListener("click", (ev) => {
+    ev.currentTarget.classList.toggle("on");
+  });
+  g.querySelector("#acc-mobile-toggle").addEventListener("click", (ev) => {
+    ev.currentTarget.classList.toggle("on");
+  });
+  const saveBtn = g.querySelector("#acc-save-btn");
+  const status = g.querySelector("#acc-save-status");
+  saveBtn.addEventListener("click", async () => {
+    const body = {
+      name: g.querySelector("#acc-name").value.trim(),
+      email: g.querySelector("#acc-email").value.trim(),
+      phone: g.querySelector("#acc-phone").value.trim(),
+      email_digest: g.querySelector("#acc-digest-toggle").classList.contains("on"),
+      mobile_alerts: g.querySelector("#acc-mobile-toggle").classList.contains("on"),
+    };
+    saveBtn.disabled = true;
+    status.textContent = "Saving…";
+    status.className = "tg-save-status";
+    try {
+      const res = await fetch("/api/settings/account", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      status.textContent = "Saved ✓";
+      status.className = "tg-save-status ok";
+    } catch (err) {
+      status.textContent = `Error: ${err?.message ?? err}`;
+      status.className = "tg-save-status err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  return g;
+}
+
+function mkTelegramCard(tg) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const connected = !!(tg.bot_token_set && tg.chat_id_set);
+  g.innerHTML = `
+    <div class="settings-group-title">Telegram</div>
+    <div class="settings-card">
+      <div class="settings-row tg-row-help">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Text your agent</div>
+          <div class="settings-row-help">
+            Get live updates on negotiations and reply to approve, stop, or ask anything.
+            <ol class="tg-help-steps">
+              <li>Open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> in Telegram → <code>/newbot</code> → follow prompts → copy the token.</li>
+              <li>Start a chat with your new bot (search for its @handle) and send any message.</li>
+              <li>Paste the token below and click Save. Bonsai will auto-detect your chat ID from your first message.</li>
+            </ol>
+          </div>
+        </div>
+        <span class="tag tag-mono ${connected ? "tag-green" : "tag-red"}">${connected ? "Connected" : "Not connected"}</span>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Bot token</div>
+          <div class="settings-row-help">Keep this private. Stored locally in out/user-settings.json.</div>
+          <input type="password" id="tg-bot-token" class="settings-input" placeholder="${tg.bot_token_set ? "•••••••• (already set — paste to replace)" : "123456:ABC-…"}" autocomplete="off" />
+        </div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Chat ID</div>
+          <div class="settings-row-help">Your personal chat with the bot. Leave blank and send the bot a message — we'll fill this in automatically on first message.</div>
+          <input type="text" id="tg-chat-id" class="settings-input" value="${escapeHtml(tg.chat_id_preview ?? "")}" placeholder="123456789" autocomplete="off" />
+        </div>
+      </div>
+      <div class="settings-row" style="justify-content:flex-end;gap:10px">
+        <span id="tg-save-status" class="tg-save-status"></span>
+        <button class="btn btn-primary" id="tg-save-btn" type="button">Save</button>
+      </div>
+    </div>`;
+  // Wire save handler
+  const saveBtn = g.querySelector("#tg-save-btn");
+  const status = g.querySelector("#tg-save-status");
+  saveBtn.addEventListener("click", async () => {
+    const botTokenInput = g.querySelector("#tg-bot-token").value.trim();
+    const chatIdInput = g.querySelector("#tg-chat-id").value.trim();
+    saveBtn.disabled = true;
+    status.textContent = "Saving…";
+    status.className = "tg-save-status";
+    try {
+      const body = {};
+      if (botTokenInput) body.botToken = botTokenInput;
+      // Chat ID: explicitly send (even if blank — allows clearing).
+      body.chatId = chatIdInput;
+      const res = await fetch("/api/settings/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      status.textContent = "Saved ✓";
+      status.className = "tg-save-status ok";
+      setTimeout(() => renderSettings(), 600); // refresh to reflect connected state
+    } catch (err) {
+      status.textContent = `Error: ${err?.message ?? err}`;
+      status.className = "tg-save-status err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  return g;
 }
 
 function mkSettingsGroup(title, rows) {
@@ -2050,7 +2388,6 @@ async function openBillDrawer(row) {
   });
 
   // Header
-  $("#drawer-eyebrow").textContent = row.kind === "audit" ? "Audited bill" : `${row.category} · watched`;
   $("#drawer-title").textContent = row.vendor ?? "—";
   $("#drawer-sub").textContent = `${row.account ?? ""} · last activity ${row.lastCheck}`;
 
@@ -2076,9 +2413,292 @@ async function openBillDrawer(row) {
     renderDrawerStats(row, report);
   }
 
+  // Frequency dropdown — per-bill, persisted client-side.
+  const freqSel = $("#drawer-frequency");
+  if (freqSel) {
+    const key = drawerFreqKey(row);
+    const stored = (typeof localStorage !== "undefined" && localStorage.getItem(key)) || "monthly";
+    freqSel.value = stored;
+    if (!freqSel._bound) {
+      freqSel._bound = true;
+      freqSel.addEventListener("change", () => {
+        const r = drawerState.row;
+        if (!r) return;
+        try { localStorage.setItem(drawerFreqKey(r), freqSel.value); } catch {}
+      });
+    }
+  }
+
+  // Stop / Start — always visible for any real audit. The agent's job on a
+  // bill isn't one-shot: completed bills still get periodic re-negotiation
+  // rounds. Active → Stop. Anything else (completed, cancelled, failed,
+  // audited-but-not-yet-approved) → Start the next round.
+  const agentBtn = $("#drawer-agent-btn");
+  const feedbackPanel = $("#drawer-feedback");
+  const runId = row?.audit?.run_id;
+  const isActive = row.lifecycle === "active" && !!runId;
+  const isStopped = (row.status === "cancelled" || row.status === "failed") && !!runId;
+
+  if (agentBtn) {
+    if (!runId) {
+      // Mock recurring bills with no real run_id → no button.
+      agentBtn.hidden = true;
+      agentBtn.onclick = null;
+    } else if (isActive) {
+      agentBtn.hidden = false;
+      agentBtn.className = "drawer-agent-btn drawer-stop-btn";
+      agentBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+        <span>Stop</span>`;
+      agentBtn.onclick = () => stopAgent();
+    } else {
+      agentBtn.hidden = false;
+      agentBtn.className = "drawer-agent-btn drawer-resume-btn";
+      agentBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6,4 20,12 6,20"/></svg>
+        <span>Start</span>`;
+      agentBtn.onclick = () => resumeAgent();
+    }
+  }
+  if (feedbackPanel) {
+    feedbackPanel.hidden = !isStopped;
+    if (isStopped) void loadFeedback(runId);
+    if (!feedbackPanel._bound) {
+      feedbackPanel._bound = true;
+      $("#drawer-feedback-form").addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        sendFeedback();
+      });
+    }
+  }
+
+
   // Tabs
   bindDrawerTabs();
   renderDrawerTab("activity");
+}
+
+async function loadFeedback(runId) {
+  const log = $("#drawer-feedback-log");
+  if (!log) return;
+  log.innerHTML = "";
+  try {
+    const res = await fetch(`/api/feedback/${runId}`);
+    if (!res.ok) return;
+    const { feedback } = await res.json();
+    for (const m of feedback ?? []) {
+      appendFeedbackMessage(m.role, m.body);
+    }
+  } catch { /* empty log is fine */ }
+}
+
+function appendFeedbackMessage(role, body) {
+  const log = $("#drawer-feedback-log");
+  if (!log) return;
+  const div = document.createElement("div");
+  div.className = `qa-msg ${role === "user" ? "q" : "a"}`;
+  div.innerHTML = `<div class="qa-role">${role === "user" ? "You" : "Bonsai"}</div><div class="qa-body"></div>`;
+  div.querySelector(".qa-body").textContent = body;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendFeedback() {
+  const runId = drawerState?.row?.audit?.run_id;
+  if (!runId) return;
+  const input = $("#drawer-feedback-input");
+  const msg = input.value.trim();
+  if (!msg) return;
+  appendFeedbackMessage("user", msg);
+  input.value = "";
+  input.disabled = true;
+  const btn = $("#drawer-feedback-form button");
+  if (btn) btn.disabled = true;
+  const thinking = document.createElement("div");
+  thinking.className = "qa-msg a";
+  thinking.innerHTML = `<div class="qa-role">Bonsai</div><div class="qa-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+  $("#drawer-feedback-log").appendChild(thinking);
+
+  try {
+    const res = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId, message: msg }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { reply } = await res.json();
+    thinking.querySelector(".qa-body").textContent = reply;
+  } catch (err) {
+    thinking.querySelector(".qa-body").textContent = `Error: ${err?.message ?? err}`;
+    thinking.classList.add("error");
+  } finally {
+    input.disabled = false;
+    if (btn) btn.disabled = false;
+    input.focus();
+  }
+}
+
+async function deleteBill() {
+  const row = drawerState?.row;
+  const runId = row?.audit?.run_id;
+  if (!runId) return;
+  const vendor = row.vendor ?? "this bill";
+  const ok = await confirmModal({
+    title: `Delete ${vendor}?`,
+    body: "This removes the audit, appeal letter, and uploaded files. Can't be undone.",
+    confirmText: "Delete",
+    cancelText: "Cancel",
+  });
+  if (!ok) return;
+  try {
+    const res = await fetch("/api/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadHistory();
+    updateNavCounts();
+    if (currentNav === "bills") renderBills();
+    closeBillDrawer();
+  } catch (err) {
+    alert(`Couldn't delete: ${err?.message ?? err}`);
+  }
+}
+
+/** Promise-based confirm modal. Resolves true on confirm, false on cancel/scrim. */
+function confirmModal({ title, body, confirmText = "Confirm", cancelText = "Cancel" }) {
+  return new Promise((resolve) => {
+    const modal = $("#confirm-modal");
+    const scrim = $("#confirm-scrim");
+    const ok = $("#confirm-ok");
+    const cancel = $("#confirm-cancel");
+    if (!modal || !scrim || !ok || !cancel) { resolve(false); return; }
+
+    $("#confirm-title").textContent = title;
+    $("#confirm-sub").textContent = body;
+    ok.textContent = confirmText;
+    cancel.textContent = cancelText;
+
+    scrim.hidden = false;
+    modal.hidden = false;
+    requestAnimationFrame(() => {
+      scrim.classList.add("open");
+      modal.classList.add("open");
+    });
+
+    const cleanup = () => {
+      scrim.classList.remove("open");
+      modal.classList.remove("open");
+      setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      scrim.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKey);
+    };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") onCancel();
+      else if (ev.key === "Enter") onOk();
+    };
+
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    scrim.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKey);
+    ok.focus();
+  });
+}
+
+async function resumeAgent() {
+  const row = drawerState?.row;
+  const runId = row?.audit?.run_id;
+  if (!runId) return;
+  try {
+    const res = await fetch("/api/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadHistory();
+    updateNavCounts();
+    if (currentNav === "bills") renderBills();
+    // Stay in the drawer so the user can see the state flip back to
+    // Negotiating with the Stop button ready.
+    const updatedRow = findUpdatedRowAfterRefresh(row);
+    if (updatedRow) {
+      drawerState.row = updatedRow;
+      openBillDrawer(updatedRow);
+    } else {
+      closeBillDrawer();
+    }
+  } catch (err) {
+    alert(`Couldn't resume: ${err?.message ?? err}`);
+  }
+}
+
+async function stopAgent() {
+  const row = drawerState.row;
+  const runId = row?.audit?.run_id;
+  if (!runId) return;
+  // Fire-and-re-render. No disabled state on the button — the user should
+  // always be able to stop, cancel stops, or change their mind. The
+  // operation only affects this specific run_id, so other bills keep
+  // negotiating uninterrupted.
+  try {
+    const res = await fetch("/api/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await loadHistory();
+    updateNavCounts();
+    if (currentNav === "bills") renderBills();
+    const updatedRow = findUpdatedRowAfterRefresh(row);
+    if (updatedRow) {
+      drawerState.row = updatedRow;
+      openBillDrawer(updatedRow);
+    } else {
+      closeBillDrawer();
+    }
+  } catch (err) {
+    alert(`Couldn't stop: ${err?.message ?? err}`);
+  }
+}
+
+// After a status flip, the bills cache is refreshed but `drawerState.row`
+// still points at the old object. Reach into the fresh audits list to grab
+// the new row for the same name so the drawer can re-render with updated
+// lifecycle / status.
+function findUpdatedRowAfterRefresh(row) {
+  const name = row?.audit?.name;
+  if (!name) return null;
+  const audits = historyCache?.audits ?? [];
+  const fresh = audits.find((a) => a.name === name);
+  if (!fresh) return null;
+  const score = scoreFromAudit(fresh);
+  const isNegotiating = fresh.status === "negotiating" || fresh.outcome === "negotiating";
+  const isFailed = fresh.status === "failed" || fresh.outcome === "failed";
+  const isCancelled = fresh.status === "cancelled" || fresh.outcome === "cancelled";
+  const isEscalated = fresh.outcome === "escalated";
+  const isResolved = fresh.outcome === "resolved";
+  let lifecycle;
+  if (isNegotiating) lifecycle = "active";
+  else if (isResolved) lifecycle = "resolved";
+  else lifecycle = "attention";
+  return {
+    ...row,
+    audit: fresh,
+    lifecycle,
+    status: isNegotiating ? "negotiating" : (isCancelled ? "cancelled" : (isFailed ? "failed" : "completed")),
+  };
+}
+
+function drawerFreqKey(row) {
+  return `bonsai.freq.${row?.id ?? row?.audit?.name ?? row?.vendor ?? "unknown"}`;
 }
 
 function closeBillDrawer() {
@@ -2171,14 +2791,15 @@ function showBillViewerIndex(i) {
     frame.src = f.url;
     frame.title = f.name;
     body.appendChild(frame);
-  } else if (f.mime.startsWith("image/") && f.mime !== "image/heic" && f.mime !== "image/heif" && f.mime !== "image/tiff") {
+  } else if (f.mime.startsWith("image/")) {
+    // Every image file previews inline. The server transcodes HEIC/HEIF/TIFF
+    // to JPEG on the fly, so we can render them as a normal <img>.
     const img = document.createElement("img");
     img.className = "bv-img";
     img.alt = f.name;
     img.src = f.url;
     body.appendChild(img);
   } else {
-    // Browsers generally can't render HEIC/HEIF/TIFF inline.
     const box = document.createElement("div");
     box.className = "bv-empty";
     box.innerHTML = `Your browser can't preview <code>${escapeHtml(f.ext.toUpperCase())}</code> files inline. Use <strong>Open in new tab</strong> above, or <a class="bv-download" href="${escapeHtml(f.url)}" download="${escapeHtml(f.name)}">download ${escapeHtml(f.name)}</a>.`;
@@ -2222,16 +2843,44 @@ function renderDrawerStats(row, report) {
   const now = summary.final_balance ?? row.balance ?? 0;
   const saved = summary.patient_saved ?? 0;
   const channel = summary.channel_used ?? "—";
-  const statusTag = row.kind === "audit"
-    ? (summary.outcome === "resolved" ? "Resolved"
-       : summary.outcome === "escalated" ? "Needs approval"
-       : "In review")
-    : row.scoreLabel ?? "Watching";
+
+  // Traffic-light status lives inside the drawer only. Active = yellow,
+  // resolved = green, attention (escalated/failed/not-started) = red.
+  let statusTone = "attention";
+  let statusLabel = "Needs attention";
+  if (row.status === "cancelled" || summary.outcome === "cancelled") {
+    statusTone = "attention";
+    statusLabel = "Stopped";
+  } else if (row.lifecycle === "active" || summary.outcome === "in_progress" || row.status === "negotiating") {
+    statusTone = "active";
+    statusLabel = "Negotiating";
+  } else if (row.lifecycle === "resolved" || summary.outcome === "resolved") {
+    statusTone = "resolved";
+    statusLabel = "Resolved";
+  } else if (row.kind !== "audit") {
+    statusTone = "resolved";
+    statusLabel = row.scoreLabel ?? "Watching";
+  }
+
+  const hasRunId = !!row?.audit?.run_id;
   $("#drawer-stats").innerHTML = `
     <div class="drawer-stat"><div class="eyebrow">Original</div><div class="drawer-stat-val ${saved ? "strike" : ""}">${fmt$(was)}</div></div>
     <div class="drawer-stat"><div class="eyebrow">Current</div><div class="drawer-stat-val">${fmt$(now)}</div></div>
     <div class="drawer-stat"><div class="eyebrow">Saved</div><div class="drawer-stat-val green">${saved ? fmt$(saved) : "—"}</div></div>
-    <div class="drawer-stat"><div class="eyebrow">Status</div><div class="drawer-stat-val mute">${escapeHtml(statusTag)}${channel && channel !== "—" ? ` · ${channel}` : ""}</div></div>`;
+    <div class="drawer-stat drawer-stat-status-wrap">
+      <div class="drawer-stat-status-lead">
+        <div class="eyebrow">Status</div>
+        <div class="drawer-stat-status bill-status bill-status-${statusTone}">
+          <span class="status-dot"></span><span>${escapeHtml(statusLabel)}</span>
+        </div>
+      </div>
+      ${hasRunId ? `
+        <button type="button" id="drawer-delete-btn" class="drawer-delete-icon" title="Delete this bill" aria-label="Delete this bill">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+        </button>` : ""}
+    </div>`;
+  // Wire delete on every re-render since innerHTML replaces it.
+  $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
 }
 
 function renderDrawerTab(which) {
@@ -2239,12 +2888,8 @@ function renderDrawerTab(which) {
   const { row, report } = drawerState;
   if (which === "activity") {
     body.innerHTML = renderActivityTimeline(row, report);
-  } else if (which === "findings") {
-    body.innerHTML = renderDrawerFindings(row, report);
   } else if (which === "messages") {
     body.innerHTML = renderDrawerMessages(row, report);
-  } else if (which === "report") {
-    body.innerHTML = renderDrawerReport(row, report);
   }
 }
 
@@ -2281,7 +2926,7 @@ function buildTimelineEvents(row, report) {
     events.push({
       ts: Date.now() - Math.max(1, parseRelTime(row.lastCheck)),
       headline: `Last check`,
-      detail: `Balance ${fmt$(row.balance)}${row.rate}.`,
+      detail: `Amount ${fmt$(row.balance)}${row.rate}.`,
       channel: "watch",
       tone: "ink",
     });
@@ -2303,7 +2948,7 @@ function buildTimelineEvents(row, report) {
     detail: [
       meta.date_of_service ? `Service date ${meta.date_of_service}` : null,
       meta.claim_number ? `Claim ${meta.claim_number}` : null,
-      summary.original_balance != null ? `Balance ${fmt$(summary.original_balance)}` : null,
+      summary.original_balance != null ? `Amount ${fmt$(summary.original_balance)}` : null,
     ].filter(Boolean).join(" · "),
     channel: "intake",
     actor: "Patient",

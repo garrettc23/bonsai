@@ -174,3 +174,37 @@ export async function normalizeBillFile(
     transcoded: true,
   };
 }
+
+/**
+ * Build a small JPEG thumbnail from any supported bill file. Returns null
+ * for PDFs (the staging UI already renders a document icon). Used by the
+ * thumbnail endpoint so HEIC/HEIF previews can render in the browser
+ * without a full audit upload.
+ */
+export async function thumbnailBillBytes(
+  bytes: Buffer,
+  filename: string,
+  maxDim = 360,
+): Promise<Buffer | null> {
+  const mediaType = detectMediaType(bytes, filename);
+  if (!mediaType || mediaType === "application/pdf") return null;
+
+  // HEIC/HEIF needs the pure-JS decoder first; everything else goes
+  // straight through sharp.
+  let rgbSource: Buffer;
+  if (mediaType === "image/heic" || mediaType === "image/heif") {
+    const rawJpeg = await (heicConvert as HeicConvert)({
+      buffer: bytes,
+      format: "JPEG",
+      quality: 0.8,
+    });
+    rgbSource = Buffer.from(rawJpeg);
+  } else {
+    rgbSource = bytes;
+  }
+  return sharp(rgbSource)
+    .rotate()
+    .resize(maxDim, maxDim, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 80 })
+    .toBuffer();
+}
