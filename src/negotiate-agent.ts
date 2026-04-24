@@ -37,6 +37,7 @@ import {
 import { simulateSmsReply, type SmsPersona } from "./simulate-sms-reply.ts";
 import { simulateCall, type RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { CallState } from "./voice/tool-handlers.ts";
+import type { AgentTone } from "./lib/user-settings.ts";
 
 export type AttemptChannel = "email" | "sms" | "voice";
 
@@ -89,6 +90,12 @@ export interface RunNegotiationAgentOpts {
   max_sms_rounds?: number;
   /** If true, always run all 3 channels even if floor is hit. For demos. Default false. */
   always_exhaust?: boolean;
+  /** Which channels are allowed to run this round. Defaults to all enabled. */
+  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  /** Free-form user directives piped into every negotiator's system prompt. */
+  user_directives?: string;
+  /** Tone override for every negotiator's system prompt. */
+  agent_tone?: AgentTone;
   anthropic?: Anthropic;
 }
 
@@ -113,6 +120,8 @@ async function runEmailAttempt(opts: {
   persona: EmailPersona;
   max_rounds: number;
   original_balance: number;
+  user_directives?: string;
+  agent_tone?: AgentTone;
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["email"] }> {
   const client = new MockEmailClient();
@@ -122,6 +131,8 @@ async function runEmailAttempt(opts: {
     patient_email: opts.patient_email,
     provider_email: opts.provider_email,
     final_acceptable_floor: opts.floor,
+    user_directives: opts.user_directives,
+    agent_tone: opts.agent_tone,
   });
   let state = initState;
   saveNegotiationState(state);
@@ -186,6 +197,8 @@ async function runSmsAttempt(opts: {
   persona: SmsPersona;
   max_rounds: number;
   original_balance: number;
+  user_directives?: string;
+  agent_tone?: AgentTone;
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["sms"] }> {
   const client = new MockSmsClient();
@@ -195,6 +208,8 @@ async function runSmsAttempt(opts: {
     patient_phone: opts.patient_phone,
     provider_phone: opts.provider_phone,
     final_acceptable_floor: opts.floor,
+    user_directives: opts.user_directives,
+    agent_tone: opts.agent_tone,
     anthropic: opts.anthropic,
   });
   let state = initState;
@@ -359,93 +374,116 @@ export async function runNegotiationAgent(
     result.total_saved = original_balance - (best.final_amount as number);
   };
 
+  const channels = {
+    email: opts.channels_enabled?.email !== false,
+    sms: opts.channels_enabled?.sms !== false,
+    voice: opts.channels_enabled?.voice !== false,
+  };
+
   // 1. Email
-  try {
-    const { attempt, view } = await runEmailAttempt({
-      analyzer: opts.analyzer,
-      patient_email,
-      provider_email,
-      floor,
-      persona: opts.email_persona ?? "stall_then_concede",
-      max_rounds: opts.max_email_rounds ?? 4,
-      original_balance,
-      anthropic,
-    });
-    attempts.push(attempt);
-    result.email = view;
-    updateBest();
-    if (hitFloor(attempt) && !opts.always_exhaust) {
-      result.outcome = "floor_hit";
-      result.headline = `Email hit the floor at $${attempt.final_amount?.toFixed(2)}. No further channels needed.`;
-      return result;
+  if (channels.email) {
+    try {
+      const { attempt, view } = await runEmailAttempt({
+        analyzer: opts.analyzer,
+        patient_email,
+        provider_email,
+        floor,
+        persona: opts.email_persona ?? "stall_then_concede",
+        max_rounds: opts.max_email_rounds ?? 4,
+        original_balance,
+        user_directives: opts.user_directives,
+        agent_tone: opts.agent_tone,
+        anthropic,
+      });
+      attempts.push(attempt);
+      result.email = view;
+      updateBest();
+      if (hitFloor(attempt) && !opts.always_exhaust) {
+        result.outcome = "floor_hit";
+        result.headline = `Email hit the floor at $${attempt.final_amount?.toFixed(2)}. No further channels needed.`;
+        return result;
+      }
+    } catch (err) {
+      attempts.push({
+        channel: "email",
+        final_amount: null,
+        saved: null,
+        outcome: "escalated",
+        outcome_detail: `Email attempt crashed: ${(err as Error).message}`,
+        turns: 0,
+      });
     }
-  } catch (err) {
-    attempts.push({
-      channel: "email",
-      final_amount: null,
-      saved: null,
-      outcome: "escalated",
-      outcome_detail: `Email attempt crashed: ${(err as Error).message}`,
-      turns: 0,
-    });
   }
 
   // 2. SMS
-  try {
-    const { attempt, view } = await runSmsAttempt({
-      analyzer: opts.analyzer,
-      patient_phone,
-      provider_phone,
-      floor,
-      persona: opts.sms_persona ?? "stall_then_concede",
-      max_rounds: opts.max_sms_rounds ?? 4,
-      original_balance,
-      anthropic,
-    });
-    attempts.push(attempt);
-    result.sms = view;
-    updateBest();
-    if (hitFloor(attempt) && !opts.always_exhaust) {
-      result.outcome = "floor_hit";
-      result.headline = `SMS hit the floor at $${attempt.final_amount?.toFixed(2)} after email stalled. Escalation worked.`;
-      return result;
+  if (channels.sms) {
+    try {
+      const { attempt, view } = await runSmsAttempt({
+        analyzer: opts.analyzer,
+        patient_phone,
+        provider_phone,
+        floor,
+        persona: opts.sms_persona ?? "stall_then_concede",
+        max_rounds: opts.max_sms_rounds ?? 4,
+        original_balance,
+        user_directives: opts.user_directives,
+        agent_tone: opts.agent_tone,
+        anthropic,
+      });
+      attempts.push(attempt);
+      result.sms = view;
+      updateBest();
+      if (hitFloor(attempt) && !opts.always_exhaust) {
+        result.outcome = "floor_hit";
+        result.headline = `SMS hit the floor at $${attempt.final_amount?.toFixed(2)} after email stalled. Escalation worked.`;
+        return result;
+      }
+    } catch (err) {
+      attempts.push({
+        channel: "sms",
+        final_amount: null,
+        saved: null,
+        outcome: "escalated",
+        outcome_detail: `SMS attempt crashed: ${(err as Error).message}`,
+        turns: 0,
+      });
     }
-  } catch (err) {
-    attempts.push({
-      channel: "sms",
-      final_amount: null,
-      saved: null,
-      outcome: "escalated",
-      outcome_detail: `SMS attempt crashed: ${(err as Error).message}`,
-      turns: 0,
-    });
   }
 
   // 3. Voice — last resort, highest conversion on tough disputes
-  try {
-    const { attempt, view } = await runVoiceAttempt({
-      analyzer: opts.analyzer,
-      floor,
-      persona: opts.voice_persona ?? "cooperative",
-      original_balance,
-    });
-    attempts.push(attempt);
-    result.voice = view;
-    updateBest();
-    if (hitFloor(attempt)) {
-      result.outcome = "floor_hit";
-      result.headline = `Voice hit the floor at $${attempt.final_amount?.toFixed(2)} after email and SMS stalled.`;
-      return result;
+  if (channels.voice) {
+    try {
+      const { attempt, view } = await runVoiceAttempt({
+        analyzer: opts.analyzer,
+        floor,
+        persona: opts.voice_persona ?? "cooperative",
+        original_balance,
+      });
+      attempts.push(attempt);
+      result.voice = view;
+      updateBest();
+      if (hitFloor(attempt)) {
+        result.outcome = "floor_hit";
+        result.headline = `Voice hit the floor at $${attempt.final_amount?.toFixed(2)} after email and SMS stalled.`;
+        return result;
+      }
+    } catch (err) {
+      attempts.push({
+        channel: "voice",
+        final_amount: null,
+        saved: null,
+        outcome: "escalated",
+        outcome_detail: `Voice attempt crashed: ${(err as Error).message}`,
+        turns: 0,
+      });
     }
-  } catch (err) {
-    attempts.push({
-      channel: "voice",
-      final_amount: null,
-      saved: null,
-      outcome: "escalated",
-      outcome_detail: `Voice attempt crashed: ${(err as Error).message}`,
-      turns: 0,
-    });
+  }
+
+  const disabled = Object.entries(channels).filter(([, on]) => !on).map(([k]) => k);
+  if (disabled.length > 0 && attempts.length === 0) {
+    result.outcome = "exhausted_no_offer";
+    result.headline = `No channels ran — user disabled ${disabled.join(", ")}.`;
+    return result;
   }
 
   // Exhausted all 3 channels.

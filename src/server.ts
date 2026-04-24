@@ -151,6 +151,14 @@ interface PendingRun {
    * the next round changes behavior per the user's notes.
    */
   feedback?: Array<{ role: "user" | "assistant"; body: string; ts: string }>;
+  /** Per-run channel gating derived from feedback + tune config. */
+  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  /** Per-run tone override derived from feedback + tune config. */
+  agent_tone?: "polite" | "firm" | "aggressive";
+  /** Per-run free-form directives from parsed feedback. */
+  user_directives?: string;
+  /** Explicit floor override (dollars) from UI if user set one. */
+  final_acceptable_floor?: number;
 }
 
 const MAX_BILL_FILES = 10;
@@ -355,15 +363,6 @@ async function handleAudit(req: Request): Promise<Response> {
     status: "audited",
   };
   savePending(run);
-
-  // Fire-and-forget: text the user the audit summary + APPROVE/STOP prompt.
-  void import("./telegram/notify.ts").then(({ notifyAuditComplete }) =>
-    notifyAuditComplete({
-      provider: partial.analyzer?.metadata?.provider_name ?? run.fixture_name,
-      report: partial,
-      run_id: run.run_id,
-    }),
-  ).catch((err) => console.error("[notify audit]", err));
 
   return Response.json({ run_id: run.run_id, report: partial });
 }
@@ -715,6 +714,12 @@ async function handleApprove(req: Request): Promise<Response> {
 async function kickoffNegotiation(runId: string): Promise<void> {
   const run = loadPending(runId);
   if (!run) return;
+  const { getProfileConfig, getTuneConfig } = await import("./lib/user-settings.ts");
+  const profile = getProfileConfig();
+  const tune = getTuneConfig();
+  const originalBalance = run.partial_report?.summary?.original_balance ?? 0;
+  const floorFromTune =
+    originalBalance > 0 ? originalBalance * (1 - tune.floor_pct / 100) : undefined;
   try {
     const full = await runNegotiationPhase(run.partial_report, {
       billPdfPath: run.bill_path,
@@ -724,6 +729,12 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       email_persona: run.email_persona,
       voice_persona: run.voice_persona,
       sms_persona: run.sms_persona,
+      patient_email: profile.email ?? undefined,
+      patient_phone: profile.phone ?? undefined,
+      final_acceptable_floor: run.final_acceptable_floor ?? floorFromTune,
+      channels_enabled: run.channels_enabled ?? tune.channels,
+      agent_tone: run.agent_tone ?? tune.tone,
+      user_directives: run.user_directives,
     });
     const latest = loadPending(runId);
     if (latest?.status === "cancelled") {
@@ -740,13 +751,6 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       latest.completed_at = Date.now();
       savePending(latest);
     }
-    // Text the user the outcome.
-    void import("./telegram/notify.ts").then(({ notifyNegotiationDone }) =>
-      notifyNegotiationDone({
-        provider: full.analyzer?.metadata?.provider_name ?? run.fixture_name,
-        report: full,
-      }),
-    ).catch((err) => console.error("[notify done]", err));
   } catch (err) {
     const latest = loadPending(runId);
     if (latest && latest.status !== "cancelled") {
@@ -754,12 +758,6 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       latest.error = (err as Error)?.message ?? String(err);
       savePending(latest);
     }
-    void import("./telegram/notify.ts").then(({ notifyNegotiationFailed }) =>
-      notifyNegotiationFailed({
-        provider: run.partial_report?.analyzer?.metadata?.provider_name ?? run.fixture_name,
-        error: (err as Error)?.message ?? String(err),
-      }),
-    ).catch((nerr) => console.error("[notify failed]", nerr));
     throw err;
   }
 }
@@ -827,12 +825,24 @@ async function handleResumeNegotiation(req: Request): Promise<Response> {
   //   - audited (never approved)      → kick off the first negotiation round
   //   - cancelled / failed (paused)   → resume where we left off
   //   - completed (recurring check)   → start a fresh round against the same bill
-  // Fold any user feedback into plan_edits so the next round reflects it.
-  const userNotes = (run.feedback ?? [])
+  // Fold user feedback into plan_edits AND parse it for structured directives
+  // (channel gates, tone). The agent respects both on the next round.
+  const userFeedback = (run.feedback ?? [])
     .filter((f) => f.role === "user")
-    .map((f) => `- ${f.body}`);
-  if (userNotes.length > 0) {
-    const extra = `Resumed with user feedback:\n${userNotes.join("\n")}`;
+    .map((f) => f.body);
+  if (userFeedback.length > 0) {
+    const { parseFeedbackDirectives } = await import("./lib/feedback-parser.ts");
+    const { getTuneConfig } = await import("./lib/user-settings.ts");
+    const tune = getTuneConfig();
+    const parsed = parseFeedbackDirectives(userFeedback);
+    run.channels_enabled = {
+      email: parsed.channels?.email ?? tune.channels.email,
+      sms: parsed.channels?.sms ?? tune.channels.sms,
+      voice: parsed.channels?.voice ?? tune.channels.voice,
+    };
+    run.agent_tone = parsed.tone ?? tune.tone;
+    run.user_directives = parsed.notes.join("\n");
+    const extra = `Resumed with user feedback:\n${parsed.notes.map((n) => `- ${n}`).join("\n")}`;
     run.plan_edits = run.plan_edits ? `${run.plan_edits}\n\n${extra}` : extra;
   }
   run.status = "negotiating";
@@ -1249,58 +1259,181 @@ async function handleOfferRun(file: string): Promise<Response> {
   });
 }
 
-async function handleSaveAccount(req: Request): Promise<Response> {
+async function handleSaveProfile(req: Request): Promise<Response> {
   const body = (await req.json()) as {
-    name?: string | null;
+    first_name?: string | null;
+    last_name?: string | null;
     email?: string | null;
     phone?: string | null;
+    address?: string | null;
+    dob?: string | null;
+    ssn_last4?: string | null;
+    drivers_license?: string | null;
+    authorized?: boolean;
+    hipaa_acknowledged?: boolean;
+  };
+  const { setProfileConfig, getProfileConfig } = await import("./lib/user-settings.ts");
+  setProfileConfig({
+    first_name: body.first_name ?? undefined,
+    last_name: body.last_name ?? undefined,
+    email: body.email ?? undefined,
+    phone: body.phone ?? undefined,
+    address: body.address ?? undefined,
+    dob: body.dob ?? undefined,
+    ssn_last4: body.ssn_last4 ?? undefined,
+    drivers_license: body.drivers_license ?? undefined,
+    authorized: body.authorized,
+    hipaa_acknowledged: body.hipaa_acknowledged,
+  });
+  return Response.json({ ok: true, profile: getProfileConfig() });
+}
+
+async function handleExport(): Promise<Response> {
+  const { readdirSync } = await import("node:fs");
+  const outDir = join(ROOT, "out");
+  const dump: {
+    exported_at: string;
+    profile: unknown;
+    tune: unknown;
+    bills: unknown[];
+    reports: Record<string, unknown>;
+    appeals: Record<string, string>;
+  } = {
+    exported_at: new Date().toISOString(),
+    profile: null,
+    tune: null,
+    bills: [],
+    reports: {},
+    appeals: {},
+  };
+  try {
+    const { getProfileConfig, getTuneConfig } = await import("./lib/user-settings.ts");
+    dump.profile = getProfileConfig();
+    dump.tune = getTuneConfig();
+  } catch (err) {
+    console.warn("[export] settings load failed", err);
+  }
+  if (existsSync(PENDING_DIR)) {
+    for (const name of readdirSync(PENDING_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        dump.bills.push(JSON.parse(readFileSync(join(PENDING_DIR, name), "utf-8")));
+      } catch (err) {
+        console.warn("[export] bad pending file", name, err);
+      }
+    }
+  }
+  if (existsSync(outDir)) {
+    for (const name of readdirSync(outDir)) {
+      if (name.startsWith("report-") && name.endsWith(".json")) {
+        try {
+          dump.reports[name] = JSON.parse(readFileSync(join(outDir, name), "utf-8"));
+        } catch (err) {
+          console.warn("[export] bad report file", name, err);
+        }
+      } else if (name.startsWith("appeal-") && name.endsWith(".md")) {
+        dump.appeals[name] = readFileSync(join(outDir, name), "utf-8");
+      }
+    }
+  }
+  return new Response(JSON.stringify(dump, null, 2), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Disposition": `attachment; filename="bonsai-export-${new Date()
+        .toISOString()
+        .slice(0, 10)}.json"`,
+    },
+  });
+}
+
+async function handleDeleteAccount(req: Request): Promise<Response> {
+  // Server-side confirmation guard. Without this, any browser tab on localhost
+  // could drive-by wipe the user's data via a single fetch. The body is the
+  // only thing that distinguishes an intentional delete from a CSRF.
+  let body: { confirm?: string };
+  try {
+    body = (await req.json()) as { confirm?: string };
+  } catch {
+    return Response.json({ error: "Missing confirmation body" }, { status: 400 });
+  }
+  if (body.confirm !== "DELETE") {
+    return Response.json({ error: "Confirmation required" }, { status: 400 });
+  }
+  const { readdirSync, rmSync } = await import("node:fs");
+  const outDir = join(ROOT, "out");
+  const tryUnlink = (p: string): void => {
+    if (!existsSync(p)) return;
+    try {
+      unlinkSync(p);
+    } catch (err) {
+      console.warn("[delete-account] unlink failed", p, err);
+    }
+  };
+  const tryRmDir = (p: string): void => {
+    if (!existsSync(p)) return;
+    try {
+      rmSync(p, { recursive: true, force: true });
+    } catch (err) {
+      console.warn("[delete-account] rm dir failed", p, err);
+    }
+  };
+  // Pending runs
+  if (existsSync(PENDING_DIR)) {
+    for (const name of readdirSync(PENDING_DIR)) {
+      if (!name.endsWith(".json")) continue;
+      tryUnlink(join(PENDING_DIR, name));
+    }
+  }
+  // Reports + appeals
+  if (existsSync(outDir)) {
+    for (const name of readdirSync(outDir)) {
+      if (
+        (name.startsWith("report-") && name.endsWith(".json")) ||
+        (name.startsWith("appeal-") && name.endsWith(".md"))
+      ) {
+        tryUnlink(join(outDir, name));
+      }
+    }
+  }
+  // Per-channel transcript state directories. The modal promises to wipe
+  // "every negotiation transcript" — these are where transcripts live.
+  tryRmDir(join(outDir, "threads"));
+  tryRmDir(join(outDir, "sms-threads"));
+  tryRmDir(join(outDir, "offers"));
+  // User settings (profile + tune)
+  tryUnlink(join(outDir, "user-settings.json"));
+  // Uploaded bill files — only the directory we own.
+  tryRmDir(UPLOAD_DIR);
+  return Response.json({ ok: true });
+}
+
+async function handleSaveTune(req: Request): Promise<Response> {
+  const body = (await req.json()) as {
+    tone?: "polite" | "firm" | "aggressive";
+    channels?: { email?: boolean; sms?: boolean; voice?: boolean };
+    floor_pct?: number;
     email_digest?: boolean;
     mobile_alerts?: boolean;
   };
-  const { setAccountConfig, getAccountConfig } = await import("./lib/user-settings.ts");
-  setAccountConfig({
-    name: body.name ?? undefined,
-    email: body.email ?? undefined,
-    phone: body.phone ?? undefined,
+  const { setTuneConfig, getTuneConfig } = await import("./lib/user-settings.ts");
+  setTuneConfig({
+    tone: body.tone,
+    channels: body.channels,
+    floor_pct: body.floor_pct,
     email_digest: body.email_digest,
     mobile_alerts: body.mobile_alerts,
   });
-  return Response.json({ ok: true, account: getAccountConfig() });
-}
-
-async function handleSaveTelegram(req: Request): Promise<Response> {
-  const body = (await req.json()) as { botToken?: string | null; chatId?: string | null };
-  const { setTelegramConfig, getTelegramConfig } = await import("./lib/user-settings.ts");
-  setTelegramConfig({ botToken: body.botToken ?? undefined, chatId: body.chatId ?? undefined });
-  const tg = getTelegramConfig();
-  // If both are now set and the bot isn't already polling, start it.
-  if (tg.botToken && tg.chatId) {
-    try {
-      const { startTelegramBot } = await import("./telegram/bot.ts");
-      startTelegramBot();
-    } catch (err) { console.error("[telegram] start failed", err); }
-  }
-  return Response.json({
-    ok: true,
-    bot_token_set: !!tg.botToken,
-    chat_id_set: !!tg.chatId,
-    chat_id: tg.chatId ?? "",
-  });
+  return Response.json({ ok: true, tune: getTuneConfig() });
 }
 
 async function handleSettings(): Promise<Response> {
   const has = (k: string) => Boolean(process.env[k] && process.env[k]!.length > 0);
-  const { getTelegramConfig, getAccountConfig } = await import("./lib/user-settings.ts");
-  const tg = getTelegramConfig();
-  const account = getAccountConfig();
+  const { getProfileConfig, getTuneConfig } = await import("./lib/user-settings.ts");
+  const profile = getProfileConfig();
+  const tune = getTuneConfig();
   return Response.json({
-    account,
-    telegram: {
-      bot_token_set: !!tg.botToken,
-      chat_id_set: !!tg.chatId,
-      // Never echo the token back — only confirmation that it's set.
-      chat_id_preview: tg.chatId ?? "",
-    },
+    profile,
+    tune,
     integrations: [
       {
         key: "anthropic",
@@ -1330,16 +1463,6 @@ async function handleSettings(): Promise<Response> {
           ? `Agent ID ${process.env.ELEVENLABS_AGENT_ID ?? "(unset — create via client.createAgent())"}.`
           : "Voice flows run the dual-Claude simulator. Real tool-handlers dispatch either way.",
         env: ["ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID", "ELEVENLABS_WEBHOOK_BASE"],
-        required: false,
-      },
-      {
-        key: "telegram",
-        label: "Telegram (chat)",
-        status: tg.botToken && tg.chatId ? "connected" : "missing",
-        detail: tg.botToken && tg.chatId
-          ? `Bot token set · chat ${tg.chatId}. You'll get audit summaries and can text back to approve or stop.`
-          : "Paste your bot token + chat_id to get live updates over Telegram.",
-        env: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
         required: false,
       },
       {
@@ -1376,8 +1499,10 @@ const server = Bun.serve({
       if (req.method === "GET" && url.pathname === "/api/fixtures") return handleListFixtures();
       if (req.method === "GET" && url.pathname === "/api/history") return handleHistory();
       if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
-      if (req.method === "POST" && url.pathname === "/api/settings/telegram") return handleSaveTelegram(req);
-      if (req.method === "POST" && url.pathname === "/api/settings/account") return handleSaveAccount(req);
+      if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
+      if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
+      if (req.method === "GET" && url.pathname === "/api/export") return handleExport();
+      if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req);
       if (req.method === "GET" && url.pathname === "/api/offer-sources") return handleOfferSources();
       if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
       if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
@@ -1419,9 +1544,3 @@ const server = Bun.serve({
 });
 
 console.log(`Bonsai server listening on http://localhost:${server.port}`);
-
-// Start the Telegram bot alongside the HTTP server. Silent no-op unless
-// TELEGRAM_BOT_TOKEN is set in .env — no required dependencies.
-import("./telegram/bot.ts").then(({ startTelegramBot }) => {
-  startTelegramBot();
-});

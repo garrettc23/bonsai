@@ -1,12 +1,12 @@
 /**
  * User-editable settings persisted to `out/user-settings.json`.
  *
- * Overlays `.env` for a handful of keys the user can configure from the
- * Settings UI without restarting the server. Today: Telegram credentials.
- * Fall-through order per key:
- *   1. user-settings.json (UI-edited)
- *   2. process.env (.env file)
- *   3. null (unset)
+ * Two independent sections:
+ *   - profile: the human (name, contact, consent). Populated from the Profile tab.
+ *   - tune:    the agent (tone, channels, floor, notifications). Populated from the Tune your agent tab.
+ *
+ * `.env` is the source of truth for API keys and other integration creds —
+ * this file only stores what the user explicitly sets through the UI.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -17,9 +17,33 @@ const ROOT = join(__dirname, "..", "..");
 const SETTINGS_DIR = join(ROOT, "out");
 const SETTINGS_PATH = join(SETTINGS_DIR, "user-settings.json");
 
-interface UserSettings {
-  telegram_bot_token?: string;
-  telegram_chat_id?: string;
+export type AgentTone = "polite" | "firm" | "aggressive";
+
+interface PersistedSettings {
+  profile?: {
+    first_name?: string;
+    last_name?: string;
+    email?: string;
+    phone?: string;
+    address?: string;
+    dob?: string;
+    ssn_last4?: string;
+    drivers_license?: string;
+    authorized?: boolean;
+    authorized_at?: string;
+    hipaa_acknowledged?: boolean;
+    hipaa_acknowledged_at?: string;
+  };
+  tune?: {
+    tone?: AgentTone;
+    channel_email?: boolean;
+    channel_sms?: boolean;
+    channel_voice?: boolean;
+    floor_pct?: number;
+    email_digest?: boolean;
+    mobile_alerts?: boolean;
+  };
+  // Legacy keys from the old Account card — read once during migration.
   account_name?: string;
   account_email?: string;
   account_phone?: string;
@@ -27,91 +51,156 @@ interface UserSettings {
   notify_mobile_alerts?: boolean;
 }
 
-function load(): UserSettings {
+function load(): PersistedSettings {
   if (!existsSync(SETTINGS_PATH)) return {};
   try {
-    return JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")) as UserSettings;
+    return JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")) as PersistedSettings;
   } catch {
     return {};
   }
 }
 
-function save(s: UserSettings): void {
+function save(s: PersistedSettings): void {
   mkdirSync(SETTINGS_DIR, { recursive: true });
   writeFileSync(SETTINGS_PATH, JSON.stringify(s, null, 2));
 }
 
-function envFallback(key: string): string | undefined {
-  const v = process.env[key];
-  return v && v.trim() ? v.trim() : undefined;
+export interface ProfileConfig {
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  dob: string | null;
+  ssn_last4: string | null;
+  drivers_license: string | null;
+  authorized: boolean;
+  authorized_at: string | null;
+  hipaa_acknowledged: boolean;
+  hipaa_acknowledged_at: string | null;
 }
 
-export interface TelegramConfig {
-  botToken: string | null;
-  chatId: string | null;
-}
-
-export function getTelegramConfig(): TelegramConfig {
+export function getProfileConfig(): ProfileConfig {
   const s = load();
+  const p = s.profile ?? {};
+  // Migrate legacy account_name → first/last on first read.
+  let firstName = p.first_name ?? null;
+  let lastName = p.last_name ?? null;
+  if (!firstName && !lastName && s.account_name) {
+    const parts = s.account_name.trim().split(/\s+/);
+    firstName = parts[0] ?? null;
+    lastName = parts.slice(1).join(" ") || null;
+  }
   return {
-    botToken: s.telegram_bot_token?.trim() || envFallback("TELEGRAM_BOT_TOKEN") || null,
-    chatId: s.telegram_chat_id?.trim() || envFallback("TELEGRAM_CHAT_ID") || null,
+    first_name: firstName?.trim() || null,
+    last_name: lastName?.trim() || null,
+    email: p.email?.trim() || s.account_email?.trim() || null,
+    phone: p.phone?.trim() || s.account_phone?.trim() || null,
+    address: p.address?.trim() || null,
+    dob: p.dob?.trim() || null,
+    ssn_last4: p.ssn_last4?.trim() || null,
+    drivers_license: p.drivers_license?.trim() || null,
+    authorized: !!p.authorized,
+    authorized_at: p.authorized_at ?? null,
+    hipaa_acknowledged: !!p.hipaa_acknowledged,
+    hipaa_acknowledged_at: p.hipaa_acknowledged_at ?? null,
   };
 }
 
-export function setTelegramConfig(input: { botToken?: string | null; chatId?: string | null }): void {
+export function setProfileConfig(
+  input: Partial<Omit<ProfileConfig, "authorized_at" | "hipaa_acknowledged_at">>,
+): void {
   const current = load();
-  const next: UserSettings = { ...current };
-  if (input.botToken !== undefined) {
-    const t = (input.botToken ?? "").trim();
-    if (t) next.telegram_bot_token = t; else delete next.telegram_bot_token;
+  const next: PersistedSettings = { ...current, profile: { ...(current.profile ?? {}) } };
+  const p = next.profile!;
+  const applyStr = (
+    key: "first_name" | "last_name" | "email" | "phone" | "address" | "dob" | "ssn_last4" | "drivers_license",
+    v: string | null | undefined,
+  ) => {
+    if (v === undefined) return;
+    const t = (v ?? "").trim();
+    if (t) p[key] = t; else delete p[key];
+  };
+  applyStr("first_name", input.first_name);
+  applyStr("last_name", input.last_name);
+  applyStr("email", input.email);
+  applyStr("phone", input.phone);
+  applyStr("address", input.address);
+  applyStr("dob", input.dob);
+  if (input.ssn_last4 !== undefined) {
+    const digits = (input.ssn_last4 ?? "").replace(/\D/g, "").slice(0, 4);
+    if (digits.length === 4) p.ssn_last4 = digits;
+    else delete p.ssn_last4;
   }
-  if (input.chatId !== undefined) {
-    const c = (input.chatId ?? "").trim();
-    if (c) next.telegram_chat_id = c; else delete next.telegram_chat_id;
+  applyStr("drivers_license", input.drivers_license);
+  // Only stamp the timestamp on a *transition* into authorized, not on every
+  // save — otherwise editing an unrelated field (address, DOB) would advance
+  // the consent date and the displayed "Signed: <date>" would lie.
+  if (input.authorized !== undefined) {
+    const wasAuthorized = !!p.authorized;
+    const willAuthorize = !!input.authorized;
+    p.authorized = willAuthorize;
+    if (willAuthorize && !wasAuthorized) p.authorized_at = new Date().toISOString();
+    else if (!willAuthorize) delete p.authorized_at;
+  }
+  if (input.hipaa_acknowledged !== undefined) {
+    const wasAcked = !!p.hipaa_acknowledged;
+    const willAck = !!input.hipaa_acknowledged;
+    p.hipaa_acknowledged = willAck;
+    if (willAck && !wasAcked) p.hipaa_acknowledged_at = new Date().toISOString();
+    else if (!willAck) delete p.hipaa_acknowledged_at;
   }
   save(next);
 }
 
-export interface AccountConfig {
-  name: string | null;
-  email: string | null;
-  phone: string | null;
-  /** Weekly email digest of savings + pending approvals. Default on. */
+export interface TuneConfig {
+  tone: AgentTone;
+  channels: { email: boolean; sms: boolean; voice: boolean };
+  /** Target discount off the original balance, 0–100. The floor is
+   * derived at run-time from this by the caller. */
+  floor_pct: number;
   email_digest: boolean;
-  /** Mobile push alerts for real-time approval needs. Default on. */
   mobile_alerts: boolean;
 }
 
-export function getAccountConfig(): AccountConfig {
+export function getTuneConfig(): TuneConfig {
   const s = load();
+  const t = s.tune ?? {};
   return {
-    name: s.account_name?.trim() || null,
-    email: s.account_email?.trim() || null,
-    phone: s.account_phone?.trim() || null,
-    email_digest: s.notify_email_digest !== false, // default true
-    mobile_alerts: s.notify_mobile_alerts !== false, // default true
+    tone: t.tone ?? "firm",
+    channels: {
+      email: t.channel_email !== false,
+      sms: t.channel_sms !== false,
+      voice: t.channel_voice !== false,
+    },
+    floor_pct: typeof t.floor_pct === "number" ? t.floor_pct : 50,
+    email_digest:
+      t.email_digest !== undefined ? !!t.email_digest : s.notify_email_digest !== false,
+    mobile_alerts:
+      t.mobile_alerts !== undefined ? !!t.mobile_alerts : s.notify_mobile_alerts !== false,
   };
 }
 
-export function setAccountConfig(input: {
-  name?: string | null;
-  email?: string | null;
-  phone?: string | null;
+export function setTuneConfig(input: {
+  tone?: AgentTone;
+  channels?: Partial<{ email: boolean; sms: boolean; voice: boolean }>;
+  floor_pct?: number;
   email_digest?: boolean;
   mobile_alerts?: boolean;
 }): void {
   const current = load();
-  const next: UserSettings = { ...current };
-  const applyStr = (key: "account_name" | "account_email" | "account_phone", v: string | null | undefined) => {
-    if (v === undefined) return;
-    const t = (v ?? "").trim();
-    if (t) next[key] = t; else delete next[key];
-  };
-  applyStr("account_name", input.name);
-  applyStr("account_email", input.email);
-  applyStr("account_phone", input.phone);
-  if (input.email_digest !== undefined) next.notify_email_digest = !!input.email_digest;
-  if (input.mobile_alerts !== undefined) next.notify_mobile_alerts = !!input.mobile_alerts;
+  const next: PersistedSettings = { ...current, tune: { ...(current.tune ?? {}) } };
+  const t = next.tune!;
+  if (input.tone && ["polite", "firm", "aggressive"].includes(input.tone)) t.tone = input.tone;
+  if (input.channels) {
+    if (input.channels.email !== undefined) t.channel_email = !!input.channels.email;
+    if (input.channels.sms !== undefined) t.channel_sms = !!input.channels.sms;
+    if (input.channels.voice !== undefined) t.channel_voice = !!input.channels.voice;
+  }
+  if (typeof input.floor_pct === "number" && isFinite(input.floor_pct)) {
+    t.floor_pct = Math.max(0, Math.min(100, input.floor_pct));
+  }
+  if (input.email_digest !== undefined) t.email_digest = !!input.email_digest;
+  if (input.mobile_alerts !== undefined) t.mobile_alerts = !!input.mobile_alerts;
   save(next);
 }

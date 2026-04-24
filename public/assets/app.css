@@ -2267,9 +2267,193 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink-mute);
+  opacity: 1;
+  transition: opacity 0.6s ease;
 }
+.tg-save-status.fading { opacity: 0; }
 .tg-save-status.ok { color: var(--green); }
 .tg-save-status.err { color: var(--red, #b53a3a); }
+
+/* Profile: two inputs side by side in one row (first / last name). */
+.settings-row-split {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+}
+.settings-row-split > .settings-row-main { flex: 1; min-width: 0; }
+
+/* Profile: blanket authorization checkbox. */
+.settings-row-checkbox { padding: 16px 18px; }
+.consent-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+.consent-row input[type="checkbox"] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+.consent-row .settings-row-label { display: block; }
+.consent-row .settings-row-help { display: block; margin-top: 4px; }
+
+/* Profile: HIPAA disclosure panel — reveals when the main auth box is checked. */
+.hipaa-panel {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+  opacity: 0;
+  border-top: 1px solid var(--line);
+  padding: 0 18px;
+}
+.hipaa-panel.open {
+  max-height: 600px;
+  opacity: 1;
+  padding: 16px 18px 18px;
+}
+.hipaa-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-bottom: 8px;
+}
+.hipaa-body {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: var(--surface-alt);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+.hipaa-body p { margin: 0 0 8px; }
+.hipaa-body p:last-child { margin-bottom: 0; }
+.hipaa-body strong { color: var(--ink); font-weight: 600; }
+.hipaa-ack { padding-top: 4px; }
+
+/* Confirm modal — used by Delete account. */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: modal-fade-in 0.15s ease;
+}
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  width: min(440px, 92vw);
+  padding: 24px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+}
+.modal-title {
+  font-family: var(--font-serif, var(--font-sans));
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 12px;
+}
+.modal-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin: 0;
+}
+.modal-body strong { color: var(--ink); font-weight: 600; }
+.modal .settings-input { margin-top: 14px; }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+/* Settings: footer Save row pinned at bottom of the page. */
+.settings-save-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* Tune: tone picker (polite / firm / aggressive). */
+.tone-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 10px;
+}
+.tone-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.tone-opt input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.tone-opt-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+.tone-opt-help {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  line-height: 1.4;
+}
+.tone-opt:hover { border-color: var(--ink-mute); }
+.tone-opt-sel {
+  border-color: var(--ink);
+  background: var(--surface-alt);
+}
+
+/* Tune: channel toggles. */
+.channel-toggles {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+}
+.channel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.channel-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+
 .settings-row {
   padding: 14px 18px;
   border-bottom: 1px solid var(--line);
