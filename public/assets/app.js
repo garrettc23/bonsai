@@ -345,6 +345,7 @@ function renderAuthScreen() {
   attachPasswordToggle(pwField);
   const forgotLink = document.getElementById("auth-forgot");
   const termsRow = document.getElementById("auth-terms");
+  const termsInput = document.getElementById("auth-terms-input");
 
   for (const tab of document.querySelectorAll(".auth-tab")) {
     tab.addEventListener("click", () => {
@@ -372,7 +373,12 @@ function renderAuthScreen() {
     const data = new FormData(ev.target);
     const email = String(data.get("email") || "").trim();
     const password = String(data.get("password") || "");
-    const acceptedTerms = !!data.get("accepted_terms");
+    // The terms checkbox lives in .auth-foot (sibling of <form>) so the
+    // foot can swap forgot-password ↔ terms in the same grid cell without
+    // changing the card's height. That puts the checkbox outside the
+    // form, which means FormData(form) doesn't pick it up — read the
+    // checkbox state straight from the DOM instead.
+    const acceptedTerms = !!termsInput?.checked;
     if (mode === "signup" && !acceptedTerms) {
       errEl.textContent = "Please accept the Terms of Service and Privacy Policy to create an account.";
       errEl.hidden = false;
