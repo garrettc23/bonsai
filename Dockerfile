@@ -23,7 +23,6 @@ COPY . .
 # is created on demand.
 ENV BONSAI_DATA_DIR=/app/data
 RUN mkdir -p /app/data
-VOLUME ["/app/data"]
 
 # NODE_ENV=production flips on the cookie Secure flag and the strict svix
 # verification on the Resend inbound webhook (fail-closed if the secret
