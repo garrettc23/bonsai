@@ -2198,6 +2198,12 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const server = Bun.serve({
   port: PORT,
+  // Bind to all interfaces so Railway's edge proxy (and any other
+  // reverse-proxy / container-orchestrator setup) can reach the listener.
+  // Bun's default should already be 0.0.0.0, but setting it explicitly
+  // forecloses the "deploy is ACTIVE but every request 502s" mystery on
+  // Railway specifically.
+  hostname: "0.0.0.0",
   idleTimeout: 240,
   async fetch(req) {
     const url = new URL(req.url);
