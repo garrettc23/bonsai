@@ -13,7 +13,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { NormalizedBill } from "./extract-bill.ts";
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 4096;
 
 const SYSTEM_PROMPT = `You are a document transcription tool. Your job is to output a verbatim plaintext transcript of a medical bill (or EOB) exactly as it appears in the uploaded file.

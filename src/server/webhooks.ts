@@ -21,6 +21,8 @@
  *     development against `bun run serve`; production sets the secret.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import {
   loadNegotiationState,
   saveNegotiationState,
@@ -33,6 +35,9 @@ import {
 import { loadThread } from "../clients/email-mock.ts";
 import type { InboundEmail } from "../clients/email.ts";
 import { autoEmailClient } from "../clients/email-resend.ts";
+import { dataRoot } from "../lib/user-paths.ts";
+import { withUserContext } from "../lib/user-context.ts";
+import { getUserById } from "../lib/auth.ts";
 
 interface ResendInboundPayload {
   type?: string;
@@ -40,6 +45,7 @@ interface ResendInboundPayload {
   data?: {
     from?: { email?: string } | string;
     to?: Array<{ email?: string } | string> | string;
+    cc?: Array<{ email?: string } | string> | string;
     subject?: string;
     text?: string;
     html?: string;
@@ -65,6 +71,95 @@ function emailString(v: { email?: string } | string | undefined): string {
   return v.email ?? "";
 }
 
+function emailList(
+  v: Array<{ email?: string } | string> | string | undefined,
+): string[] {
+  if (!v) return [];
+  if (typeof v === "string") return [v];
+  return v.map(emailString).filter((s) => s.length > 0);
+}
+
+/** Resolve the user owning this threads dir, then pull their profile
+ * email. Returns null when we can't (legacy thread dir, deleted user,
+ * unset profile). */
+async function resolveUserProfileEmail(threadsDir: string): Promise<string | null> {
+  const userId = userIdFromThreadsDir(threadsDir);
+  if (!userId) return null;
+  const user = getUserById(userId);
+  if (!user) return null;
+  return await withUserContext(user, async () => {
+    const { getProfileConfig } = await import("../lib/user-settings.ts");
+    return getProfileConfig().email;
+  });
+}
+
+/** Send a "the rep replied" forward to the user's inbox so they see the
+ * conversation natively without having to check the Bonsai dashboard.
+ * Skipped when the user is already on the inbound's To/Cc (Reply-All path,
+ * they already have it) or when Resend isn't configured. */
+async function forwardInboundToUser(opts: {
+  inbound: InboundEmail;
+  rawTo: string[];
+  rawCc: string[];
+  threadsDir: string;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL;
+  if (!apiKey || !from) return;
+  const userEmail = await resolveUserProfileEmail(opts.threadsDir);
+  if (!userEmail) return;
+  const userEmailLc = userEmail.toLowerCase();
+  const alreadyOn = [...opts.rawTo, ...opts.rawCc].some(
+    (e) => e.toLowerCase() === userEmailLc,
+  );
+  if (alreadyOn) return;
+  const subject = opts.inbound.subject.startsWith("Fwd: ")
+    ? opts.inbound.subject
+    : `Fwd: ${opts.inbound.subject}`;
+  const body = [
+    `Bonsai received this reply on the bill it's negotiating for you.`,
+    ``,
+    `From: ${opts.inbound.from}`,
+    `Subject: ${opts.inbound.subject}`,
+    `Received: ${opts.inbound.received_at}`,
+    ``,
+    `─────────────────────────`,
+    ``,
+    opts.inbound.body_text,
+    ``,
+    `─────────────────────────`,
+    ``,
+    `The agent has read this and is composing the next round.`,
+    `Open Bonsai to follow along: https://bonsai.app/`,
+  ].join("\n");
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [userEmail],
+        subject,
+        text: body,
+        headers: {
+          "X-Bonsai-Thread-Id": opts.inbound.thread_id,
+          "X-Bonsai-Forward": "1",
+        },
+      }),
+    });
+    if (!res.ok) {
+      console.warn(
+        `[webhook] forward to ${userEmail} failed: ${res.status} ${await res.text().catch(() => "")}`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[webhook] forward to ${userEmail} threw:`, (err as Error).message);
+  }
+}
+
 function correlateThreadId(payload: ResendInboundPayload): string | null {
   const data = payload.data ?? {};
   const fromHeader = pickHeader(data.headers, "X-Bonsai-Thread-Id");
@@ -87,23 +182,50 @@ function correlateThreadId(payload: ResendInboundPayload): string | null {
   return null;
 }
 
-/** Scan out/threads/*.json for an outbound message_id match. Linear in
- * thread count; fine for demo scale. */
+/** Every per-user threads directory plus the legacy `dataRoot/threads`
+ * fallback. Used to find which user owns an inbound thread (the webhook
+ * is unauthenticated so we have no session to point at the right user). */
+function allThreadsDirs(): string[] {
+  const root = dataRoot();
+  const out: string[] = [];
+  const legacy = join(root, "threads");
+  if (existsSync(legacy)) out.push(legacy);
+  const usersDir = join(root, "users");
+  if (existsSync(usersDir)) {
+    for (const userId of readdirSync(usersDir)) {
+      const td = join(usersDir, userId, "threads");
+      if (existsSync(td)) out.push(td);
+    }
+  }
+  return out;
+}
+
+/** Find which on-disk threads directory holds {thread_id}.json. */
+function locateThreadsDir(thread_id: string): string | null {
+  for (const dir of allThreadsDirs()) {
+    if (existsSync(join(dir, `${thread_id}.json`))) return dir;
+  }
+  return null;
+}
+
+/** Extract the user id from a per-user threads dir path. Returns null
+ * for the legacy out/threads/ root. Format: {dataRoot}/users/{id}/threads */
+function userIdFromThreadsDir(threadsDir: string): string | null {
+  const m = threadsDir.match(/users[\\/]([a-zA-Z0-9_-]+)[\\/]threads$/);
+  return m?.[1] ?? null;
+}
+
+/** Scan every user's threads dir for an outbound message_id match.
+ * Linear in (users × threads); fine for demo scale. */
 function lookupThreadByOutboundMessageId(messageId: string): string | null {
-  // Strip RFC 2822 angle brackets if present.
   const id = messageId.replace(/^<|>$/g, "").trim();
-  // Lazy import to avoid a circular dep through email-mock.
-  const { readdirSync, existsSync } = require("node:fs") as typeof import("node:fs");
-  const { dirname, join } = require("node:path") as typeof import("node:path");
-  const { fileURLToPath } = require("node:url") as typeof import("node:url");
-  const here = dirname(fileURLToPath(import.meta.url));
-  const dir = join(here, "..", "..", "out", "threads");
-  if (!existsSync(dir)) return null;
-  for (const f of readdirSync(dir)) {
-    if (!f.endsWith(".json") || f.endsWith(".state.json")) continue;
-    const tid = f.slice(0, -".json".length);
-    const t = loadThread(tid);
-    if (t.outbound.some((m) => m.message_id === id)) return tid;
+  for (const dir of allThreadsDirs()) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".json") || f.endsWith(".state.json")) continue;
+      const tid = f.slice(0, -".json".length);
+      const t = loadThread(tid, dir);
+      if (t.outbound.some((m) => m.message_id === id)) return tid;
+    }
   }
   return null;
 }
@@ -203,40 +325,51 @@ export async function handleResendInbound(req: Request): Promise<Response> {
     return Response.json({ ok: true, correlated: false }, { status: 202 });
   }
 
+  const rawTo = emailList(data.to);
+  const rawCc = emailList(data.cc);
   const inbound: InboundEmail = {
     message_id: message_id.replace(/^<|>$/g, ""),
     received_at: payload.created_at ?? new Date().toISOString(),
     from: emailString(data.from),
-    to: Array.isArray(data.to) ? emailString(data.to[0]) : emailString(data.to),
+    to: rawTo[0] ?? "",
     subject: data.subject ?? "(no subject)",
     body_text: data.text ?? data.html ?? "",
     thread_id,
     in_reply_to: data.in_reply_to,
   };
 
-  const { inserted } = await appendInboundIdempotent(thread_id, inbound);
+  // Find which user's threads dir owns this thread, so the inbound lands
+  // in the right per-user tree.
+  const threadsDir = locateThreadsDir(thread_id) ?? undefined;
+  const { inserted } = await appendInboundIdempotent(thread_id, inbound, threadsDir);
 
-  // Fire-and-forget the agent step so the webhook returns fast (Resend
-  // expects 2xx within 5s). The step writes its own state on completion.
   if (inserted) {
-    void stepInBackground(thread_id);
+    // Fire-and-forget the agent step so the webhook returns fast (Resend
+    // expects 2xx within 5s). The step writes its own state on completion.
+    void stepInBackground(thread_id, threadsDir);
+    // Backstop forward to the user's inbox. Skipped when they were already
+    // CC'd on the inbound (Reply-All) so we don't dupe. Also skipped on
+    // the legacy `out/threads/` path since we have no user to resolve.
+    if (threadsDir) {
+      void forwardInboundToUser({ inbound, rawTo, rawCc, threadsDir });
+    }
   }
 
   return Response.json({ ok: true, correlated: true, inserted, thread_id });
 }
 
-async function stepInBackground(thread_id: string): Promise<void> {
+async function stepInBackground(thread_id: string, threadsDir?: string): Promise<void> {
   try {
     await withThreadLock(thread_id, async () => {
-      const state = loadNegotiationState(thread_id);
+      const state = loadNegotiationState(thread_id, threadsDir);
       if (!state) {
         console.warn(`[webhook] no NegotiationState on disk for ${thread_id}`);
         return;
       }
       if (state.outcome.status !== "in_progress") return;
-      const client = await autoEmailClient();
-      const next = await stepNegotiation({ state, client });
-      saveNegotiationState(next);
+      const client = await autoEmailClient(threadsDir);
+      const next = await stepNegotiation({ state, client, threadsDir });
+      saveNegotiationState(next, threadsDir);
     });
   } catch (err) {
     console.error(`[webhook] step failed for ${thread_id}:`, err);

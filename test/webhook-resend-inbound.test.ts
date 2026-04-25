@@ -77,23 +77,29 @@ afterEach(() => {
 function seedThread(thread_id: string, outboundMessageId?: string) {
   scratchThreadIds.push(thread_id);
   mkdirSync(PROD_THREADS_DIR, { recursive: true });
-  saveThread({
-    thread_id,
-    outbound: outboundMessageId
-      ? [
-          {
-            message_id: outboundMessageId,
-            sent_at: new Date().toISOString(),
-            to: "billing@hospital.example",
-            from: "patient@example.com",
-            subject: "Appeal",
-            body_markdown: "...",
-            thread_id,
-          },
-        ]
-      : [],
-    inbound: [],
-  });
+  // Pass the dir explicitly — `saveThread`'s default reads the active
+  // user from AsyncLocalStorage (per-user paths refactor), which doesn't
+  // apply to the unauthenticated webhook surface this test exercises.
+  saveThread(
+    {
+      thread_id,
+      outbound: outboundMessageId
+        ? [
+            {
+              message_id: outboundMessageId,
+              sent_at: new Date().toISOString(),
+              to: "billing@hospital.example",
+              from: "patient@example.com",
+              subject: "Appeal",
+              body_markdown: "...",
+              thread_id,
+            },
+          ]
+        : [],
+      inbound: [],
+    },
+    PROD_THREADS_DIR,
+  );
 }
 
 function makeRequest(opts: {
@@ -243,7 +249,7 @@ describe("handleResendInbound", () => {
       }),
     );
     expect(res.status).toBe(200);
-    const t = loadThread(tid);
+    const t = loadThread(tid, PROD_THREADS_DIR);
     expect(t.inbound.length).toBe(1);
     expect(t.inbound[0].message_id).toBe("in-001");
     expect(t.inbound[0].body_text).toBe("Approved");
@@ -289,7 +295,7 @@ describe("handleResendInbound", () => {
     expect(res2.status).toBe(200);
     const json = (await res2.json()) as { inserted: boolean };
     expect(json.inserted).toBe(false);
-    const t = loadThread(tid);
+    const t = loadThread(tid, PROD_THREADS_DIR);
     expect(t.inbound.length).toBe(1);
   });
 
@@ -322,7 +328,7 @@ describe("handleResendInbound", () => {
       }),
     );
     expect(res.status).toBe(200);
-    const t = loadThread(tid);
+    const t = loadThread(tid, PROD_THREADS_DIR);
     expect(t.inbound.length).toBe(1);
   });
 });

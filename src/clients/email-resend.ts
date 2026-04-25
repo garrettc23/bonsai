@@ -19,22 +19,59 @@ import type {
 } from "./email.ts";
 import { newId } from "./email.ts";
 
+/**
+ * Build a display-name + address From line. The verified operator address
+ * (`appeals@bonsai.firebaystudios.com`) is the wire sender; the user's
+ * email is woven into the display name so the rep sees who Bonsai is
+ * acting for. Examples:
+ *   verified = "Bonsai <appeals@x.com>", user = "garrett@gmail.com"
+ *     → "Bonsai (for garrett@gmail.com) <appeals@x.com>"
+ *   verified = "appeals@x.com", user undefined
+ *     → "appeals@x.com"
+ * Falls back to the verified address alone when the user email isn't
+ * known. The returned string is RFC-2822-shaped, which Resend accepts.
+ */
+function withDisplayName(verified: string, userEmail?: string): string {
+  if (!userEmail) return verified;
+  // Strip any existing display name / angle brackets from the verified
+  // address so we can wrap it cleanly. Accept "Name <addr>" or just "addr".
+  const m = verified.match(/^\s*(?:(.+?)\s+)?<\s*([^>]+)\s*>\s*$/);
+  const baseName = m?.[1]?.trim() || "Bonsai";
+  const baseAddr = (m?.[2] ?? verified).trim();
+  return `${baseName} (for ${userEmail}) <${baseAddr}>`;
+}
+
 export class ResendEmailClient implements EmailClient {
   private apiKey: string;
   private fromEmail: string;
+  /** Optional override for the on-disk thread mailbox. The webhook
+   * handler (unauthenticated, no AsyncLocalStorage user context) passes
+   * the per-user dir explicitly here. Inside an authenticated request
+   * `loadThread` / `saveThread` fall back to `currentUserPaths()`. */
+  private threadsDir: string | undefined;
 
-  constructor(opts?: { apiKey?: string; fromEmail?: string }) {
+  constructor(opts?: { apiKey?: string; fromEmail?: string; threadsDir?: string }) {
     const apiKey = opts?.apiKey ?? process.env.RESEND_API_KEY;
-    const fromEmail = opts?.fromEmail ?? process.env.RESEND_FROM_EMAIL;
+    const fromEmail =
+      opts?.fromEmail ?? process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL;
     if (!apiKey) throw new Error("ResendEmailClient: RESEND_API_KEY not set");
-    if (!fromEmail) throw new Error("ResendEmailClient: RESEND_FROM_EMAIL not set");
+    if (!fromEmail) {
+      throw new Error("ResendEmailClient: RESEND_FROM (or legacy RESEND_FROM_EMAIL) not set");
+    }
     this.apiKey = apiKey;
     this.fromEmail = fromEmail;
+    this.threadsDir = opts?.threadsDir;
   }
 
   async send(msg: OutboundEmail): Promise<SentEmail> {
+    // The actual SMTP From must always be the operator's verified Resend
+    // sender. `msg.from` (the user's account email) gets ignored for the
+    // wire — we keep it on SentEmail purely for display, and surface the
+    // user's identity in the From's display name so the rep sees
+    // "Garrett Cahill (via Bonsai) <appeals@bonsai.firebaystudios.com>".
+    const wireFrom = withDisplayName(this.fromEmail, msg.from);
     const body: Record<string, unknown> = {
-      from: msg.from || this.fromEmail,
+      from: wireFrom,
       to: [msg.to],
       subject: msg.subject,
       // Resend accepts either `html` or `text`. We send text; a markdown
@@ -49,7 +86,7 @@ export class ResendEmailClient implements EmailClient {
         filename: a.filename,
         content: Buffer.from(a.content).toString("base64"),
       })),
-      ...(msg.bcc && msg.bcc.length > 0 ? { bcc: msg.bcc } : {}),
+      ...(msg.cc && msg.cc.length > 0 ? { cc: msg.cc } : {}),
     };
 
     const res = await fetch("https://api.resend.com/emails", {
@@ -69,33 +106,37 @@ export class ResendEmailClient implements EmailClient {
       message_id: data.id ?? newId("msg"),
       sent_at: new Date().toISOString(),
       to: msg.to,
-      from: msg.from || this.fromEmail,
+      from: wireFrom,
       subject: msg.subject,
       body_markdown: msg.body_markdown,
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
-      bcc: msg.bcc,
+      cc: msg.cc,
     };
-    const thread = loadThread(msg.thread_id);
+    const thread = loadThread(msg.thread_id, this.threadsDir);
     thread.outbound.push(sent);
-    saveThread(thread);
+    saveThread(thread, this.threadsDir);
     return sent;
   }
 
   async fetchInbound(thread_id: string, since: string): Promise<InboundEmail[]> {
     // Inbound is populated by the webhook handler (see src/server/webhooks.ts),
     // which appends to the same on-disk thread file. We just read that file.
-    const thread = loadThread(thread_id);
+    const thread = loadThread(thread_id, this.threadsDir);
     const sinceMs = since ? Date.parse(since) : 0;
     return thread.inbound.filter((m) => Date.parse(m.received_at) > sinceMs);
   }
 }
 
-/** Factory: returns ResendEmailClient if env is set, else MockEmailClient. */
-export async function autoEmailClient(): Promise<EmailClient> {
-  if (process.env.RESEND_API_KEY && process.env.RESEND_FROM_EMAIL) {
-    return new ResendEmailClient();
+/** Factory: returns ResendEmailClient if env is set, else MockEmailClient.
+ * `threadsDir` overrides the per-user default — used by the webhook
+ * handler, which is unauthenticated and resolves the dir from the on-disk
+ * thread file directly. */
+export async function autoEmailClient(threadsDir?: string): Promise<EmailClient> {
+  const fromEmail = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL;
+  if (process.env.RESEND_API_KEY && fromEmail) {
+    return new ResendEmailClient({ threadsDir, fromEmail });
   }
   const { MockEmailClient } = await import("./email-mock.ts");
-  return new MockEmailClient();
+  return new MockEmailClient(threadsDir);
 }

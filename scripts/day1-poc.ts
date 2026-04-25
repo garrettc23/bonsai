@@ -75,7 +75,7 @@ console.log(" Calling Claude...\n");
 const t0 = Date.now();
 
 const response = await client.messages.create({
-  model: "claude-sonnet-4-5",
+  model: "claude-opus-4-7",
   max_tokens: 4096,
   system: SYSTEM_PROMPT,
   messages: [

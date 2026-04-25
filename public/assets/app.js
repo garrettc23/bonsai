@@ -44,9 +44,9 @@ const TIMELINE_STEPS = [
   { stage: 1, kind: "check", title: "Sizing the opportunity",
     sub: "Dollar impact per finding, overlap-aware, so we don't double-count the same dispute twice." },
   { stage: 2, kind: "mail",  title: "Picking the channel",
-    sub: "Email, SMS, or phone — choosing the fastest path to the person who can say yes." },
+    sub: "Email or phone — choosing the fastest path to the person who can say yes." },
   { stage: 2, kind: "phone", title: "Opening negotiation",
-    sub: "Real outbound: email sent, call placed, or text thread started with the provider's billing contact." },
+    sub: "Real outbound: email sent or call placed to the provider's billing contact." },
   { stage: 3, kind: "check", title: "Building your report",
     sub: "Findings, appeal letter, and savings summary — ready for you to review or sign." },
 ];
@@ -231,9 +231,322 @@ function stopTimeline() {
   renderFlowStepper(FLOW_STAGES.length);
 }
 
+// ─── Auth gate ──────────────────────────────────────────────────
+// Before booting the main app, ask the server who we are. When no user is
+// present we render a full-page login/signup form and stop — successful
+// auth reloads the page so init() runs again with the cookie set.
+
+async function fetchCurrentUser() {
+  try {
+    const res = await fetch("/api/auth/me", { credentials: "same-origin" });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return j.user ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Eye / eye-off icons for the password show-hide control. Pulled out of the
+// renderers so login, signup, and reset all stay visually identical.
+const ICONS_EYE = {
+  show: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>',
+  hide: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-6.5 0-10-7-10-7a18.5 18.5 0 0 1 4.16-5.16"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 5c6.5 0 10 7 10 7a18.6 18.6 0 0 1-2.16 3.19"/><path d="M14.12 14.12A3 3 0 0 1 9.88 9.88"/><line x1="2" y1="2" x2="22" y2="22"/></svg>',
+};
+
+/**
+ * Wrap a password <input> with an eye toggle. Idempotent — calling it on an
+ * already-wrapped input is a no-op. Honors initial type so the same helper
+ * works on autofocus / different starting states.
+ */
+function attachPasswordToggle(input) {
+  if (!input || input.dataset.pwToggle === "1") return;
+  input.dataset.pwToggle = "1";
+  // Wrap the input in a positioning container so the toggle sits inside.
+  const wrap = document.createElement("div");
+  wrap.className = "pw-wrap";
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pw-toggle";
+  btn.setAttribute("aria-label", "Show password");
+  btn.setAttribute("aria-pressed", "false");
+  btn.innerHTML = ICONS_EYE.show;
+  // Padding on the input so its text doesn't collide with the icon.
+  input.classList.add("pw-input");
+  wrap.appendChild(btn);
+  btn.addEventListener("click", () => {
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    btn.setAttribute("aria-pressed", showing ? "false" : "true");
+    btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+    btn.innerHTML = showing ? ICONS_EYE.show : ICONS_EYE.hide;
+    // Keep focus + caret on the input — clicking the eye shouldn't kick the
+    // user out of the field they were typing in.
+    input.focus();
+  });
+}
+
+function renderAuthScreen() {
+  document.body.classList.add("auth-screen");
+  document.body.innerHTML = `
+    <main class="auth-wrap">
+      <div class="auth-card">
+        <div class="auth-brand brand">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="/assets/bonsai-logo.svg" alt="" />
+          </span>
+          <span class="wordmark">
+            <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+          </span>
+        </div>
+        <div class="auth-tag">Every bill, negotiated.</div>
+        <div class="auth-tabs">
+          <button type="button" class="auth-tab is-active" data-tab="login">Log in</button>
+          <button type="button" class="auth-tab" data-tab="signup">Sign up</button>
+        </div>
+        <form class="auth-form" id="auth-form" autocomplete="on">
+          <label class="auth-field">
+            <span>Email</span>
+            <input type="email" name="email" autocomplete="email" required />
+          </label>
+          <label class="auth-field">
+            <span>Password</span>
+            <input type="password" name="password" autocomplete="current-password" minlength="8" required />
+          </label>
+          <button type="submit" class="auth-submit" data-label-login="Log in" data-label-signup="Create account">Log in</button>
+          <div class="auth-error" id="auth-error" hidden></div>
+        </form>
+        <div class="auth-foot">
+          <button type="button" class="auth-link" id="auth-forgot">Forgot password?</button>
+          <label class="auth-terms" id="auth-terms" hidden>
+            <input type="checkbox" name="accepted_terms" id="auth-terms-input" />
+            <span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</span>
+          </label>
+        </div>
+      </div>
+    </main>
+  `;
+
+  // If we arrived with ?reset=<token> in the URL, jump straight to the
+  // reset view — that's where the password-reset email link lands.
+  const params = new URLSearchParams(window.location.search);
+  const resetToken = params.get("reset");
+  if (resetToken) {
+    renderResetView(resetToken);
+    return;
+  }
+
+  let mode = "login";
+  const submit = document.getElementById("auth-form").querySelector(".auth-submit");
+  const errEl = document.getElementById("auth-error");
+  const pwField = document.querySelector('input[name="password"]');
+  attachPasswordToggle(pwField);
+  const forgotLink = document.getElementById("auth-forgot");
+  const termsRow = document.getElementById("auth-terms");
+
+  for (const tab of document.querySelectorAll(".auth-tab")) {
+    tab.addEventListener("click", () => {
+      mode = tab.dataset.tab;
+      for (const t of document.querySelectorAll(".auth-tab")) t.classList.toggle("is-active", t === tab);
+      submit.textContent = mode === "login" ? submit.dataset.labelLogin : submit.dataset.labelSignup;
+      pwField.autocomplete = mode === "login" ? "current-password" : "new-password";
+      // Forgot password is only relevant in login mode; terms is only
+      // relevant in signup mode. Both live in the same .auth-foot grid
+      // cell (CSS layers them) so toggling visibility doesn't move the
+      // card height — only one is visible at a time.
+      forgotLink.hidden = mode !== "login";
+      termsRow.hidden = mode !== "signup";
+      errEl.hidden = true;
+    });
+  }
+
+  forgotLink.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    renderForgotView();
+  });
+
+  document.getElementById("auth-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const data = new FormData(ev.target);
+    const email = String(data.get("email") || "").trim();
+    const password = String(data.get("password") || "");
+    const acceptedTerms = !!data.get("accepted_terms");
+    if (mode === "signup" && !acceptedTerms) {
+      errEl.textContent = "Please accept the Terms of Service and Privacy Policy to create an account.";
+      errEl.hidden = false;
+      return;
+    }
+    submit.disabled = true;
+    errEl.hidden = true;
+    try {
+      const path = mode === "login" ? "/api/auth/login" : "/api/auth/signup";
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(
+          mode === "signup"
+            ? { email, password, accepted_terms: true }
+            : { email, password },
+        ),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        errEl.textContent = j.error ?? "Sign in failed.";
+        errEl.hidden = false;
+        return;
+      }
+      // Cookie is set; reload so init() runs with the session.
+      window.location.reload();
+    } catch (err) {
+      errEl.textContent = err?.message ?? "Network error.";
+      errEl.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+function renderForgotView() {
+  document.body.innerHTML = `
+    <main class="auth-wrap">
+      <div class="auth-card">
+        <div class="auth-brand brand">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="/assets/bonsai-logo.svg" alt="" />
+          </span>
+          <span class="wordmark">
+            <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+          </span>
+        </div>
+        <div class="auth-tag">Reset your password</div>
+        <form class="auth-form" id="forgot-form" autocomplete="on">
+          <label class="auth-field">
+            <span>Email</span>
+            <input type="email" name="email" autocomplete="email" required />
+          </label>
+          <button type="submit" class="auth-submit">Send reset link</button>
+          <div class="auth-error" id="auth-error" hidden></div>
+          <div class="auth-info" id="auth-info" hidden></div>
+        </form>
+        <div class="auth-foot">
+          <button type="button" class="auth-link" id="auth-back">Back to log in</button>
+        </div>
+      </div>
+    </main>
+  `;
+  document.getElementById("auth-back").addEventListener("click", () => renderAuthScreen());
+  const errEl = document.getElementById("auth-error");
+  const infoEl = document.getElementById("auth-info");
+  const submit = document.querySelector("#forgot-form .auth-submit");
+  // No password field here — but keep the same form rhythm. (Forgot view
+  // intentionally collects only email; the reset view below collects the
+  // new password and uses the toggle.)
+  document.getElementById("forgot-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const email = String(new FormData(ev.target).get("email") || "").trim();
+    submit.disabled = true;
+    errEl.hidden = true;
+    infoEl.hidden = true;
+    try {
+      const res = await fetch("/api/auth/forgot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const j = await res.json().catch(() => ({}));
+      // Always show the same neutral confirmation — even on unknown email —
+      // so we don't leak which addresses have accounts. The server logs the
+      // dev link when Resend isn't wired so the developer can still retrieve it.
+      infoEl.textContent = j.dev_link
+        ? "Reset link generated. (Dev: check the server log for the URL.)"
+        : "If that email is on file, a reset link is on its way.";
+      infoEl.hidden = false;
+    } catch (err) {
+      errEl.textContent = err?.message ?? "Network error.";
+      errEl.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+function renderResetView(token) {
+  document.body.innerHTML = `
+    <main class="auth-wrap">
+      <div class="auth-card">
+        <div class="auth-brand brand">
+          <span class="brand-mark" aria-hidden="true">
+            <img src="/assets/bonsai-logo.svg" alt="" />
+          </span>
+          <span class="wordmark">
+            <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+          </span>
+        </div>
+        <div class="auth-tag">Set a new password</div>
+        <form class="auth-form" id="reset-form" autocomplete="on">
+          <label class="auth-field">
+            <span>New password</span>
+            <input type="password" name="password" autocomplete="new-password" minlength="8" required />
+          </label>
+          <button type="submit" class="auth-submit">Set password &amp; log in</button>
+          <div class="auth-error" id="auth-error" hidden></div>
+        </form>
+      </div>
+    </main>
+  `;
+  const errEl = document.getElementById("auth-error");
+  const submit = document.querySelector("#reset-form .auth-submit");
+  attachPasswordToggle(document.querySelector('#reset-form input[name="password"]'));
+  document.getElementById("reset-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const password = String(new FormData(ev.target).get("password") || "");
+    submit.disabled = true;
+    errEl.hidden = true;
+    try {
+      const res = await fetch("/api/auth/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, password }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        errEl.textContent = j.error ?? "Reset failed.";
+        errEl.hidden = false;
+        return;
+      }
+      // Server sets a fresh session cookie on success — strip the token from
+      // the URL and reload into the app.
+      window.history.replaceState({}, "", "/");
+      window.location.reload();
+    } catch (err) {
+      errEl.textContent = err?.message ?? "Network error.";
+      errEl.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
 // ─── Init ──────────────────────────────────────────────────────
 
+// Stash the current user so Settings can render their email + Log out.
+let currentUser = null;
+
+async function logout() {
+  try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch {}
+  window.location.reload();
+}
+
 async function init() {
+  const user = await fetchCurrentUser();
+  if (!user) {
+    renderAuthScreen();
+    return;
+  }
+  currentUser = user;
   // Inject sidebar nav icons
   for (const el of $$(".nav-ic")) {
     const k = el.dataset.icon;
@@ -861,30 +1174,147 @@ function renderReviewView(report) {
   // synthesized list if the endpoint errors — the demo should never show
   // an empty opportunities panel.
   void loadOpportunities(report);
-  void refreshBccHint();
+
+  // Surface the provider-contact card and start polling. The card lives
+  // outside this fn so it survives chat re-renders.
+  void initContactCard();
 }
 
-async function refreshBccHint() {
-  const hint = document.getElementById("review-bcc-hint");
-  if (!hint) return;
-  let email = null;
-  try {
-    const sdata = await fetch("/api/settings").then((r) => r.json());
-    email = sdata?.profile?.email ?? null;
-  } catch {
-    email = null;
+let contactPollTimer = null;
+
+function initContactCard() {
+  if (contactPollTimer) { clearInterval(contactPollTimer); contactPollTimer = null; }
+  const card = $("#contact-card");
+  if (!card) return;
+  card.hidden = false;
+  $("#contact-title").textContent = "Looking up the billing contact…";
+  $("#contact-email").value = "";
+  $("#contact-phone").value = "";
+  $("#contact-notes").textContent = "";
+  $("#contact-sources").innerHTML = "";
+
+  // Wire actions once. Re-binding is harmless — these handlers reference
+  // the live reviewState run_id at click time, not at bind time.
+  if (!card.dataset.bound) {
+    card.dataset.bound = "1";
+    $("#contact-save").addEventListener("click", saveContactOverride);
+    $("#contact-retry").addEventListener("click", retryContactLookup);
   }
-  const span = hint.querySelector("span:last-child");
-  if (email) {
-    if (span)
-      span.textContent =
-        "You'll be BCC'd at " + email + " on every email Bonsai sends.";
-    hint.hidden = false;
-  } else {
-    if (span)
-      span.textContent =
-        "Add your email in Settings → Profile to get BCC'd on every message.";
-    hint.hidden = false;
+  pollContactStatus();
+  contactPollTimer = setInterval(pollContactStatus, 2500);
+}
+
+async function pollContactStatus() {
+  const runId = reviewState?.run_id;
+  if (!runId) return;
+  let data;
+  try {
+    const res = await fetch(`/api/contact/${encodeURIComponent(runId)}`, { credentials: "same-origin" });
+    if (!res.ok) return;
+    data = await res.json();
+  } catch { return; }
+  if (reviewState?.run_id !== runId) return;
+  // Stash the real provider_name so save / re-render can pass it through
+  // instead of having to read the (mutated) title element.
+  if (data.provider_name) reviewState.provider_name = data.provider_name;
+  applyContactStatus(data);
+  if (data.status === "resolved" || data.status === "failed") {
+    if (contactPollTimer) { clearInterval(contactPollTimer); contactPollTimer = null; }
+  }
+}
+
+function applyContactStatus(data) {
+  const titleEl = $("#contact-title");
+  const notesEl = $("#contact-notes");
+  const srcEl = $("#contact-sources");
+  const emailEl = $("#contact-email");
+  const phoneEl = $("#contact-phone");
+
+  if (data.status === "pending") {
+    titleEl.textContent = "Looking up the billing contact…";
+    return;
+  }
+  if (data.status === "failed") {
+    titleEl.textContent = "Couldn't find a billing contact.";
+    notesEl.textContent = data.error ?? "Add the email and phone you want Bonsai to use below.";
+    return;
+  }
+  const c = data.contact ?? {};
+  // "Resolved with nothing useful" is functionally the same as "failed" —
+  // we hit the web search but it didn't surface a real billing contact
+  // (synthetic providers, single-location practices with no online billing
+  // page, etc.). Don't show the user empty fields and a low-confidence
+  // pill; just ask them to fill it in. The user can still edit if they
+  // disagree, since the inputs are still present below.
+  const provider = data.provider_name ?? "this provider";
+  if (!c.email && !c.phone) {
+    titleEl.textContent = `Couldn't find a billing contact for ${provider}.`;
+    notesEl.textContent = "Add the email and phone you want Bonsai to use below — it'll be saved with this bill.";
+    if (document.activeElement !== emailEl) emailEl.value = "";
+    if (document.activeElement !== phoneEl) phoneEl.value = "";
+    srcEl.innerHTML = "";
+    return;
+  }
+  titleEl.textContent = data.provider_name ? `${data.provider_name} — billing` : "Billing contact";
+  // Don't blow away the user's typing if they're already editing.
+  if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
+  if (document.activeElement !== phoneEl) phoneEl.value = c.phone ?? "";
+  notesEl.textContent = c.notes ?? "";
+  srcEl.innerHTML = "";
+  for (const url of (c.source_urls ?? []).slice(0, 4)) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    try { a.textContent = new URL(url).hostname; } catch { a.textContent = url; }
+    srcEl.appendChild(a);
+  }
+}
+
+async function saveContactOverride() {
+  const runId = reviewState?.run_id;
+  if (!runId) return;
+  const email = $("#contact-email").value.trim();
+  const phone = $("#contact-phone").value.trim();
+  const btn = $("#contact-save");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/contact/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ run_id: runId, email, phone }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const j = await res.json();
+    applyContactStatus({ status: "resolved", contact: j.contact, provider_name: reviewState?.provider_name ?? null });
+  } catch (err) {
+    console.warn("[contact] save failed", err);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function retryContactLookup() {
+  const runId = reviewState?.run_id;
+  if (!runId) return;
+  const btn = $("#contact-retry");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/contact/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    $("#contact-title").textContent = "Looking up the billing contact…";
+    if (contactPollTimer) clearInterval(contactPollTimer);
+    contactPollTimer = setInterval(pollContactStatus, 2500);
+  } catch (err) {
+    console.warn("[contact] retry failed", err);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1183,7 +1613,34 @@ async function approveAndRun() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: reviewState.run_id }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      // Structured gates surface as in-page CTAs instead of dumping into
+      // the error view. `email_not_configured` means the operator hasn't
+      // wired Resend yet (503) — nothing the end user can fix; we show a
+      // friendly "we're working on it" message.
+      const j = await res.json().catch(() => null);
+      if (j?.error === "email_not_configured") {
+        showApproveBlocker({
+          title: "Email delivery isn't live yet",
+          body:
+            j.message ??
+            "Bonsai's email channel is being configured. Try again in a few minutes — your bill is saved and ready to negotiate as soon as we're live.",
+          ctaLabel: "Got it",
+          ctaTarget: "bills",
+        });
+        return;
+      }
+      if (j?.error === "missing_contact") {
+        showApproveBlocker({
+          title: "Add a billing contact first",
+          body: j.message ?? "Add a support email or phone for the provider before launching.",
+          ctaLabel: "Open Bills drawer",
+          ctaTarget: "bills",
+        });
+        return;
+      }
+      throw new Error(j?.message ?? j?.error ?? (await res.text()));
+    }
     await res.json();
     reviewState = null;
     await loadHistory();
@@ -1193,6 +1650,33 @@ async function approveAndRun() {
     $("#error-body").textContent = String(err?.message ?? err);
     setWorkflowView("error");
   }
+}
+
+// Inline blocker shown above the approve action when the server gates a
+// launch (Resend not connected, no contact, etc.). Rendered into the
+// review view so the user keeps their plan/findings context — no full-
+// page error redirect.
+function showApproveBlocker({ title, body, ctaLabel, ctaTarget }) {
+  const host =
+    document.getElementById("approve-blocker") ??
+    (() => {
+      const el = document.createElement("div");
+      el.id = "approve-blocker";
+      el.className = "approve-blocker";
+      // Mount near the approve button in the review view if available.
+      const approveBtn = document.getElementById("approve-btn");
+      const parent = approveBtn?.parentElement ?? $("#view-review") ?? document.body;
+      parent.insertBefore(el, approveBtn ?? null);
+      return el;
+    })();
+  host.innerHTML = `
+    <div class="approve-blocker-title">${escapeHtml(title)}</div>
+    <div class="approve-blocker-body">${escapeHtml(body)}</div>
+    <button type="button" class="btn btn-primary approve-blocker-cta">${escapeHtml(ctaLabel)}</button>`;
+  host.hidden = false;
+  host.querySelector(".approve-blocker-cta").addEventListener("click", () => {
+    showNav(ctaTarget);
+  });
 }
 
 function resetPageHeader() {
@@ -1443,34 +1927,6 @@ function renderConversation(report) {
 
   let rendered = false;
 
-  if (report.sms_thread) {
-    addSection(report.sms_thread.handed_off_to_voice ? "SMS — handed off to voice" : "SMS");
-    for (const msg of report.sms_thread.messages) {
-      const el = document.createElement("div");
-      el.className = `conv-msg sms ${msg.role === "outbound" ? "us" : "them"}`;
-      const meta = document.createElement("div");
-      meta.className = "conv-meta";
-      const who = document.createElement("span");
-      who.className = msg.role === "outbound" ? "who-us" : "who-them";
-      who.textContent = msg.role === "outbound" ? "→ BONSAI" : "← PROVIDER";
-      meta.appendChild(who);
-      const ts = document.createElement("span");
-      ts.textContent = new Date(msg.ts).toLocaleString();
-      meta.appendChild(ts);
-      const seg = document.createElement("span");
-      const len = msg.body?.length ?? 0;
-      const segs = msg.segments ?? (len <= 160 ? 1 : Math.ceil(len / 153));
-      seg.textContent = `${len} chars · ${segs} seg`;
-      meta.appendChild(seg);
-      const bodyEl = document.createElement("div");
-      bodyEl.className = "conv-body sms-body";
-      bodyEl.textContent = msg.body;
-      el.append(meta, bodyEl);
-      root.appendChild(el);
-    }
-    rendered = true;
-  }
-
   if (report.email_thread) {
     if (rendered) addSection("Email");
     for (const msg of report.email_thread.messages) {
@@ -1522,6 +1978,53 @@ function renderConversation(report) {
   }
 }
 
+/**
+ * Branded empty-state hero rendered in place of a view's regular chrome.
+ * Bills and Comparison both use it pre-first-bill: the same brand mark +
+ * wordmark from the sidebar, a serif headline, an explanation of what the
+ * tab will do once a bill exists, and a single primary CTA back to the
+ * home upload zone.
+ *
+ * The view's original children are stashed inside the empty-state element
+ * itself (data-view-children) so `restoreViewChildren` can re-mount them
+ * verbatim when an audit lands. That avoids re-creating the table /
+ * filters / banner from scratch every time a poll cycle runs.
+ */
+function renderHeroEmptyView(view, { title, body, cta }) {
+  // If we already painted the empty state for this view, just bail —
+  // re-render would lose attached event listeners on the CTA.
+  if (view.querySelector(":scope > .empty-hero")) return;
+
+  // Stash the existing children so we can swap them back later.
+  const stash = document.createElement("div");
+  stash.style.display = "none";
+  while (view.firstChild) stash.appendChild(view.firstChild);
+
+  const hero = document.createElement("div");
+  hero.className = "empty-hero";
+  hero.innerHTML = `
+    <div class="empty-hero-card">
+      <h2 class="empty-hero-title">${escapeHtml(title)}</h2>
+      <p class="empty-hero-body">${escapeHtml(body)}</p>
+      <button type="button" class="btn btn-primary btn-lg empty-hero-cta">${escapeHtml(cta)}</button>
+    </div>`;
+
+  hero.appendChild(stash);
+  hero.dataset.viewChildren = "1";
+  view.appendChild(hero);
+  hero.querySelector(".empty-hero-cta").addEventListener("click", () => showNav("overview"));
+}
+
+function restoreViewChildren(view) {
+  const hero = view.querySelector(":scope > .empty-hero");
+  if (!hero) return;
+  const stash = hero.querySelector(":scope > [style*='display: none']") ?? hero.lastElementChild;
+  if (stash) {
+    while (stash.firstChild) view.appendChild(stash.firstChild);
+  }
+  hero.remove();
+}
+
 // ─── Approvals (Overview) ───────────────────────────────────────
 
 function renderApprovalsOnOverview() {
@@ -1563,134 +2066,7 @@ function renderApprovalsOnOverview() {
 // Real audit data from /api/history + these recurring medical bills fill out the Bills table.
 // These represent the long-tail the agent watches month-over-month.
 
-const MOCK_RECURRING_BILLS = [
-  {
-    id: "mock-cell-1", kind: "cell", vendor: "Verizon Wireless",
-    account: "4 lines · unlimited plan",
-    lastCheck: "3 minutes ago",
-    addedAt: Date.now() - 45 * 24 * 3600 * 1000,
-    balance: 187, rate: "/mo",
-    category: "Cell phone",
-    score: 58,
-    auto: true,
-  },
-  {
-    id: "mock-cable-1", kind: "cable", vendor: "Xfinity",
-    account: "Gigabit internet + TV bundle",
-    lastCheck: "18 minutes ago",
-    addedAt: Date.now() - 12 * 24 * 3600 * 1000,
-    balance: 159, rate: "/mo",
-    category: "Internet",
-    score: 32,
-    auto: true,
-  },
-  {
-    id: "mock-security-1", kind: "security", vendor: "ADT Home Security",
-    account: "Monitored alarm · 24/7",
-    lastCheck: "1 hour ago",
-    addedAt: Date.now() - 75 * 24 * 3600 * 1000,
-    balance: 52, rate: "/mo",
-    category: "Security system",
-    score: 78,
-    auto: false,
-  },
-  {
-    id: "mock-electric-1", kind: "electricity", vendor: "PG&E",
-    account: "Residential · account 8821-A",
-    lastCheck: "42 minutes ago",
-    addedAt: Date.now() - 6 * 24 * 3600 * 1000,
-    balance: 234, rate: "/mo",
-    category: "Electricity",
-    score: 48,
-    auto: true,
-  },
-  {
-    id: "mock-carins-1", kind: "car-insurance", vendor: "Geico",
-    account: "2 vehicles · full coverage",
-    lastCheck: "2 hours ago",
-    addedAt: Date.now() - 90 * 24 * 3600 * 1000,
-    balance: 168, rate: "/mo",
-    category: "Car insurance",
-    score: 44,
-    auto: true,
-  },
-  {
-    id: "mock-houseins-1", kind: "house-insurance", vendor: "State Farm Homeowners",
-    account: "Dwelling $450k · liability $300k",
-    lastCheck: "4 hours ago",
-    addedAt: Date.now() - 60 * 24 * 3600 * 1000,
-    balance: 145, rate: "/mo",
-    category: "House insurance",
-    score: 42,
-    auto: true,
-  },
-  // ─── Synthetic "needs attention" rows for testing the four states ────
-  // Each carries a lifecycle + attentionReason so the inline chip and the
-  // drawer Status pill light up exactly as a real audit would.
-  {
-    id: "mock-attn-awaiting", kind: "audit", vendor: "Memorial Hospital ER",
-    account: "Visit · 2026-04-12 · CPT 99284",
-    lastCheck: "8 minutes ago",
-    addedAt: Date.now() - 2 * 24 * 3600 * 1000,
-    balance: 1842, rate: "",
-    category: "Medical bills",
-    score: 60,
-    auto: true,
-    lifecycle: "attention",
-    attentionReason: { key: "awaiting", label: "Awaiting your approval" },
-  },
-  {
-    id: "mock-attn-escalated", kind: "audit", vendor: "Sutter Health",
-    account: "Outpatient procedure · 2026-03-20",
-    lastCheck: "31 minutes ago",
-    addedAt: Date.now() - 14 * 24 * 3600 * 1000,
-    balance: 3420, rate: "",
-    category: "Medical bills",
-    score: 34,
-    auto: true,
-    lifecycle: "attention",
-    attentionReason: { key: "escalated", label: "Provider countered — review" },
-    counter: {
-      original: 3420,
-      counter_amount: 1900,
-      notes: "Best we can do — 44% off the facility fees, but professional charges stand.",
-    },
-  },
-  {
-    id: "mock-attn-paused", kind: "cell", vendor: "AT&T Wireless",
-    account: "3 lines · unlimited plan",
-    lastCheck: "1 hour ago",
-    addedAt: Date.now() - 8 * 24 * 3600 * 1000,
-    balance: 142, rate: "/mo",
-    category: "Cell phone",
-    score: 52,
-    auto: false,
-    lifecycle: "attention",
-    attentionReason: { key: "paused", label: "Paused by you" },
-  },
-  {
-    id: "mock-attn-error", kind: "electricity", vendor: "ConEdison",
-    account: "Residential · account 7733-X",
-    lastCheck: "23 minutes ago",
-    addedAt: Date.now() - 5 * 24 * 3600 * 1000,
-    balance: 198, rate: "/mo",
-    category: "Electricity",
-    score: 18,
-    auto: true,
-    lifecycle: "attention",
-    attentionReason: { key: "error", label: "Agent error" },
-  },
-  {
-    id: "mock-other-1", kind: "other", vendor: "Planet Fitness",
-    account: "Black Card · annual renewal",
-    lastCheck: "6 hours ago",
-    addedAt: Date.now() - 20 * 24 * 3600 * 1000,
-    balance: 25, rate: "/mo",
-    category: "Other",
-    score: 66,
-    auto: false,
-  },
-];
+const MOCK_RECURRING_BILLS = [];
 // Fill in derived scoreLabel so existing callers that reference row.scoreLabel keep working.
 for (const b of MOCK_RECURRING_BILLS) {
   b.scoreLabel = scoreLabelFor(b.score);
@@ -1709,140 +2085,9 @@ const KIND_ICON = {
 // Each offer carries a backend `baseline` so "Switch for me" runs a real
 // /api/offer-hunt against the matching source directory. The cheaper numbers
 // you see on the card are what the hunt typically produces — clicking
-// triggers a live reach-out (email/sms/voice simulation) to the directory and
+// triggers a live reach-out (email/voice simulation) to the directory and
 // surfaces the actual quotes.
-const MOCK_OFFERS = [
-  {
-    id: "off-1", category: "Medical bills", source: "GoodRx coupon",
-    icon: "pill",
-    confidence: "HIGH",
-    current: 214, offered: 62, saves: 152, unit: "/mo",
-    why: "Same atorvastatin 20mg, same CVS — GoodRx negotiated rate beats your plan's copay.",
-    friction: "Show the coupon at pickup. No switching pharmacies.",
-    eta: "Apply in 2 min",
-    recommended: true,
-    baseline: {
-      label: "Atorvastatin 20mg monthly", category: "prescription",
-      current_provider: "CVS (insurance copay)", current_price: 214,
-      specifics: "atorvastatin 20mg, 30 tablets/mo", region: "SF 94114",
-    },
-  },
-  {
-    id: "off-2", category: "Medical bills", source: "Covered California silver",
-    icon: "shield",
-    confidence: "HIGH",
-    current: 487, offered: 312, saves: 175, unit: "/mo",
-    why: "Household income qualifies you for APTC subsidy. Same network, lower premium.",
-    friction: "30-min enrollment call, takes effect 1st of next month.",
-    eta: "Enroll in 30 min",
-    recommended: true,
-    baseline: {
-      label: "Individual Silver plan", category: "insurance_plan",
-      current_provider: "Blue Shield PPO", current_price: 487,
-      specifics: "silver tier, single coverage, SF zip", region: "SF 94114",
-    },
-  },
-  {
-    id: "off-3", category: "Medical bills", source: "Sutter Health charity care",
-    icon: "hospital",
-    confidence: "MEDIUM",
-    current: 3420, offered: 0, saves: 3420, unit: "",
-    why: "Household AGI under 400% FPL — you qualify for 100% charity write-off under Sutter's policy.",
-    friction: "Submit last 2 pay stubs + tax return. Approval 2-3 weeks.",
-    eta: "Submit in 15 min",
-    recommended: true,
-    baseline: {
-      label: "Outstanding hospital balance", category: "hospital_bill",
-      current_provider: "Sutter Health", current_price: 3420,
-      specifics: "post-insurance patient responsibility, household AGI ~$78k",
-      region: "SF",
-    },
-  },
-  {
-    id: "off-4", category: "Medical bills", source: "Labcorp direct-pay",
-    icon: "doc",
-    confidence: "HIGH",
-    current: 186, offered: 49, saves: 137, unit: "",
-    why: "Same CBC + lipid panel, cash price at Labcorp instead of in-network Quest billing.",
-    friction: "Have your doctor send the order to Labcorp for your next draw.",
-    eta: "Next visit",
-    recommended: false,
-    baseline: {
-      label: "CBC + lipid panel", category: "lab_work",
-      current_provider: "Quest (insurance)", current_price: 186,
-      specifics: "standard CBC with differential plus lipid panel",
-      region: "SF 94114",
-    },
-  },
-  {
-    id: "off-5", category: "Medical bills", source: "Kaiser 0% APR",
-    icon: "hospital",
-    confidence: "HIGH",
-    current: 0, offered: 0, saves: 340, unit: "/yr",
-    why: "Spread the outstanding balance over 18 months at 0% interest vs. the 7.9% financing offer.",
-    friction: "5-min call to billing. No credit check.",
-    eta: "Enroll in 5 min",
-    recommended: true,
-    baseline: {
-      label: "Kaiser payment plan alternative", category: "hospital_bill",
-      current_provider: "Kaiser Permanente", current_price: 2100,
-      specifics: "outstanding balance with 7.9% financing offered",
-      region: "SF",
-    },
-  },
-  {
-    id: "off-6", category: "Medical bills", source: "Anthem Dental Complete",
-    icon: "shield",
-    confidence: "MEDIUM",
-    current: 82, offered: 54, saves: 28, unit: "/mo",
-    why: "Your dentist is in-network on Anthem too, at a lower premium for equivalent coverage.",
-    friction: "Switch at open enrollment (Nov). Agent will remind you.",
-    eta: "Schedule Nov 1",
-    recommended: false,
-    baseline: {
-      label: "Individual dental plan", category: "dental",
-      current_provider: "Delta Dental", current_price: 82,
-      specifics: "individual PPO, monthly premium",
-      region: "SF 94114",
-    },
-  },
-  {
-    id: "off-7", category: "House insurance", source: "Lemonade Homeowners",
-    icon: "shield",
-    confidence: "HIGH",
-    current: 145, offered: 92, saves: 53, unit: "/mo",
-    why: "Equivalent dwelling, personal-property, and liability coverage at a lower monthly premium. Lemonade re-quotes annually so the rate doesn't drift.",
-    friction: "10-min online application. Bind same day; old policy cancels on the new effective date.",
-    eta: "Apply in 10 min",
-    recommended: true,
-    baseline: {
-      label: "Homeowners policy", category: "house_insurance",
-      current_provider: "State Farm Homeowners", current_price: 145,
-      specifics: "dwelling $450k, personal property $225k, liability $300k, $1k deductible",
-      region: "SF 94114",
-    },
-  },
-  {
-    id: "off-8", category: "Cell phone", source: "Mint Mobile Unlimited",
-    icon: "phone",
-    confidence: "HIGH",
-    current: 80, offered: 30, saves: 50, unit: "/mo",
-    why: "Same network coverage (T-Mobile), unlimited talk/text + 15 GB high-speed. Bring your own number.",
-    friction: "Order SIM, swap in <5 min when it arrives. Port-out fee waived.",
-    eta: "Switch in 5 min",
-    recommended: false,
-  },
-  {
-    id: "off-9", category: "Internet", source: "T-Mobile Home Internet",
-    icon: "pulse",
-    confidence: "MEDIUM",
-    current: 89, offered: 50, saves: 39, unit: "/mo",
-    why: "Flat $50/mo, no equipment fee, no contract. 5G home internet covers your block.",
-    friction: "Self-install gateway. Cancel cable internet — they'll try retention; agent can handle that call.",
-    eta: "Order today",
-    recommended: false,
-  },
-];
+const MOCK_OFFERS = [];
 
 // ─── Bills ─────────────────────────────────────────────────────
 
@@ -1881,6 +2126,25 @@ function renderBills() {
   });
 
   const audits = historyCache?.audits ?? [];
+
+  // Pre-first-bill state: hide the stats / filters / table chrome and show
+  // a branded hero CTA. This is the empty Bills page on a fresh account.
+  const view = $("#view-bills");
+  if (view) {
+    if (audits.length === 0) {
+      renderHeroEmptyView(view, {
+        title: "No bills uploaded yet",
+        body:
+          "Drop a bill on the home tab. Bonsai audits it, finds the overcharges, and starts negotiating with the provider — every step lands here as it happens.",
+        cta: "Upload a bill",
+      });
+      scheduleBillsPoll();
+      return;
+    }
+    // Real audits exist — make sure the regular chrome is back.
+    restoreViewChildren(view);
+  }
+
   const auditRows = audits.map((a) => {
     const score = scoreFromAudit(a);
     const isNegotiating = a.status === "negotiating" || a.outcome === "negotiating";
@@ -2096,7 +2360,15 @@ function attentionReason(audit) {
   if (status === "cancelled" || outcome === "cancelled") return { key: "paused", label: "Paused by you" };
   if (outcome === "escalated") return { key: "escalated", label: "Provider countered — review" };
   if (status === "negotiating" || outcome === "negotiating") return null;
-  if (outcome === "resolved") return null;
+  if (outcome === "resolved") {
+    // Server flags resolved bills the user hasn't confirmed match their next
+    // statement after VERIFY_OUTCOME_AFTER_DAYS. Surfacing in the attention
+    // bucket is what closes the loop.
+    if (audit.needs_outcome_check && !audit.outcome_verified) {
+      return { key: "verify_outcome", label: "Did your next bill match?" };
+    }
+    return null;
+  }
   return { key: "awaiting", label: "Awaiting your approval" };
 }
 
@@ -2183,16 +2455,36 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
-  const total = MOCK_OFFERS
-    .filter((o) => o.recommended)
-    .reduce((s, o) => s + (o.unit === "/mo" ? o.saves * 12 : o.saves), 0);
-
   updatePageHeader({
-    eyebrow: "Offers",
-    title: "Cheaper alternatives, found for you",
+    eyebrow: "Comparison",
+    title: "Coming soon",
     stats: null,
   });
 
+  // Comparison is on the roadmap but not yet live. Render a permanent
+  // "coming soon" hero regardless of audit state — better than shipping
+  // an offer-hunt feature that's secretly simulator-driven.
+  const view = $("#view-offers");
+  if (view) {
+    renderHeroEmptyView(view, {
+      title: "Comparison is on the way",
+      body:
+        "We'll surface side-by-side prices from competing providers — pharmacies, plans, carriers, marketplaces — anchored to the bills you've audited. Not live yet.",
+      cta: "Got it",
+    });
+    return;
+  }
+
+  // The savings banner only earns the page real estate when Bonsai has
+  // actually found cheaper alternatives. Until there's a recommended
+  // offer with a savings number, hide the whole bar — its $0 state was
+  // the loudest thing on an otherwise empty Comparison page.
+  const recommended = MOCK_OFFERS.filter((o) => o.recommended);
+  const total = recommended.reduce((s, o) => s + (o.unit === "/mo" ? o.saves * 12 : o.saves), 0);
+  const banner = $("#offers-banner");
+  if (banner) {
+    banner.hidden = recommended.length === 0 || total <= 0;
+  }
   $("#banner-amount").textContent = fmt$(total);
 
   // Filters — "Recommended" leads (it's the agent's curated subset and what
@@ -2744,12 +3036,20 @@ async function renderSettings() {
 
   installUnsavedGuard(tune.getValues);
 
-  // Data
-  const dataGroup = document.createElement("div");
-  dataGroup.className = "settings-group";
-  dataGroup.innerHTML = `
-    <div class="settings-group-title">Data</div>
+  // Account — signed-in user, log out, export, delete. One card so users
+  // don't have to hunt across two sections for "things that are mine".
+  const accountGroup = document.createElement("div");
+  accountGroup.className = "settings-group";
+  accountGroup.innerHTML = `
+    <div class="settings-group-title">Account</div>
     <div class="settings-card">
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Signed in as</div>
+          <div class="settings-row-help" id="account-email">${escapeHtml(currentUser?.email ?? "")}</div>
+        </div>
+        <button class="btn btn-ghost" id="account-logout-btn" type="button">Log out</button>
+      </div>
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Export all data</div>
@@ -2765,9 +3065,10 @@ async function renderSettings() {
         <button class="btn btn-ghost" id="data-delete-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
       </div>
     </div>`;
-  root.appendChild(dataGroup);
+  root.appendChild(accountGroup);
+  accountGroup.querySelector("#account-logout-btn").addEventListener("click", () => logout());
 
-  dataGroup.querySelector("#data-export-btn").addEventListener("click", async (ev) => {
+  accountGroup.querySelector("#data-export-btn").addEventListener("click", async (ev) => {
     const btn = ev.currentTarget;
     btn.disabled = true;
     const original = btn.textContent;
@@ -2795,7 +3096,7 @@ async function renderSettings() {
     }
   });
 
-  dataGroup.querySelector("#data-delete-btn").addEventListener("click", () => {
+  accountGroup.querySelector("#data-delete-btn").addEventListener("click", () => {
     openDeleteAccountModal();
   });
 
@@ -3076,7 +3377,6 @@ function mkTuneCard(tune) {
     tone: g.querySelector('input[name="tune-tone"]:checked')?.value ?? "firm",
     channels: {
       email: g.querySelector("#tune-ch-email").checked,
-      sms: false,
       voice: g.querySelector("#tune-ch-voice").checked,
     },
     email_digest: g.querySelector("#tune-digest").classList.contains("on"),
@@ -3836,6 +4136,55 @@ function renderDrawerStats(row, report) {
         <span class="status-dot"></span><span>${escapeHtml(statusLabel)}</span>
       </div>
     </div>`;
+
+  // Outcome-verification ribbon for resolved bills. Renders in a slot
+  // immediately below the stats grid — kept lightweight here (no full
+  // attention card) so it doesn't compete with the activity timeline,
+  // but still gives every resolved bill a one-click way to confirm.
+  renderOutcomeVerifyBanner(row);
+}
+
+function renderOutcomeVerifyBanner(row) {
+  const slot = $("#drawer-outcome-banner");
+  if (!slot) return;
+  const audit = row?.audit;
+  const isResolved = audit && (audit.outcome === "resolved");
+  if (!isResolved || !audit.run_id) {
+    slot.innerHTML = "";
+    slot.hidden = true;
+    return;
+  }
+  if (audit.outcome_verified) {
+    const labelMap = { yes: "matched", partial: "partially matched", no: "didn't match" };
+    const label = labelMap[audit.outcome_verified] ?? audit.outcome_verified;
+    slot.hidden = false;
+    slot.innerHTML = `
+      <div class="outcome-verify outcome-verify-done">
+        <div class="outcome-verify-text">
+          <strong>You confirmed this ${escapeHtml(label)}.</strong>
+          ${audit.outcome_notes ? ` <span class="outcome-verify-notes">"${escapeHtml(audit.outcome_notes)}"</span>` : ""}
+        </div>
+      </div>`;
+    return;
+  }
+  slot.hidden = false;
+  slot.innerHTML = `
+    <div class="outcome-verify">
+      <div class="outcome-verify-text">
+        <strong>Did your next bill match?</strong>
+        Pull up the latest statement from the provider and tell us how it landed.
+      </div>
+      <div class="outcome-verify-actions">
+        <button type="button" class="btn btn-ghost" data-outcome-action="no">No / partial</button>
+        <button type="button" class="btn btn-primary" data-outcome-action="yes">Yes, matched</button>
+      </div>
+    </div>`;
+  slot.querySelector('[data-outcome-action="yes"]').addEventListener("click", () => {
+    void submitOutcomeVerification(row, "yes");
+  });
+  slot.querySelector('[data-outcome-action="no"]').addEventListener("click", () => {
+    openOutcomeNoMatchModal(row);
+  });
 }
 
 function renderDrawerTab(which) {
@@ -4051,6 +4400,18 @@ const ATTENTION_CONTENT = {
     ],
     primary: { id: "retry", label: "Retry now" },
   },
+  verify_outcome: {
+    tone: "neutral",
+    title: "Did your next bill match?",
+    body: "We negotiated this bill down a few weeks ago. Take a quick look at your most recent statement from the provider — does the agreed-upon amount actually show up? Your answer helps Bonsai measure outcomes.",
+    steps: [
+      "Pull up the latest statement from the provider.",
+      "Compare the amount due to the agreed amount shown in this drawer.",
+      "Tell us how it landed below.",
+    ],
+    primary: { id: "outcome_yes", label: "Yes, it matched" },
+    secondary: { id: "outcome_no_match", label: "No, or partial" },
+  },
 };
 
 function renderCounterPanel(row) {
@@ -4177,6 +4538,17 @@ async function promptResumeMode(row) {
 
 function handleAttentionAction(action, row) {
   const runId = row?.audit?.run_id;
+  // verify_outcome lives outside the start/resume machinery — it just
+  // POSTs the user's verdict and re-renders. "Yes" submits immediately;
+  // "No or partial" pops a small modal so we can capture notes.
+  if (action === "outcome_yes") {
+    void submitOutcomeVerification(row, "yes");
+    return;
+  }
+  if (action === "outcome_no_match") {
+    openOutcomeNoMatchModal(row);
+    return;
+  }
   // start / resume / retry / keep_negotiating all = "kick off the next round".
   // approve_counter = "accept the counter, close out as resolved".
   // For real audits this is /api/resume (or a future /api/accept-counter);
@@ -4210,6 +4582,102 @@ function handleAttentionAction(action, row) {
     updateNavCounts();
     void openBillDrawer(row);
   }
+}
+
+// POST the user's outcome verdict to the server. After it lands, refresh
+// the bills list so the row drops out of the attention bucket and the
+// drawer re-renders with the verified state.
+async function submitOutcomeVerification(row, verified, notes) {
+  const runId = row?.audit?.run_id;
+  if (!runId) return;
+  try {
+    const res = await fetch("/api/bills/verify-outcome", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ run_id: runId, verified, ...(notes ? { notes } : {}) }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert(`Couldn't save: ${j.error ?? res.statusText}`);
+      return;
+    }
+    const j = await res.json().catch(() => ({}));
+    if (row.audit) {
+      row.audit.outcome_verified = j.outcome_verified ?? verified;
+      row.audit.outcome_verified_at = j.outcome_verified_at ?? Date.now();
+      row.audit.outcome_notes = j.outcome_notes ?? notes ?? null;
+      row.audit.needs_outcome_check = false;
+    }
+    row.attentionReason = null;
+    if (currentNav === "bills") renderBills();
+    updateNavCounts();
+    // Re-open so the drawer reflects the new state (e.g. status pill).
+    void openBillDrawer(row);
+  } catch (err) {
+    alert(`Couldn't save: ${err?.message ?? err}`);
+  }
+}
+
+function openOutcomeNoMatchModal(row) {
+  document.querySelector("#outcome-modal")?.remove();
+  const wrap = document.createElement("div");
+  wrap.id = "outcome-modal";
+  wrap.className = "modal-scrim";
+  wrap.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="outcome-modal-title">
+      <h2 class="modal-title" id="outcome-modal-title">What landed instead?</h2>
+      <p class="modal-body">Pick what's closest, then add any notes Bonsai should know — we use this to tune the next negotiation.</p>
+      <div class="outcome-choice-row" style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button type="button" class="btn btn-ghost" data-outcome="partial">Partial — some discount, not full</button>
+        <button type="button" class="btn btn-ghost" data-outcome="no">No — original amount stuck</button>
+      </div>
+      <label class="auth-field" style="margin-top:14px">
+        <span>Notes (optional)</span>
+        <textarea id="outcome-notes" rows="3" placeholder="What did the latest statement say?"></textarea>
+      </label>
+      <div class="auth-error" id="outcome-error" hidden></div>
+      <div class="modal-actions" style="margin-top:14px">
+        <button type="button" class="btn btn-ghost" id="outcome-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="outcome-confirm" disabled>Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const close = () => wrap.remove();
+  wrap.querySelector("#outcome-cancel").addEventListener("click", close);
+  wrap.addEventListener("click", (ev) => { if (ev.target === wrap) close(); });
+  document.addEventListener("keydown", function onKey(ev) {
+    if (ev.key === "Escape") { close(); document.removeEventListener("keydown", onKey); }
+  });
+
+  let chosen = null;
+  for (const btn of wrap.querySelectorAll("[data-outcome]")) {
+    btn.addEventListener("click", () => {
+      chosen = btn.dataset.outcome;
+      for (const b of wrap.querySelectorAll("[data-outcome]")) b.classList.remove("btn-primary");
+      btn.classList.add("btn-primary");
+      wrap.querySelector("#outcome-confirm").disabled = false;
+    });
+  }
+
+  const confirm = wrap.querySelector("#outcome-confirm");
+  const errEl = wrap.querySelector("#outcome-error");
+  confirm.addEventListener("click", async () => {
+    if (!chosen) return;
+    const notes = wrap.querySelector("#outcome-notes").value.trim();
+    confirm.disabled = true;
+    confirm.textContent = "Saving…";
+    try {
+      await submitOutcomeVerification(row, chosen, notes);
+      close();
+    } catch (err) {
+      errEl.textContent = err?.message ?? "Network error.";
+      errEl.hidden = false;
+      confirm.disabled = false;
+      confirm.textContent = "Save";
+    }
+  });
 }
 
 function renderDrawerFeedback(row) {
@@ -4495,25 +4963,7 @@ function buildTimelineEvents(row, report) {
     });
   }
 
-  // 7. SMS thread — messages use { role, body, ts, segments }
-  const sms = report.sms_thread;
-  if (sms && Array.isArray(sms.messages)) {
-    sms.messages.forEach((m) => {
-      const isOut = m.role === "outbound";
-      events.push({
-        ts: Date.parse(m.ts),
-        headline: isOut ? "SMS sent" : "SMS received",
-        detail: m.body ?? "",
-        channel: "sms",
-        actor: isOut
-          ? `Bonsai → billing${m.segments ? ` · ${m.segments} seg` : ""}`
-          : "Billing dept → Bonsai",
-        tone: isOut ? "ink" : "amber",
-      });
-    });
-  }
-
-  // 8. Voice
+  // 7. Voice
   const voice = report.voice_call;
   if (voice) {
     events.push({
@@ -4734,18 +5184,6 @@ function renderDrawerMessages(row, report) {
         <div class="dmsg-msg ${isOut ? "out" : ""}">
           <div class="dmsg-meta"><span>${isOut ? "→ billing" : "← billing"}</span><span>${escapeHtml(formatClockTs(Date.parse(m.ts)))}</span></div>
           <div class="dmsg-subject">${escapeHtml(m.subject ?? "(no subject)")}</div>
-          <div class="dmsg-body">${escapeHtml(m.body ?? "")}</div>
-        </div>`);
-    });
-  }
-  const sms = report?.sms_thread;
-  if (sms?.messages?.length) {
-    parts.push(`<div class="dmsg-section-head"><div class="eyebrow">SMS thread</div><div class="mono" style="font-size:11px;color:var(--ink-mute)">${sms.messages.length} msgs</div></div>`);
-    sms.messages.forEach((m) => {
-      const isOut = m.role === "outbound";
-      parts.push(`
-        <div class="dmsg-msg ${isOut ? "out" : ""}">
-          <div class="dmsg-meta"><span>${isOut ? "→ billing" : "← billing"}${m.segments ? ` · ${m.segments} seg` : ""}</span><span>${escapeHtml(formatClockTs(Date.parse(m.ts)))}</span></div>
           <div class="dmsg-body">${escapeHtml(m.body ?? "")}</div>
         </div>`);
     });

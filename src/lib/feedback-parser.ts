@@ -11,7 +11,7 @@ import type { AgentTone } from "./user-settings.ts";
 export interface FeedbackDirectives {
   /** When set, only channels with `true` are allowed. Missing keys = inherit
    * from tune config. */
-  channels?: { email?: boolean; sms?: boolean; voice?: boolean };
+  channels?: { email?: boolean; voice?: boolean };
   /** Tone the user wants the agent to take. */
   tone?: AgentTone;
   /** Raw feedback lines, preserved so downstream prompts can see the original. */
@@ -19,11 +19,9 @@ export interface FeedbackDirectives {
 }
 
 const RE_EMAIL_ONLY = /\b(only\s+email|email\s+only|email[- ]only)\b/i;
-const RE_SMS_ONLY = /\bonly\s+(?:sms|text)s?\b|\b(?:sms|text)s?\s+only\b/i;
 const RE_VOICE_ONLY = /\bonly\s+(?:voice|phone|calls?)\b|\b(?:voice|phone|calls?)\s+only\b/i;
 
 const RE_NO_CALL = /\b(no|stop|avoid|don'?t|skip|without)\s+(call|calls|phone|phones|voice|calling|phoning)\b/i;
-const RE_NO_SMS = /\b(no|stop|avoid|don'?t|skip|without)\s+(sms|text|texts|texting)\b/i;
 const RE_NO_EMAIL = /\b(no|stop|avoid|don'?t|skip|without)\s+(email|emails|emailing)\b/i;
 
 const RE_STOP_AGGRESSIVE =
@@ -40,15 +38,12 @@ export function parseFeedbackDirectives(feedback: string[]): FeedbackDirectives 
 
   // Exclusive "X only" overrides ALL channel flags.
   if (RE_EMAIL_ONLY.test(text)) {
-    out.channels = { email: true, sms: false, voice: false };
-  } else if (RE_SMS_ONLY.test(text)) {
-    out.channels = { email: false, sms: true, voice: false };
+    out.channels = { email: true, voice: false };
   } else if (RE_VOICE_ONLY.test(text)) {
-    out.channels = { email: false, sms: false, voice: true };
+    out.channels = { email: false, voice: true };
   } else {
-    const chans: { email?: boolean; sms?: boolean; voice?: boolean } = {};
+    const chans: { email?: boolean; voice?: boolean } = {};
     if (RE_NO_EMAIL.test(text)) chans.email = false;
-    if (RE_NO_SMS.test(text)) chans.sms = false;
     if (RE_NO_CALL.test(text)) chans.voice = false;
     if (Object.keys(chans).length > 0) out.channels = chans;
   }

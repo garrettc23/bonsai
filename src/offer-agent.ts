@@ -9,7 +9,7 @@
  * infusions go to infusion centers vs hospital outpatient; insurance swaps go
  * to Covered California; hospital bills go to charity care programs.
  *
- * Each source has a channel preference (email, sms, voice) with its own
+ * Each source has a channel preference (email or voice) with its own
  * simulator persona that replies with a quote. The agent parses the quote,
  * compares to baseline, and stops as soon as it finds one lower — OR after
  * exhausting all sources for the category, confirms the current provider is
@@ -21,14 +21,16 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { currentUserPaths } from "./lib/user-paths.ts";
 
-const MODEL = "claude-sonnet-4-5";
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const OFFERS_DIR = join(__dirname, "..", "out", "offers");
+const MODEL = "claude-opus-4-7";
 
-export type OfferChannel = "email" | "sms" | "voice";
+function offersOutDir(): string {
+  return currentUserPaths().offersDir;
+}
+
+export type OfferChannel = "email" | "voice";
 export type OfferCategory =
   | "prescription"
   | "insurance_plan"
@@ -98,9 +100,9 @@ const SOURCE_DIRECTORY: Record<OfferCategory, OfferSource[]> = {
     {
       id: "indie_pharm",
       name: "Local independent pharmacy",
-      channel: "sms",
+      channel: "email",
       persona:
-        "You are a local independent pharmacist replying by text. You're helpful but curt. Quote retail minus a small cash-pay discount (~10%). Suggest the patient check Cost Plus for generics.",
+        "You are a local independent pharmacist replying by email. You're helpful but curt. Quote retail minus a small cash-pay discount (~10%). Suggest the patient check Cost Plus for generics.",
       quote_multiplier_range: [0.7, 1.1],
       refuse_probability: 0.2,
     },
@@ -117,9 +119,9 @@ const SOURCE_DIRECTORY: Record<OfferCategory, OfferSource[]> = {
     {
       id: "healthsherpa",
       name: "HealthSherpa",
-      channel: "sms",
+      channel: "email",
       persona:
-        "You are a HealthSherpa text assistant. Quote 1 plan with better rate than current if the patient qualifies for subsidies. Terse — under 2 sentences. Always include plan name and monthly premium.",
+        "You are a HealthSherpa email assistant. Quote 1 plan with better rate than current if the patient qualifies for subsidies. Terse — 2-4 lines. Always include plan name and monthly premium.",
       quote_multiplier_range: [0.6, 0.95],
     },
   ],
@@ -197,9 +199,9 @@ const SOURCE_DIRECTORY: Record<OfferCategory, OfferSource[]> = {
     {
       id: "dentalsave",
       name: "DentalSave discount plan",
-      channel: "sms",
+      channel: "email",
       persona:
-        "You are a DentalSave text rep. Quote a discount-plan alternative — not insurance, membership-based. Usually beats individual dental insurance for low-utilizers. Terse.",
+        "You are a DentalSave email rep. Quote a discount-plan alternative — not insurance, membership-based. Usually beats individual dental insurance for low-utilizers. Terse — 2-4 lines.",
       quote_multiplier_range: [0.35, 0.7],
     },
   ],
@@ -274,7 +276,7 @@ export interface OfferQuote {
   quoted_price: number | null;
   currency: "USD";
   notes: string;
-  /** Raw text of the source's reply (email body / SMS body / call summary). */
+  /** Raw text of the source's reply (email body / call summary). */
   raw_reply: string;
   /** How much the patient would save monthly (or per-procedure) vs baseline. null if source declined. */
   savings_vs_baseline: number | null;
@@ -331,7 +333,7 @@ async function queryOneSource(opts: {
 
   const system = `${source.persona}
 
-You reply via ${source.channel.toUpperCase()}. Keep the reply ${source.channel === "sms" ? "under 280 characters, plain text, one thought" : source.channel === "email" ? "brief and professional, 4–8 lines of plain email prose with a signoff" : "as a 3–6 line transcribed phone call summary: rep greeting, quote, confirm details"}. No markdown.
+You reply via ${source.channel.toUpperCase()}. Keep the reply ${source.channel === "email" ? "brief and professional, 4–8 lines of plain email prose with a signoff" : "as a 3–6 line transcribed phone call summary: rep greeting, quote, confirm details"}. No markdown.
 
 ${hint}
 
@@ -493,23 +495,25 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
   };
 }
 
-/** Persist a run to out/offers/{ts}-{baseline_slug}.json so the UI can list history. */
+/** Persist a run to out/users/<id>/offers/{ts}-{baseline_slug}.json so the UI can list history. */
 export function saveOfferHunt(result: OfferHuntResult): string {
-  mkdirSync(OFFERS_DIR, { recursive: true });
+  const dir = offersOutDir();
+  mkdirSync(dir, { recursive: true });
   const slug = result.baseline.label
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "")
     .slice(0, 40);
   const fname = `${Date.now()}-${slug || "offer"}.json`;
-  const full = join(OFFERS_DIR, fname);
+  const full = join(dir, fname);
   writeFileSync(full, JSON.stringify(result, null, 2), "utf8");
   return fname;
 }
 
 export function offersDir(): string {
-  if (!existsSync(OFFERS_DIR)) mkdirSync(OFFERS_DIR, { recursive: true });
-  return OFFERS_DIR;
+  const dir = offersOutDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /** Source directory is exported so the UI can show which sources will be checked. */

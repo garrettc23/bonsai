@@ -14,47 +14,32 @@ import {
 } from "../src/lib/feedback-parser.ts";
 
 describe("parseFeedbackDirectives — channel exclusives", () => {
-  test('"email only" gates out sms and voice', () => {
+  test('"email only" gates out voice', () => {
     const d = parseFeedbackDirectives(["email only, please"]);
-    expect(d.channels).toEqual({ email: true, sms: false, voice: false });
+    expect(d.channels).toEqual({ email: true, voice: false });
   });
 
   test('"only email" matches same as "email only"', () => {
     const d = parseFeedbackDirectives(["only email from now on"]);
-    expect(d.channels).toEqual({ email: true, sms: false, voice: false });
+    expect(d.channels).toEqual({ email: true, voice: false });
   });
 
-  test('"sms only" gates out email and voice', () => {
-    const d = parseFeedbackDirectives(["sms only"]);
-    expect(d.channels).toEqual({ email: false, sms: true, voice: false });
-  });
-
-  test('"only texts" is treated as sms only', () => {
-    const d = parseFeedbackDirectives(["only texts going forward"]);
-    expect(d.channels).toEqual({ email: false, sms: true, voice: false });
-  });
-
-  test('"voice only" gates out email and sms', () => {
+  test('"voice only" gates out email', () => {
     const d = parseFeedbackDirectives(["phone only please"]);
-    expect(d.channels).toEqual({ email: false, sms: false, voice: true });
+    expect(d.channels).toEqual({ email: false, voice: true });
   });
 
   test("exclusive overrides any individual 'no X' in the same feedback", () => {
-    // "email only" should win and set all three, not leave voice/sms as just undefined.
+    // "email only" should win and set both, not leave voice as just undefined.
     const d = parseFeedbackDirectives(["email only, no calls"]);
-    expect(d.channels).toEqual({ email: true, sms: false, voice: false });
+    expect(d.channels).toEqual({ email: true, voice: false });
   });
 });
 
 describe("parseFeedbackDirectives — channel negatives (non-exclusive)", () => {
-  test('"no calls" disables voice only, leaves others unspecified', () => {
+  test('"no calls" disables voice only, leaves email unspecified', () => {
     const d = parseFeedbackDirectives(["no calls please"]);
     expect(d.channels).toEqual({ voice: false });
-  });
-
-  test('"stop texting" disables sms only', () => {
-    const d = parseFeedbackDirectives(["stop texting me"]);
-    expect(d.channels).toEqual({ sms: false });
   });
 
   test("don't email (with apostrophe) disables email only", () => {
@@ -63,8 +48,8 @@ describe("parseFeedbackDirectives — channel negatives (non-exclusive)", () => 
   });
 
   test("multiple negatives stack", () => {
-    const d = parseFeedbackDirectives(["no calls and no texts"]);
-    expect(d.channels).toEqual({ voice: false, sms: false });
+    const d = parseFeedbackDirectives(["no calls and don't email"]);
+    expect(d.channels).toEqual({ voice: false, email: false });
   });
 
   test("feedback with no channel signals leaves channels undefined", () => {
@@ -125,7 +110,7 @@ describe("parseFeedbackDirectives — notes preservation", () => {
       "stop being aggressive, email only, and don't mention hardship yet",
     ]);
     expect(d.tone).toBe("polite");
-    expect(d.channels).toEqual({ email: true, sms: false, voice: false });
+    expect(d.channels).toEqual({ email: true, voice: false });
     expect(d.notes).toHaveLength(1);
     expect(d.notes[0]).toContain("don't mention hardship");
   });

@@ -3,13 +3,14 @@
  * inbound from the same file. The simulator (see src/simulate-reply.ts) writes
  * replies into this mailbox between negotiator turns.
  *
- * The on-disk format is a single JSON file per thread: out/threads/{thread_id}.json
- * with shape { outbound: SentEmail[], inbound: InboundEmail[] }. This makes
- * it easy to inspect a thread at any time with `cat out/threads/*.json`.
+ * The on-disk format is a single JSON file per thread:
+ * out/users/<user_id>/threads/{thread_id}.json with shape
+ * { outbound: SentEmail[], inbound: InboundEmail[] }. The default dir is
+ * the active user's threads directory (see user-paths.ts); tests can
+ * override by passing `dir` explicitly.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type {
   EmailClient,
   InboundEmail,
@@ -17,9 +18,11 @@ import type {
   SentEmail,
 } from "./email.ts";
 import { newId } from "./email.ts";
+import { currentUserPaths } from "../lib/user-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_THREADS_DIR = join(__dirname, "..", "..", "out", "threads");
+function defaultThreadsDir(): string {
+  return currentUserPaths().threadsDir;
+}
 
 export interface ThreadState {
   thread_id: string;
@@ -27,11 +30,11 @@ export interface ThreadState {
   inbound: InboundEmail[];
 }
 
-export function threadPath(thread_id: string, dir: string = DEFAULT_THREADS_DIR): string {
-  return join(dir, `${thread_id}.json`);
+export function threadPath(thread_id: string, dir?: string): string {
+  return join(dir ?? defaultThreadsDir(), `${thread_id}.json`);
 }
 
-export function loadThread(thread_id: string, dir: string = DEFAULT_THREADS_DIR): ThreadState {
+export function loadThread(thread_id: string, dir?: string): ThreadState {
   const path = threadPath(thread_id, dir);
   if (!existsSync(path)) {
     return { thread_id, outbound: [], inbound: [] };
@@ -39,13 +42,17 @@ export function loadThread(thread_id: string, dir: string = DEFAULT_THREADS_DIR)
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-export function saveThread(thread: ThreadState, dir: string = DEFAULT_THREADS_DIR): void {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(threadPath(thread.thread_id, dir), JSON.stringify(thread, null, 2), "utf8");
+export function saveThread(thread: ThreadState, dir?: string): void {
+  const d = dir ?? defaultThreadsDir();
+  mkdirSync(d, { recursive: true });
+  writeFileSync(threadPath(thread.thread_id, d), JSON.stringify(thread, null, 2), "utf8");
 }
 
 export class MockEmailClient implements EmailClient {
-  constructor(private threadsDir: string = DEFAULT_THREADS_DIR) {}
+  private threadsDir: string;
+  constructor(threadsDir?: string) {
+    this.threadsDir = threadsDir ?? defaultThreadsDir();
+  }
 
   async send(msg: OutboundEmail): Promise<SentEmail> {
     const sent: SentEmail = {
@@ -57,7 +64,7 @@ export class MockEmailClient implements EmailClient {
       body_markdown: msg.body_markdown,
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
-      bcc: msg.bcc,
+      cc: msg.cc,
     };
     const thread = loadThread(msg.thread_id, this.threadsDir);
     thread.outbound.push(sent);

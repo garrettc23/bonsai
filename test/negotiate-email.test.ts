@@ -58,7 +58,7 @@ function fixtureAnalyzer(): AnalyzerResult {
     },
     grounding_failures: [],
     meta: {
-      model: "claude-sonnet-4-5",
+      model: "claude-opus-4-7",
       input_tokens: 0,
       output_tokens: 0,
       elapsed_ms: 0,
@@ -121,7 +121,7 @@ async function makeStartedState(opts?: {
   const { state } = await startNegotiation({
     analyzer: fixtureAnalyzer(),
     client,
-    patient_email: "patient@example.com",
+    user_email: "patient@example.com",
     provider_email: "billing@hospital.example",
     final_acceptable_floor: opts?.floor ?? 100,
     user_directives: opts?.user_directives,
@@ -145,7 +145,7 @@ describe("startNegotiation", () => {
     const { state } = await startNegotiation({
       analyzer: fixtureAnalyzer(),
       client,
-      patient_email: "p@x.com",
+      user_email: "p@x.com",
       provider_email: "b@x.com",
     });
     expect(state.final_acceptable_floor).toBe(100);
@@ -368,32 +368,32 @@ describe("stepNegotiation — MAX_TURNS exhaustion", () => {
   });
 });
 
-describe("bcc threading — patient stays in the loop", () => {
-  test("initial appeal carries bcc onto the SentEmail", async () => {
+describe("cc threading — user stays in the loop", () => {
+  test("initial appeal carries cc onto the SentEmail", async () => {
     const client = new MockEmailClient(tmpDir);
     const { state } = await startNegotiation({
       analyzer: fixtureAnalyzer(),
       client,
-      patient_email: "garrett@example.com",
+      user_email: "garrett@example.com",
       provider_email: "billing@hospital.example",
       final_acceptable_floor: 100,
-      bcc: ["garrett@example.com"],
+      cc: ["garrett@example.com"],
     });
     const { loadThread } = await import("../src/clients/email-mock.ts");
     const t = loadThread(state.thread_id, tmpDir);
     expect(t.outbound.length).toBe(1);
-    expect(t.outbound[0].bcc).toEqual(["garrett@example.com"]);
+    expect(t.outbound[0].cc).toEqual(["garrett@example.com"]);
   });
 
-  test("follow-up sent during stepNegotiation also carries bcc", async () => {
+  test("follow-up sent during stepNegotiation also carries cc", async () => {
     const client = new MockEmailClient(tmpDir);
     const { state } = await startNegotiation({
       analyzer: fixtureAnalyzer(),
       client,
-      patient_email: "garrett@example.com",
+      user_email: "garrett@example.com",
       provider_email: "billing@hospital.example",
       final_acceptable_floor: 100,
-      bcc: ["garrett@example.com"],
+      cc: ["garrett@example.com"],
     });
     await client.ingestInbound({
       from: "billing@hospital.example",
@@ -423,8 +423,8 @@ describe("bcc threading — patient stays in the loop", () => {
     const { loadThread } = await import("../src/clients/email-mock.ts");
     const t = loadThread(state.thread_id, tmpDir);
     expect(t.outbound.length).toBe(2);
-    expect(t.outbound[0].bcc).toEqual(["garrett@example.com"]);
-    expect(t.outbound[1].bcc).toEqual(["garrett@example.com"]);
+    expect(t.outbound[0].cc).toEqual(["garrett@example.com"]);
+    expect(t.outbound[1].cc).toEqual(["garrett@example.com"]);
   });
 });
 

@@ -23,7 +23,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { MockEmailClient } from "./clients/email-mock.ts";
 import type { AnalyzerResult } from "./types.ts";
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL = "claude-opus-4-7";
 
 export type Persona = "stall_then_concede" | "outright_deny" | "hostile" | "quick_concede";
 
@@ -63,7 +63,7 @@ export interface SimulateOpts {
   persona: Persona;
   analyzer: AnalyzerResult;
   provider_email: string;
-  patient_email: string;
+  user_email: string;
   /** Subject line of the message we're replying to. */
   reply_to_subject: string;
   /** The outbound message we're replying to (the latest one from the patient). */
@@ -119,7 +119,7 @@ Write a plain-prose email reply. Do NOT add markdown, headers, or lists — writ
 
   await opts.client.ingestInbound({
     from: opts.provider_email,
-    to: opts.patient_email,
+    to: opts.user_email,
     subject,
     body_text: body,
     thread_id: opts.thread_id,

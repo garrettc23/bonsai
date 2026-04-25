@@ -29,17 +29,18 @@
  * Output: a transcript file out/calls/{call_id}.transcript.md for review.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { AnalyzerResult } from "../types.ts";
 import { generateAgentConfig, type ElevenLabsAgentConfig, type ServerTool } from "./agent-config.ts";
 import { dispatchToolCall, newCallState, saveCallState, type CallState } from "./tool-handlers.ts";
+import { currentUserPaths } from "../lib/user-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = join(__dirname, "..", "..", "out", "calls");
+function callsOutDir(): string {
+  return currentUserPaths().callsDir;
+}
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL = "claude-opus-4-7";
 
 export type RepPersona = "cooperative" | "stall_then_concede" | "hostile" | "voicemail";
 
@@ -255,7 +256,8 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
   }
 
   // Write transcript.
-  mkdirSync(OUT_DIR, { recursive: true });
+  const outDir = callsOutDir();
+  mkdirSync(outDir, { recursive: true });
   const mdLines: string[] = [];
   mdLines.push(`# Bonsai simulated call — ${call_id}`);
   mdLines.push(`Persona: ${opts.persona}`);
@@ -269,7 +271,7 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
     else mdLines.push(`\`[tool] ${item.text}\``);
     mdLines.push("");
   }
-  writeFileSync(join(OUT_DIR, `${call_id}.transcript.md`), mdLines.join("\n"), "utf8");
+  writeFileSync(join(outDir, `${call_id}.transcript.md`), mdLines.join("\n"), "utf8");
 
   return { call_id, state: callState, transcript, agent_config: agentConfig };
 }

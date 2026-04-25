@@ -11,12 +11,13 @@
  * The HTTP wrapper is in src/server/voice-webhook.ts.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import type { AnalyzerResult, BillingError } from "../types.ts";
+import { currentUserPaths } from "../lib/user-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CALLS_DIR = join(__dirname, "..", "..", "out", "calls");
+function callsDir(): string {
+  return currentUserPaths().callsDir;
+}
 
 export interface CallState {
   call_id: string;
@@ -59,14 +60,15 @@ export function newCallState(opts: {
 }
 
 export function loadCallState(call_id: string): CallState | null {
-  const path = join(CALLS_DIR, `${call_id}.json`);
+  const path = join(callsDir(), `${call_id}.json`);
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
 export function saveCallState(state: CallState): void {
-  mkdirSync(CALLS_DIR, { recursive: true });
-  writeFileSync(join(CALLS_DIR, `${state.call_id}.json`), JSON.stringify(state, null, 2), "utf8");
+  const dir = callsDir();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${state.call_id}.json`), JSON.stringify(state, null, 2), "utf8");
 }
 
 function appendEvent(state: CallState, tool: string, input: unknown, output: unknown): void {
