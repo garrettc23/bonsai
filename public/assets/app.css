@@ -173,6 +173,16 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   background: var(--surface-alt);
   color: var(--ink-soft);
 }
+/* Red badge for "needs your attention" / "something new" states. Shows up
+ * next to Bills (rows in attention) and Comparison (new lower-price
+ * offers found). */
+.nav-count.alert {
+  background: #b53a3a;
+  color: #fff;
+  border-radius: 999px;
+  min-width: 20px;
+  height: 18px;
+}
 .nav-item > span:nth-child(2) { flex: 1; }
 .nav-count {
   min-width: 18px; height: 18px; padding: 0 5px;
@@ -323,35 +333,39 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   margin: 6px auto 0;
 }
 .file-field-full {
-  flex: 1;
-  max-width: 460px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
+/* Hide the native input entirely — the adjacent <span class="file-field-btn">
+ * is the clickable control; clicks on the <label> forward to the hidden
+ * input and open the OS file picker. Removes the ugly border + filename text. */
 .file-field-full input[type="file"] {
-  width: 100%;
-  padding: 14px 14px;
-  font-size: 13px;
-  font-family: var(--font-mono);
-  color: var(--ink-soft);
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: border-color .15s;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
-.file-field-full input[type="file"]:hover { border-color: var(--ink); }
-.file-field-full input[type="file"]::-webkit-file-upload-button {
-  margin-right: 12px;
-  padding: 7px 14px;
+.file-field-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 22px;
   background: var(--ink);
   color: #fff;
-  border: 0;
-  border-radius: 5px;
-  font-size: 12px;
+  border-radius: 8px;
+  font-size: 13px;
   font-family: var(--font-ui);
   font-weight: 500;
   cursor: pointer;
-  letter-spacing: 0;
+  transition: opacity .15s;
 }
+.file-field-full:hover .file-field-btn { opacity: 0.85; }
 .dz-note {
   font-size: 11.5px;
   color: var(--ink-mute);
@@ -1783,7 +1797,7 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 }
 .bills-row {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) 120px 140px 180px 28px;
+  grid-template-columns: minmax(0, 2fr) 120px 140px 28px;
   gap: 16px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
@@ -1883,6 +1897,47 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   background: #f5b100;
   border-radius: 50%;
   animation: statusPulse 1.6s ease-out infinite;
+}
+
+/* Attention chip — same shape as bill-inline-active, but tone varies by
+ * reason. Escalated and error read as urgent (red); awaiting reads as
+ * "ball is in your court" (amber); paused is intentional, so neutral gray. */
+.bill-inline-attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 10px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.bill-inline-escalated,
+.bill-inline-error {
+  color: #b53a3a;
+  background: rgba(181, 58, 58, 0.06);
+  border: 1px solid rgba(181, 58, 58, 0.28);
+}
+.bill-inline-awaiting {
+  color: #b88100;
+  background: rgba(245, 177, 0, 0.08);
+  border: 1px solid rgba(245, 177, 0, 0.28);
+}
+.bill-inline-paused,
+.bill-inline-watching {
+  color: var(--ink-mute);
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+}
+.bill-inline-resolved {
+  color: var(--green);
+  background: rgba(43, 122, 80, 0.06);
+  border: 1px solid rgba(43, 122, 80, 0.32);
 }
 
 .bill-main {
@@ -2147,9 +2202,18 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-family: var(--font-display);
   font-size: 20px;
   color: var(--ink-soft);
-  text-decoration: line-through;
   letter-spacing: -0.01em;
   margin-top: 2px;
+}
+/* Strike only the dollar amount — the unit ("/mo") sits in its own span
+ * with no decoration, so the line ends at the last digit. */
+.offer-amt-strike { text-decoration: line-through; }
+.offer-unit {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--ink-mute);
+  margin-left: 4px;
+  letter-spacing: 0;
 }
 .offer-new {
   font-family: var(--font-display);
@@ -2229,6 +2293,190 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   box-sizing: border-box;
 }
 .settings-input:focus { border-color: var(--ink); }
+
+/* Settings → Connected accounts: one row per integration with pill + Connect
+ * / Edit / Disconnect actions. Editing opens the credential modal instead
+ * of exposing input fields inline. */
+.intg-req {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  font-weight: 500;
+}
+.intg-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.intg-actions .btn { padding: 7px 14px; font-size: 12.5px; }
+.intg-disconnect { color: #b53a3a; }
+.intg-disconnect:hover { background: rgba(181, 58, 58, 0.08); border-color: rgba(181, 58, 58, 0.45); }
+
+/* Credential modal — wider than the generic confirm modal so inputs breathe.
+ * The doubled selector (.confirm-modal.intg-modal) outranks the generic
+ * .confirm-modal `width: min(420px,…)` rule defined later in this file. */
+.confirm-modal.intg-modal { width: min(480px, calc(100vw - 40px)); }
+
+/* Compare modal — side-by-side current vs recommended with full breakdown.
+ * Wide layout: cap at 1080px on desktop, fluid below. The two provider
+ * columns get plenty of horizontal room before the layout collapses.
+ * Doubled selector beats the generic `.confirm-modal { width: 420px }`. */
+.confirm-modal.cmp-modal { width: min(1080px, calc(100vw - 48px)); }
+.cmp-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 32px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.cmp-head .confirm-title { margin: 4px 0 0; }
+.cmp-body { padding: 24px 32px; max-height: 70vh; overflow-y: auto; }
+.cmp-cols {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 24px;
+  align-items: stretch;
+  margin-bottom: 22px;
+}
+.cmp-col {
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cmp-col-offer {
+  border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 6%, var(--surface));
+}
+.cmp-col-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.cmp-col-eyebrow-green { color: var(--green); }
+.cmp-provider {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.cmp-price {
+  font-family: var(--font-display);
+  font-size: 28px;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  margin-top: 2px;
+}
+.cmp-price-green { color: var(--green); }
+.cmp-unit {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--ink-mute);
+  margin-left: 4px;
+  letter-spacing: 0;
+}
+.cmp-specifics {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.cmp-saves {
+  font-size: 12.5px;
+  color: var(--ink);
+  line-height: 1.5;
+}
+.cmp-saves strong { color: var(--green); font-weight: 600; }
+.cmp-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-mute);
+}
+.cmp-section {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.cmp-section:first-of-type { margin-top: 0; }
+.cmp-section-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin-bottom: 4px;
+}
+.cmp-section-body {
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.5;
+}
+.cmp-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 14px;
+}
+.cmp-meta-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.cmp-meta-val {
+  font-size: 13px;
+  color: var(--ink);
+  margin-top: 2px;
+}
+.offer-card-dismissed {
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+@media (max-width: 720px) {
+  .confirm-modal.cmp-modal { width: calc(100vw - 24px); }
+  .cmp-head, .cmp-body { padding-left: 20px; padding-right: 20px; }
+  .cmp-cols { grid-template-columns: 1fr; gap: 14px; }
+  .cmp-arrow { transform: rotate(90deg); }
+}
+.intg-modal-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+.intg-field { display: flex; flex-direction: column; gap: 4px; }
+.intg-field-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  font-weight: 500;
+}
+.intg-input { margin-top: 0; }
+.intg-modal-status {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-mute);
+  min-height: 14px;
+}
+.intg-modal-status.err { color: #b53a3a; }
 .acc-label-row {
   display: flex;
   justify-content: space-between;
@@ -2382,14 +2630,16 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   margin-top: 20px;
 }
 
-/* Settings: footer Save row pinned at bottom of the page. */
+/* Settings: footer Save row pinned at bottom of the page. The 18px right
+ * padding lines the Save button up with the Delete button column inside
+ * the Data card's `.settings-row` (which uses `padding: 14px 18px`). */
 .settings-save-row {
   display: flex;
   justify-content: flex-end;
   align-items: center;
   gap: 12px;
   margin-top: 24px;
-  padding-top: 16px;
+  padding: 16px 18px 0;
   border-top: 1px solid var(--line);
 }
 
@@ -2568,6 +2818,9 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   transition: transform .28s cubic-bezier(.2, .8, .2, 1);
 }
 .drawer.open { transform: translateX(0); }
+/* Awaiting-approval rows are a *review* surface — give the drawer enough
+ * width to feel like a screen rather than a side rail. */
+.drawer.drawer-wide { width: min(960px, 96vw); }
 
 .drawer-head {
   display: flex;
@@ -2680,13 +2933,14 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 .drawer-resume-btn:hover { opacity: 0.85; }
 .drawer-resume-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.drawer-stat-status-wrap {
+/* Drawer title row — bill name + red trash icon sit side-by-side in the
+ * drawer header. The trash only renders when the drawer is open (i.e. when
+ * the user has clicked into a bill). */
+.drawer-title-row {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
 }
-.drawer-stat-status-lead { min-width: 0; }
 .drawer-delete-icon {
   width: 30px;
   height: 30px;
@@ -2694,18 +2948,18 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   align-items: center;
   justify-content: center;
   background: transparent;
-  color: var(--ink-mute);
-  border: 1px solid var(--line);
+  color: #b53a3a;
+  border: 1px solid rgba(181, 58, 58, 0.35);
   border-radius: 6px;
   cursor: pointer;
   transition: color .12s, background .12s, border-color .12s;
   padding: 0;
-  margin-top: 2px;
+  flex-shrink: 0;
 }
 .drawer-delete-icon:hover {
-  color: #b53a3a;
-  background: rgba(181, 58, 58, 0.08);
-  border-color: rgba(181, 58, 58, 0.45);
+  color: #fff;
+  background: #b53a3a;
+  border-color: #9e2e2e;
 }
 
 /* ─── Confirm modal ─────────────────────────────────────────── */
@@ -2772,23 +3026,156 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 }
 .btn-danger:hover { background: #a02f2f; }
 
-.drawer-feedback {
-  padding: 14px 26px 18px;
-  border-bottom: 1px solid var(--line);
+/* Needs-attention drawer tab — explains the state and offers one CTA. */
+.dattn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 24px;
   background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 10px;
 }
-.drawer-feedback[hidden] { display: none; }
-.drawer-feedback-head { margin-bottom: 10px; }
-.drawer-feedback-sub {
+.dattn-urgent { border-left-color: #b53a3a; }
+.dattn-awaiting { border-left-color: #d09800; }
+.dattn-neutral { border-left-color: var(--ink-mute); }
+.dattn-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.dattn-urgent .dattn-eyebrow { color: #b53a3a; }
+.dattn-awaiting .dattn-eyebrow { color: #b88100; }
+.dattn-title {
+  font-family: var(--font-display);
+  font-size: 24px;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+  font-weight: 400;
+  margin: -4px 0 0;
+}
+.dattn-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.dattn-steps {
+  margin: 0;
+  padding-left: 22px;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.6;
+}
+.dattn-steps li { margin-bottom: 4px; }
+.dattn-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
   margin-top: 4px;
+}
+
+/* Counter snapshot inside the Needs-attention tab. Side-by-side numbers
+ * so the user can decide approve-vs-keep-negotiating without leaving the
+ * tab. */
+.dattn-counter {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dattn-counter-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr 1fr;
+  gap: 14px;
+  align-items: end;
+}
+.dattn-counter-cell { display: flex; flex-direction: column; gap: 4px; }
+.dattn-counter-saves { border-left: 1px solid var(--line); padding-left: 14px; }
+.dattn-counter-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.dattn-counter-amt {
+  font-family: var(--font-display);
+  font-size: 22px;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.dattn-counter-amt-green { color: var(--green); }
+.dattn-counter-pct {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-mute);
+  letter-spacing: 0;
+}
+.dattn-counter-arrow {
+  font-size: 18px;
+  color: var(--ink-mute);
+  align-self: center;
+  padding-bottom: 6px;
+}
+.dattn-counter-notes {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* Inline chat at the bottom of the Needs-attention panel. Same form ids
+ * as the Feedback tab so handlers are shared. */
+.dattn-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 4px;
+}
+.dattn-chat-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.dattn-chat-sub {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+  margin-top: -2px;
+  margin-bottom: 6px;
+}
+.dattn-chat-log:empty { display: none; }
+.dattn-chat-log {
+  max-height: 220px;
+  overflow-y: auto;
+}
+@media (max-width: 600px) {
+  .dattn-counter-grid { grid-template-columns: 1fr; }
+  .dattn-counter-arrow { display: none; }
+  .dattn-counter-saves { border-left: 0; padding-left: 0; border-top: 1px solid var(--line); padding-top: 10px; }
+}
+
+.dfb-tab { display: flex; flex-direction: column; gap: 12px; }
+.dfb-head { display: flex; flex-direction: column; gap: 4px; }
+.dfb-sub {
   font-size: 12px;
   color: var(--ink-soft);
   line-height: 1.45;
 }
-.drawer-feedback .qa-log:empty { display: none; }
-.drawer-feedback .qa-log {
-  margin-bottom: 10px;
-  max-height: 220px;
+.dfb-tab .qa-log:empty { display: none; }
+.dfb-tab .qa-log {
+  margin: 0;
+  max-height: 320px;
   overflow-y: auto;
 }
 .drawer-control .eyebrow { margin: 0; }

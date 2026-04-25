@@ -27,11 +27,11 @@
           </button>
           <button class="nav-item" data-nav="bills">
             <span class="nav-ic" data-icon="inbox"></span><span>Bills</span>
-            <span class="nav-count" id="nav-bills-count">0</span>
+            <span class="nav-count alert" id="nav-bills-count" hidden>0</span>
           </button>
           <button class="nav-item" data-nav="offers">
             <span class="nav-ic" data-icon="sparkle"></span><span>Comparison</span>
-            <span class="nav-count soft" id="nav-offers-count">0</span>
+            <span class="nav-count alert" id="nav-offers-count" hidden>0</span>
           </button>
           <button class="nav-item" data-nav="profile">
             <span class="nav-ic" data-icon="user"></span><span>Profile</span>
@@ -77,11 +77,12 @@
                 <div class="dz-icon" aria-hidden="true">
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="15"/></svg>
                 </div>
-                <div class="dz-title">Drop any bill. We get you the lowest price possible while you sleep.</div>
+                <div class="dz-title">Drop any bill. We get you the lowest price possible.</div>
                 <div class="dz-sub">Every expense in your life, from medical to insurance to subscriptions, automatically negotiated until you're paying the lowest price possible.</div>
                 <form id="upload-form" class="dz-form">
                   <label class="file-field file-field-full">
                     <input type="file" name="bill" multiple required />
+                    <span class="file-field-btn">Choose files</span>
                   </label>
                 </form>
                 <div class="dz-staging" id="dz-staging" hidden>
@@ -189,7 +190,7 @@
               </div>
               <div class="qa-log" id="review-plan-chat-log"></div>
               <form class="qa-form qa-form-chat" id="review-plan-chat-form">
-                <input type="text" id="review-plan-chat-input" placeholder="e.g. 'Skip voice, email only' · 'What's the biggest error?' · 'Floor is $400'" autocomplete="off" />
+                <input type="text" id="review-plan-chat-input" placeholder="e.g. 'Skip voice, email only' · 'What's the biggest error?' · 'Lead with the charity-care angle'" autocomplete="off" />
                 <button type="submit" class="qa-send" aria-label="Send">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
                 </button>
@@ -325,13 +326,6 @@
                 <div>Bill</div>
                 <div>Amount</div>
                 <div>Category</div>
-                <div class="with-help">
-                  <span>Price score</span>
-                  <span class="help-tip" tabindex="0" aria-label="Price score — compared to peers. 100 = you're paying the best price. 0 = greatly overpaying vs. benchmarks.">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                    <span class="help-tip-bubble">Compared to peers. <strong>100</strong> means you're paying the best price. <strong>0</strong> means greatly overpaying vs. benchmarks.</span>
-                  </span>
-                </div>
                 <div></div>
               </div>
               <div id="bills-rows"></div>
@@ -340,15 +334,10 @@
 
           <!-- OFFERS -->
           <div class="view view-offers hidden" id="view-offers">
-            <div class="live-indicator">
-              <span class="pulse-dot"></span>
-              <span id="offers-live-text">Agent hunting alternatives, discounts, and loopholes across your bills</span>
-            </div>
             <div class="offers-banner">
               <div class="banner-lead">
-                <div class="eyebrow eyebrow-inverted">If you accepted everything</div>
+                <div class="eyebrow eyebrow-inverted">Annual savings if you switch to all recommended</div>
                 <div class="banner-amount" id="banner-amount">—</div>
-                <div class="banner-sub" id="banner-sub">—</div>
               </div>
               <button id="offers-accept-all" class="btn btn-ghost btn-on-dark">Accept all recommended</button>
             </div>
@@ -374,7 +363,12 @@
     <aside class="drawer" id="bill-drawer" hidden aria-hidden="true">
       <header class="drawer-head">
         <div class="drawer-head-lead">
-          <h2 class="drawer-title" id="drawer-title">—</h2>
+          <div class="drawer-title-row">
+            <h2 class="drawer-title" id="drawer-title">—</h2>
+            <button type="button" id="drawer-delete-btn" class="drawer-delete-icon" title="Delete this bill" aria-label="Delete this bill">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
           <div class="drawer-sub mono" id="drawer-sub">—</div>
         </div>
         <button class="drawer-close" id="drawer-close" aria-label="Close">
@@ -395,22 +389,10 @@
         </label>
         <button type="button" id="drawer-agent-btn" class="drawer-agent-btn" hidden></button>
       </div>
-      <div class="drawer-feedback" id="drawer-feedback" hidden>
-        <div class="drawer-feedback-head">
-          <div class="eyebrow">Feedback for next round</div>
-          <div class="drawer-feedback-sub">The agent's paused on this bill. Tell it what to change — it'll apply your notes on resume.</div>
-        </div>
-        <div class="qa-log" id="drawer-feedback-log"></div>
-        <form class="qa-form qa-form-chat" id="drawer-feedback-form">
-          <input type="text" id="drawer-feedback-input" placeholder="e.g. 'Stop being aggressive' · 'Only email, no calls' · 'Don't mention my hardship yet'" autocomplete="off" />
-          <button type="submit" class="qa-send" aria-label="Send feedback">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
-          </button>
-        </form>
-      </div>
       <nav class="drawer-tabs">
+        <button class="drawer-tab" data-dtab="attention" hidden>Needs attention</button>
         <button class="drawer-tab active" data-dtab="activity">Activity</button>
-        <button class="drawer-tab" data-dtab="messages">Messages</button>
+        <button class="drawer-tab" data-dtab="feedback" hidden>Feedback</button>
       </nav>
       <div class="drawer-body" id="drawer-body"></div>
     </aside>
@@ -442,6 +424,76 @@
       <div class="confirm-actions">
         <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
         <button type="button" class="btn btn-danger" id="confirm-ok">Delete</button>
+      </div>
+    </div>
+
+    <!-- Compare modal (side-by-side from an offer card's Compare button) -->
+    <div class="confirm-scrim" id="cmp-scrim" hidden></div>
+    <div class="confirm-modal cmp-modal" id="cmp-modal" hidden role="dialog" aria-labelledby="cmp-title">
+      <div class="cmp-head">
+        <div>
+          <div class="eyebrow" id="cmp-category">—</div>
+          <h3 class="confirm-title" id="cmp-title">Side by side</h3>
+        </div>
+        <button type="button" class="drawer-close" id="cmp-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+      <div class="cmp-body">
+        <div class="cmp-cols">
+          <div class="cmp-col cmp-col-current">
+            <div class="cmp-col-eyebrow">Current</div>
+            <div class="cmp-provider" id="cmp-cur-provider">—</div>
+            <div class="cmp-price" id="cmp-cur-price">—</div>
+            <div class="cmp-specifics" id="cmp-cur-spec"></div>
+          </div>
+          <div class="cmp-arrow" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </div>
+          <div class="cmp-col cmp-col-offer">
+            <div class="cmp-col-eyebrow cmp-col-eyebrow-green">Recommended</div>
+            <div class="cmp-provider" id="cmp-off-provider">—</div>
+            <div class="cmp-price cmp-price-green" id="cmp-off-price">—</div>
+            <div class="cmp-saves" id="cmp-off-saves"></div>
+          </div>
+        </div>
+        <div class="cmp-section">
+          <div class="cmp-section-eyebrow">Why it fits</div>
+          <div class="cmp-section-body" id="cmp-why"></div>
+        </div>
+        <div class="cmp-section">
+          <div class="cmp-section-eyebrow">Switch friction</div>
+          <div class="cmp-section-body" id="cmp-friction"></div>
+        </div>
+        <div class="cmp-meta">
+          <div class="cmp-meta-item">
+            <div class="cmp-meta-label">Timing</div>
+            <div class="cmp-meta-val" id="cmp-eta">—</div>
+          </div>
+          <div class="cmp-meta-item">
+            <div class="cmp-meta-label">Confidence</div>
+            <div class="cmp-meta-val" id="cmp-confidence">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" id="cmp-dismiss">Dismiss</button>
+        <button type="button" class="btn btn-primary" id="cmp-switch">Switch for me</button>
+      </div>
+    </div>
+
+    <!-- Integration credentials modal (Connect / Edit from Settings) -->
+    <div class="confirm-scrim" id="intg-scrim" hidden></div>
+    <div class="confirm-modal intg-modal" id="intg-modal" hidden role="dialog" aria-labelledby="intg-title">
+      <div class="confirm-body">
+        <h3 class="confirm-title" id="intg-title">Connect</h3>
+        <p class="confirm-sub" id="intg-sub"></p>
+        <div class="intg-modal-fields" id="intg-modal-fields"></div>
+        <div class="intg-modal-status" id="intg-modal-status"></div>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" id="intg-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="intg-save">Save</button>
       </div>
     </div>
 
