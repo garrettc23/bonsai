@@ -157,16 +157,23 @@ function hasStagedUpload() {
 }
 
 async function confirmDiscardUnsaved() {
-  // Two kinds of unsaved state can block in-app navigation:
-  //   1) Profile/Settings field edits (unsavedGuard)
-  //   2) Files staged in the upload dropzone but not yet submitted
-  // The latter only matters when the user is on the Overview tab.
-  if (currentNav === "overview" && hasStagedUpload()) {
+  // Three kinds of unsaved state can block in-app navigation:
+  //   1) Mid-flow on the Overview tab — staged upload, audit running, or
+  //      a completed audit awaiting accept (the "review" sub-view).
+  //      Leaving discards the audited bill the user just paid Claude
+  //      tokens to produce.
+  //   2) Profile/Settings field edits (unsavedGuard).
+  if (currentNav === "overview" && hasInFlightAuditWork()) {
+    const isReview = currentWorkflowView === "review";
     return confirmModal({
-      title: "Discard the bill you're about to upload?",
-      body: "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.",
-      confirmText: "Discard",
-      cancelText: "Stay here",
+      title: isReview
+        ? "Leave without accepting the plan?"
+        : "Discard the bill you're about to upload?",
+      body: isReview
+        ? "Bonsai already audited this bill. If you leave now, the audit and the negotiation plan are gone — you'll need to re-upload to get them back."
+        : "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.",
+      confirmText: isReview ? "Leave" : "Discard",
+      cancelText: isReview ? "Stay on this plan" : "Stay here",
     });
   }
   if (!unsavedGuard?.isDirty?.()) return true;
@@ -192,15 +199,33 @@ function fmt$2(n) {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 }
 
+// Current workflow sub-view. Used by the navigate-away guard to know
+// whether the user is in the middle of an audit/review/results flow
+// inside the Overview tab — tab-switches and tab-closes should warn so
+// they don't lose the in-flight work.
+let currentWorkflowView = "overview";
 function setWorkflowView(view) {
   // overview | progress | review | results | error — all sub-views inside the main content area.
   // Only one of these is visible at a time when nav=overview.
+  currentWorkflowView = view;
   for (const v of ["overview", "progress", "review", "results", "error"]) {
     const el = $(`#view-${v}`);
     if (!el) continue;
     if (v === view) el.classList.remove("hidden");
     else el.classList.add("hidden");
   }
+}
+
+/**
+ * True when the user is mid-flow inside the Overview tab — has audited a
+ * bill but not yet accepted, OR is staring at the audit progress view,
+ * OR has staged files. Leaving any of these states drops the work.
+ */
+function hasInFlightAuditWork() {
+  if (currentWorkflowView === "progress") return true;
+  if (currentWorkflowView === "review" && reviewState != null) return true;
+  if (hasStagedUpload()) return true;
+  return false;
 }
 
 async function showNav(name) {
@@ -673,10 +698,11 @@ async function init() {
   $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
 
   // Browser-level unsaved-changes prompt on full page reload / tab close.
-  // Triggers for either Profile/Settings dirty state OR a staged upload
-  // that hasn't been audited yet — losing either is silently destructive.
+  // Triggers for any in-flight audit work (staged upload, running audit,
+  // pending review accept) OR Profile/Settings dirty state — losing
+  // any of these is silently destructive.
   window.addEventListener("beforeunload", (ev) => {
-    if (unsavedGuard?.isDirty?.() || hasStagedUpload()) {
+    if (unsavedGuard?.isDirty?.() || hasInFlightAuditWork()) {
       ev.preventDefault();
       ev.returnValue = "";
     }
