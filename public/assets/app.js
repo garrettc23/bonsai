@@ -9,6 +9,21 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const FLOW_STAGES = ["Extract", "Audit", "Negotiate", "Finalize"];
 
 /**
+ * Clamp a "saved" amount to [0, original]. Saving more than the bill
+ * existed for in the first place is physically impossible, and a
+ * negative saved (final > original) means the agent inflated the
+ * outcome — display $0 in that case rather than a confusing negative.
+ * Used everywhere we render `patient_saved` / `saved` / `total_saved`.
+ */
+function clampSaved(saved, original) {
+  const s = Number(saved ?? 0);
+  if (!Number.isFinite(s) || s <= 0) return 0;
+  const orig = Number(original ?? 0);
+  if (orig > 0 && s > orig) return orig;
+  return s;
+}
+
+/**
  * Format a US phone number progressively as the user types.
  *   "9"           → "(9"
  *   "94988"       → "(949) 88"
@@ -997,7 +1012,7 @@ function renderReceipts() {
         dos +
         "</div></div>" +
         '<div class="receipt-saved">' +
-        fmtDollars(r.patient_saved) +
+        fmtDollars(clampSaved(r.patient_saved, r.original_balance)) +
         "</div>" +
         channelTag +
         quote +
@@ -1260,7 +1275,11 @@ function initContactCard() {
   if (!card.dataset.bound) {
     card.dataset.bound = "1";
     $("#contact-save").addEventListener("click", saveContactOverride);
-    $("#contact-retry").addEventListener("click", retryContactLookup);
+    // Clear the "needs input" highlight as soon as the user starts typing
+    // either field — feedback that their action was registered.
+    const clearHighlight = () => card.classList.remove("needs-input");
+    $("#contact-email")?.addEventListener("input", clearHighlight);
+    $("#contact-phone")?.addEventListener("input", clearHighlight);
   }
   pollContactStatus();
   contactPollTimer = setInterval(pollContactStatus, 2500);
@@ -1299,18 +1318,17 @@ function applyContactStatus(data) {
   if (data.status === "failed") {
     titleEl.textContent = "Add a billing email";
     notesEl.textContent = data.error ?? "Bonsai couldn't find one. Type the billing department's email below — Bonsai will use it to negotiate.";
-    document.getElementById("contact-card")?.classList.add("needs-input");
     return;
   }
   const c = data.contact ?? {};
   // "Resolved with nothing useful" is functionally the same as "failed" —
   // we hit the web search but it didn't surface a real billing contact
   // (synthetic providers, single-location practices with no online billing
-  // page, etc.). Don't show the user empty fields and a low-confidence
-  // pill; just ask them to fill it in. The user can still edit if they
-  // disagree, since the inputs are still present below.
+  // page, etc.). Don't show the user empty fields with prefilled noise;
+  // ask them to fill it in. The .needs-input highlight is *not* applied
+  // here on render — only when the user tries to Accept the plan with
+  // an empty contact (see the click handler in approveAndRun).
   const provider = data.provider_name ?? "this provider";
-  const card = document.getElementById("contact-card");
   if (!c.email && !c.phone) {
     titleEl.textContent = `Add a billing email for ${provider}`;
     notesEl.textContent =
@@ -1318,10 +1336,8 @@ function applyContactStatus(data) {
     if (document.activeElement !== emailEl) emailEl.value = "";
     if (document.activeElement !== phoneEl) phoneEl.value = "";
     srcEl.innerHTML = "";
-    if (card) card.classList.add("needs-input");
     return;
   }
-  if (card) card.classList.remove("needs-input");
   titleEl.textContent = data.provider_name ? `${data.provider_name} — billing` : "Billing contact";
   // Don't blow away the user's typing if they're already editing.
   if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
@@ -1357,29 +1373,6 @@ async function saveContactOverride() {
     applyContactStatus({ status: "resolved", contact: j.contact, provider_name: reviewState?.provider_name ?? null });
   } catch (err) {
     console.warn("[contact] save failed", err);
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function retryContactLookup() {
-  const runId = reviewState?.run_id;
-  if (!runId) return;
-  const btn = $("#contact-retry");
-  btn.disabled = true;
-  try {
-    const res = await fetch("/api/contact/retry", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({ run_id: runId }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    $("#contact-title").textContent = "Looking up the billing contact…";
-    if (contactPollTimer) clearInterval(contactPollTimer);
-    contactPollTimer = setInterval(pollContactStatus, 2500);
-  } catch (err) {
-    console.warn("[contact] retry failed", err);
   } finally {
     btn.disabled = false;
   }
@@ -1671,6 +1664,23 @@ async function submitPlanMessage() {
 
 async function approveAndRun() {
   if (!reviewState) return;
+  // Front-end contact gate — at least one of email or phone is required
+  // before we even POST /api/approve. This keeps the UX local: highlight
+  // the card + scroll + focus the email input, no round-trip and no
+  // error toast. The server still enforces the same rule defensively.
+  const emailInput = document.getElementById("contact-email");
+  const phoneInput = document.getElementById("contact-phone");
+  const hasEmail = !!emailInput?.value?.trim();
+  const hasPhone = !!phoneInput?.value?.trim();
+  if (!hasEmail && !hasPhone) {
+    const card = document.getElementById("contact-card");
+    if (card) {
+      card.classList.add("needs-input");
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (emailInput) setTimeout(() => emailInput.focus(), 350);
+    return;
+  }
   // Negotiation runs in the background. Kick it off, then hand the user
   // off to the Bills view — updates will stream in as the bg job progresses
   // (polled via /api/history).
@@ -1799,11 +1809,14 @@ function updatePageHeader({ eyebrow, title, stats }) {
 
 function render(report) {
   const s = report.summary;
-  const savedPositive = typeof s.patient_saved === "number" && s.patient_saved > 0;
+  // Clamp at the render boundary too — covers legacy reports written
+  // before the orchestrator-side clamp landed.
+  const clampedSaved = clampSaved(s.patient_saved, s.original_balance);
+  const savedPositive = clampedSaved > 0;
   const heroTitle = $("#hero-title");
   const heroAmount = document.createElement("span");
   heroAmount.className = "hero-amount";
-  heroAmount.textContent = savedPositive ? fmt$2(s.patient_saved) : (s.patient_saved != null ? fmt$2(s.patient_saved) : "—");
+  heroAmount.textContent = savedPositive ? fmt$2(clampedSaved) : (s.patient_saved != null ? fmt$2(clampedSaved) : "—");
   heroTitle.classList.toggle("hero-title-muted", !savedPositive);
   heroTitle.innerHTML = "";
   if (savedPositive) heroTitle.append("Saved ");
@@ -1820,7 +1833,7 @@ function render(report) {
   $("#hero-sub").textContent = buildHeroSub(s);
   $("#stat-was").textContent = fmt$2(s.original_balance);
   $("#stat-now").textContent = fmt$2(s.final_balance);
-  $("#stat-saved").textContent = savedPositive ? fmt$2(s.patient_saved) : "—";
+  $("#stat-saved").textContent = savedPositive ? fmt$2(clampedSaved) : "—";
   $("#stat-channel").textContent = s.channel_used ? s.channel_used.toUpperCase() : "—";
 
   updatePageHeader({
@@ -2260,7 +2273,10 @@ function renderBills() {
   // how many need attention, and total saved lifetime.
   const activeCount = auditRows.filter((r) => r.lifecycle === "active").length;
   const attentionCount = auditRows.filter((r) => r.lifecycle === "attention").length;
-  const totalSaved = audits.reduce((s, a) => s + (a.patient_saved ?? 0), 0);
+  const totalSaved = audits.reduce(
+    (s, a) => s + clampSaved(a.patient_saved, a.original_balance),
+    0,
+  );
 
   $("#bills-stats").innerHTML = `
     <div>
@@ -4203,7 +4219,7 @@ function renderDrawerStats(row, report) {
   const summary = report?.summary ?? {};
   const was = summary.original_balance ?? row.balance ?? 0;
   const now = summary.final_balance ?? row.balance ?? 0;
-  const saved = summary.patient_saved ?? 0;
+  const saved = clampSaved(summary.patient_saved, was);
   const channel = summary.channel_used ?? "—";
 
   // Traffic-light status. Active = yellow, resolved = green, attention = red.
@@ -4470,7 +4486,7 @@ const ATTENTION_CONTENT = {
       "Use Feedback if you want to steer tone, channels, or talking points.",
       "Click Approve & start when you're ready.",
     ],
-    primary: { id: "start", label: "Approve & start" },
+    primary: { id: "start", label: "Approve & lower my bill" },
   },
   escalated: {
     tone: "urgent",
@@ -4665,6 +4681,9 @@ function handleAttentionAction(action, row) {
       // can also leave a Feedback note ("accept their counter, no further
       // negotiation") to make it explicit.
       void resumeAgent();
+      // Close the drawer once the user's approved — keeping it open after
+      // they hit the primary action feels like the action didn't take.
+      closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -4672,12 +4691,13 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "resolved";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    void openBillDrawer(row);
+    closeBillDrawer();
     return;
   }
   if (action === "start" || action === "resume" || action === "retry" || action === "keep_negotiating") {
     if (runId) {
       void resumeAgent();
+      closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -4685,7 +4705,7 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "active";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    void openBillDrawer(row);
+    closeBillDrawer();
   }
 }
 

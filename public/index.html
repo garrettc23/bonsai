@@ -142,7 +142,7 @@
                   <div class="run-head-title" id="run-head-title">Analyzing your bill</div>
                   <div class="run-head-sub mono">
                     <span class="pulse-dot"></span>
-                    <span id="run-head-sub">live · grounded tool-use loop</span>
+                    <span id="run-head-sub">reading every line item</span>
                   </div>
                 </div>
               </div>
@@ -200,13 +200,12 @@
               </div>
               <div class="contact-body" id="contact-body">
                 <div class="contact-row">
-                  <label>Email (required) <input type="email" id="contact-email" placeholder="billing@example.com" /></label>
-                  <label>Phone (optional) <input type="text" id="contact-phone" placeholder="(415) 555-0132" /></label>
+                  <label>Email (preferred) <input type="email" id="contact-email" placeholder="billing@example.com" /></label>
+                  <label>Phone <input type="text" id="contact-phone" placeholder="(415) 555-0132" /></label>
                 </div>
                 <div class="contact-foot">
                   <div class="contact-notes" id="contact-notes"></div>
                   <div class="contact-actions">
-                    <button type="button" class="contact-retry" id="contact-retry">Re-search</button>
                     <button type="button" class="contact-save" id="contact-save">Save</button>
                   </div>
                 </div>
@@ -219,7 +218,7 @@
               <div class="review-chat-head">
                 <div>
                   <div class="eyebrow">Customize the plan</div>
-                  <div class="review-chat-sub">Accept below to start, or tell Bonsai what to change or ask anything about the bill.</div>
+                  <div class="review-chat-sub">Accept below to start lowering your bill, or chat with Bonsai first — tell it what to change, ask why a charge is on there, or have it explain a billing code (CPT, HCPCS, EOB jargon).</div>
                 </div>
               </div>
               <div class="qa-log" id="review-plan-chat-log"></div>
@@ -232,7 +231,7 @@
             </section>
 
             <div class="review-actions">
-              <button id="review-approve-btn" class="btn btn-primary">Accept &amp; start the plan</button>
+              <button id="review-approve-btn" class="btn btn-primary">Accept &amp; lower my bill</button>
             </div>
           </div>
 
@@ -340,17 +339,6 @@
                   <option value="250-500">$250 – $500</option>
                   <option value="500-1000">$500 – $1,000</option>
                   <option value="1000-">$1,000+</option>
-                </select>
-              </div>
-              <div class="filter-field">
-                <label class="eyebrow">Price score</label>
-                <select id="bills-filter-score">
-                  <option value="">Any score</option>
-                  <option value="0-24">Greatly overpaying (0–24)</option>
-                  <option value="25-49">Overpaying (25–49)</option>
-                  <option value="50-69">Above market (50–69)</option>
-                  <option value="70-84">Fair price (70–84)</option>
-                  <option value="85-100">Best price (85–100)</option>
                 </select>
               </div>
               <button class="filter-reset" id="bills-filter-reset" type="button">Reset</button>

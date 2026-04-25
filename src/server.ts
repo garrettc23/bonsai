@@ -397,15 +397,26 @@ async function handleAudit(req: Request): Promise<Response> {
     channel = (typeof ch === "string" && ch ? ch : "persistent") as Channel;
   }
 
-  const partial = await runAuditPhase({
-    billPdfPath: billPath,
-    eobPdfPath: eobPath,
-    billFixtureName: fixtureName,
-    analyzeInput,
-    channel,
-    email_persona,
-    voice_persona,
-  });
+  // Fast path: if a pre-computed audit report ships next to the fixture
+  // (fixtures/<name>.report.json), skip the analyzer call entirely and
+  // return the cached audit. "Try a sample" then completes in ~50ms
+  // instead of ~30-45s, which is what users expect from a "demo" button.
+  // Real uploads (no fixture name match) always run the live analyzer.
+  const cachedReportPath = join(FIXTURES_DIR, `${fixtureName}.report.json`);
+  let partial;
+  if (existsSync(cachedReportPath)) {
+    partial = JSON.parse(readFileSync(cachedReportPath, "utf-8"));
+  } else {
+    partial = await runAuditPhase({
+      billPdfPath: billPath,
+      eobPdfPath: eobPath,
+      billFixtureName: fixtureName,
+      analyzeInput,
+      channel,
+      email_persona,
+      voice_persona,
+    });
+  }
 
   const billPaths = multipartMeta?.bill_paths ?? [billPath];
   const billNames = multipartMeta?.bill_names ?? [`${fixtureName}.pdf`];
@@ -434,13 +445,31 @@ async function handleAudit(req: Request): Promise<Response> {
     contact: defaultContactForFixture(fixtureName),
     contact_status: "pending",
   };
+  // Fast path again: when we served a cached audit report for a fixture,
+  // also pre-resolve the provider contact synchronously so the plan-
+  // review page doesn't show "Looking up…" for 5-10s on a "Try a sample"
+  // demo. Real uploads still hit the web-search resolver in background.
+  if (existsSync(cachedReportPath) && run.contact) {
+    run.contact_status = "resolved";
+    run.resolved_contact = {
+      email: run.contact.support_email ?? null,
+      phone: run.contact.support_phone ?? null,
+      source_urls: [],
+      confidence: "high",
+      notes: "Pre-seeded for the sample fixture.",
+      resolved_at: Date.now(),
+    };
+  }
   savePending(run);
 
-  // Kick off the provider-contact lookup in the background. The plan-review
+  // Kick off the provider-contact lookup in the background only when we
+  // didn't already resolve from the fixture pre-seed. The plan-review
   // tab polls /api/contact/:run_id and shows it as soon as it lands.
-  kickoffContactResolution(run.run_id).catch((err) => {
-    console.error(`[contact ${run.run_id}]`, err);
-  });
+  if (run.contact_status !== "resolved") {
+    kickoffContactResolution(run.run_id).catch((err) => {
+      console.error(`[contact ${run.run_id}]`, err);
+    });
+  }
 
   return Response.json({ run_id: run.run_id, report: partial });
 }
