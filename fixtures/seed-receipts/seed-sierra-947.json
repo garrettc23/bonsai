@@ -1,0 +1,52 @@
+{
+  "analyzer": {
+    "metadata": {
+      "patient_name": "Linh T. Nguyen",
+      "provider_name": "Sierra Imaging Center",
+      "provider_billing_address": "8010 Front Street, Reno, NV 89501",
+      "claim_number": "SIC-44021",
+      "date_of_service": "2026-03-08",
+      "insurer_name": "Cigna",
+      "eob_patient_responsibility": 145.00,
+      "bill_current_balance_due": 1092.00,
+      "account_number": "SIC-NB-0033"
+    },
+    "errors": [
+      {
+        "line_quote": "MRI bilateral knee: $947.00",
+        "error_type": "duplicate_charge",
+        "confidence": "high",
+        "dollar_impact": 947.00,
+        "evidence": "Provider billed two unilateral MRI codes (73721 x2) instead of the appropriate bilateral code (73721-50)."
+      }
+    ],
+    "summary": {
+      "high_confidence_total": 947.00,
+      "worth_reviewing_total": 0,
+      "bill_total_disputed": 947.00,
+      "headline": "Found $947 in incorrect MRI coding — should have used bilateral modifier."
+    },
+    "grounding_failures": [],
+    "meta": {
+      "model": "claude-sonnet-4-5",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "elapsed_ms": 0,
+      "tool_turns": 0
+    }
+  },
+  "appeal": {
+    "subject": "Appeal — Sierra Imaging claim SIC-44021",
+    "markdown": "Patient appeal letter (seed fixture)."
+  },
+  "strategy": { "chosen": "email", "reason": "Seed fixture: simple coding correction, email is the right channel." },
+  "summary": {
+    "original_balance": 1092.00,
+    "defensible_disputed": 947.00,
+    "final_balance": 145.00,
+    "patient_saved": 947.00,
+    "channel_used": "email",
+    "outcome": "resolved",
+    "outcome_detail": "Imaging center confirmed coding error and reissued statement at the bilateral rate."
+  }
+}

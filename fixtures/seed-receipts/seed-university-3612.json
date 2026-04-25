@@ -1,0 +1,59 @@
+{
+  "analyzer": {
+    "metadata": {
+      "patient_name": "James K. Okafor",
+      "provider_name": "University Medical Center",
+      "provider_billing_address": "500 Bryant Avenue, Cambridge, MA 02139",
+      "claim_number": "UMC-78112",
+      "date_of_service": "2026-01-22",
+      "insurer_name": "Aetna",
+      "eob_patient_responsibility": 412.00,
+      "bill_current_balance_due": 4024.00,
+      "account_number": "U-99-7821"
+    },
+    "errors": [
+      {
+        "line_quote": "Anesthesia, out-of-network: $2,890.00",
+        "error_type": "balance_billing",
+        "confidence": "high",
+        "dollar_impact": 2890.00,
+        "evidence": "Surgery was at an in-network facility; NSA holds the ancillary anesthesia provider in-network for billing purposes."
+      },
+      {
+        "line_quote": "Pre-op imaging duplicate: $722.00",
+        "error_type": "duplicate_charge",
+        "confidence": "high",
+        "dollar_impact": 722.00,
+        "evidence": "Same CPT (74176) appears twice on the same DOS — single procedure was performed."
+      }
+    ],
+    "summary": {
+      "high_confidence_total": 3612.00,
+      "worth_reviewing_total": 0,
+      "bill_total_disputed": 3612.00,
+      "headline": "Found $3,612 in balance billing and a duplicate imaging charge."
+    },
+    "grounding_failures": [],
+    "meta": {
+      "model": "claude-sonnet-4-5",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "elapsed_ms": 0,
+      "tool_turns": 0
+    }
+  },
+  "appeal": {
+    "subject": "Appeal — University Medical Center claim UMC-78112",
+    "markdown": "Patient appeal letter (seed fixture)."
+  },
+  "strategy": { "chosen": "persistent", "reason": "Seed fixture: NSA + duplicate billing required two channels." },
+  "summary": {
+    "original_balance": 4024.00,
+    "defensible_disputed": 3612.00,
+    "final_balance": 412.00,
+    "patient_saved": 3612.00,
+    "channel_used": "email",
+    "outcome": "resolved",
+    "outcome_detail": "Initial email got partial concession; follow-up cited duplicate CPT and provider zeroed both."
+  }
+}

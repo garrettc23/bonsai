@@ -62,6 +62,15 @@
           <!-- OVERVIEW : upload + approvals -->
           <div class="view view-overview" id="view-overview">
 
+            <div class="receipts-block" id="receipts-block" hidden>
+              <div class="receipts-hero">
+                <div class="receipts-hero-label">Total saved by Bonsai</div>
+                <div class="receipts-hero-amount" id="receipts-total">$0</div>
+                <div class="receipts-hero-sub" id="receipts-sub">Across <span id="receipts-count">0</span> bills</div>
+              </div>
+              <div class="receipts-rows" id="receipts-rows"></div>
+            </div>
+
             <div class="approvals-block" id="approvals-block" hidden>
               <div class="approvals-head">
                 <div>
@@ -199,6 +208,10 @@
 
             <div class="review-actions">
               <button id="review-approve-btn" class="btn btn-primary">Accept &amp; start the plan</button>
+              <div class="review-bcc-hint" id="review-bcc-hint" hidden>
+                <span class="bcc-dot" aria-hidden="true">●</span>
+                <span>You'll be BCC'd on every email Bonsai sends, so the thread lands in your inbox too.</span>
+              </div>
             </div>
           </div>
 

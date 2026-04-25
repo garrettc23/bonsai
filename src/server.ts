@@ -739,6 +739,11 @@ async function kickoffNegotiation(runId: string): Promise<void> {
   const floorFromTune =
     originalBalance > 0 ? originalBalance * (1 - tune.floor_pct / 100) : undefined;
   try {
+    // BCC the patient on every outbound so they stay in the loop. Resend is
+    // sending from a Bonsai-controlled domain (not the patient's own inbox),
+    // so without this they never see the thread that was negotiated on
+    // their behalf.
+    const bcc = profile.email ? [profile.email] : undefined;
     const full = await runNegotiationPhase(run.partial_report, {
       billPdfPath: run.bill_path,
       eobPdfPath: run.eob_path,
@@ -753,6 +758,7 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       channels_enabled: run.channels_enabled ?? tune.channels,
       agent_tone: run.agent_tone ?? tune.tone,
       user_directives: run.user_directives,
+      bcc,
     });
     const latest = loadPending(runId);
     if (latest?.status === "cancelled") {
@@ -1291,6 +1297,74 @@ async function handleHistory(): Promise<Response> {
   return Response.json({ audits, letters });
 }
 
+async function handleReceipts(): Promise<Response> {
+  const { readdirSync, statSync } = await import("node:fs");
+  const outDir = join(ROOT, "out");
+  if (!existsSync(outDir)) {
+    return Response.json({ rows: [], total_saved: 0, count: 0 });
+  }
+  const entries = readdirSync(outDir).filter(
+    (f) => f.startsWith("report-") && f.endsWith(".json"),
+  );
+  const rows: Array<{
+    name: string;
+    completed_at: number;
+    provider_name: string | null;
+    patient_name: string | null;
+    date_of_service: string | null;
+    original_balance: number | null;
+    final_balance: number | null;
+    patient_saved: number;
+    channel_used: string | null;
+    outcome: string | null;
+    source_quote: string | null;
+    defensible_disputed: number | null;
+    thread_id: string | null;
+  }> = [];
+  let total_saved = 0;
+  for (const f of entries) {
+    const name = f.slice("report-".length, -".json".length);
+    const full = join(outDir, f);
+    let report: any = null;
+    try {
+      report = JSON.parse(readFileSync(full, "utf-8"));
+    } catch {
+      continue;
+    }
+    const summary = report?.summary ?? {};
+    const meta = report?.analyzer?.metadata ?? {};
+    const saved = Number(summary.patient_saved ?? 0);
+    if (!Number.isFinite(saved) || saved <= 0) continue;
+    // Source quote: pick the highest-impact HIGH-confidence finding's
+    // line_quote — the dollar tied to the receipt should trace back to
+    // a real verbatim quote per the grounding contract.
+    const errors: Array<{ confidence?: string; line_quote?: string; dollar_impact?: number }> =
+      report?.analyzer?.errors ?? [];
+    const top = errors
+      .filter((e) => e.confidence === "high")
+      .sort((a, b) => (b.dollar_impact ?? 0) - (a.dollar_impact ?? 0))[0];
+    const stat = statSync(full);
+    rows.push({
+      name,
+      completed_at: stat.mtimeMs,
+      provider_name: meta.provider_name ?? null,
+      patient_name: meta.patient_name ?? null,
+      date_of_service: meta.date_of_service ?? null,
+      original_balance: summary.original_balance ?? null,
+      final_balance: summary.final_balance ?? null,
+      patient_saved: saved,
+      channel_used: summary.channel_used ?? null,
+      outcome: summary.outcome ?? null,
+      source_quote: top?.line_quote ?? null,
+      defensible_disputed: summary.defensible_disputed ?? null,
+      thread_id: report?.email_thread?.thread_id ?? null,
+    });
+    total_saved += saved;
+  }
+  rows.sort((a, b) => b.completed_at - a.completed_at);
+  return Response.json({ rows, total_saved, count: rows.length });
+}
+
 async function handleReport(name: string): Promise<Response> {
   const safe = name.replace(/[^a-zA-Z0-9_-]/g, "");
   if (!safe || safe !== name) return Response.json({ error: "Bad name" }, { status: 400 });
@@ -1670,6 +1744,18 @@ try {
 
 const PORT = Number(process.env.PORT ?? 3333);
 
+// Seed pre-shipped receipts on cold start so the overview dashboard isn't
+// empty for first-time / fresh-clone demos. Idempotent.
+try {
+  const { seedReceipts } = await import("./seed-receipts.ts");
+  const { copied } = seedReceipts();
+  if (copied.length > 0) {
+    console.log(`[seed-receipts] copied ${copied.length} fixture(s): ${copied.join(", ")}`);
+  }
+} catch (err) {
+  console.warn("[seed-receipts] could not seed receipts:", (err as Error).message);
+}
+
 // The sample-bill flow reads fixtures/<name>.pdf, but those PDFs are
 // .gitignored build artifacts generated from fixtures/*.md by
 // scripts/make-fixture-pdfs.ts. On a fresh clone they don't exist yet,
@@ -1697,6 +1783,7 @@ const server = Bun.serve({
     try {
       if (req.method === "GET" && url.pathname === "/api/fixtures") return handleListFixtures();
       if (req.method === "GET" && url.pathname === "/api/history") return handleHistory();
+      if (req.method === "GET" && url.pathname === "/api/receipts") return handleReceipts();
       if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
       if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
       if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
@@ -1712,6 +1799,10 @@ const server = Bun.serve({
       if (req.method === "GET" && reportMatch) return handleReport(reportMatch[1]);
       const letterMatch = url.pathname.match(/^\/api\/letter\/([a-zA-Z0-9_-]+)$/);
       if (req.method === "GET" && letterMatch) return handleLetter(letterMatch[1]);
+      if (req.method === "POST" && url.pathname === "/webhooks/resend-inbound") {
+        const { handleResendInbound } = await import("./server/webhooks.ts");
+        return handleResendInbound(req);
+      }
       if (req.method === "POST" && url.pathname === "/api/run-fixture") return handleRunFixture(req);
       if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
       if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);

@@ -23,6 +23,11 @@ export interface OutboundEmail {
   attachments?: Array<{ filename: string; content: string }>;
   /** Set when this is a reply; threading headers. */
   in_reply_to?: string;
+  /** Blind-copy recipients. Used to keep the patient in the loop on every
+   * outbound the agent sends on their behalf — Resend is sending from a
+   * Bonsai-controlled domain, so without a BCC the patient never sees the
+   * thread in their own inbox. */
+  bcc?: string[];
 }
 
 export interface SentEmail {
@@ -34,6 +39,7 @@ export interface SentEmail {
   body_markdown: string;
   thread_id: string;
   in_reply_to?: string;
+  bcc?: string[];
 }
 
 export interface InboundEmail {

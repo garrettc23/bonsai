@@ -54,6 +54,14 @@ export interface NegotiationState {
   user_directives?: string;
   /** Tone the user asked the agent to strike. Adjusts system prompt wording. */
   agent_tone?: AgentTone;
+  /** Compact summary of prior negotiation attempts on other channels.
+   * Injected into the analyzer context so a later-channel agent knows the
+   * history (e.g., "email got partial concession on line A, refused line B"). */
+  prior_attempts_summary?: string;
+  /** BCC recipients copied on every outbound email the agent sends. Used to
+   * keep the patient in the loop when Resend is sending from a Bonsai-
+   * controlled domain rather than the patient's own inbox. */
+  bcc?: string[];
 }
 
 function buildSystemPrompt(state: Pick<NegotiationState, "user_directives" | "agent_tone">): string {
@@ -183,10 +191,19 @@ function renderThreadForClaude(thread: { outbound: SentEmail[]; inbound: Inbound
     .join("\n\n");
 }
 
-function renderAnalyzerContext(result: AnalyzerResult, floor: number): string {
+function renderAnalyzerContext(
+  result: AnalyzerResult,
+  floor: number,
+  priorAttemptsSummary?: string,
+): string {
   const high = result.errors.filter((e) => e.confidence === "high");
   const byType: Record<string, number> = {};
   for (const e of high) byType[e.error_type] = (byType[e.error_type] ?? 0) + e.dollar_impact;
+
+  const priorBlock =
+    priorAttemptsSummary && priorAttemptsSummary.trim()
+      ? `\n${priorAttemptsSummary.trim()}\n`
+      : "";
 
   return `## Dispute context (from grounded analyzer output)
 
@@ -212,7 +229,7 @@ ${high
    Evidence: ${e.evidence.trim()}`,
   )
   .join("\n")}
-`;
+${priorBlock}`;
 }
 
 export interface StartOpts {
@@ -223,6 +240,12 @@ export interface StartOpts {
   final_acceptable_floor?: number; // defaults to eob patient responsibility
   user_directives?: string;
   agent_tone?: AgentTone;
+  /** Compact summary of prior negotiation attempts on other channels.
+   * Stored on state so every step's analyzer context includes it. */
+  prior_attempts_summary?: string;
+  /** BCC recipients (typically the patient's email) copied on every
+   * outbound. Persisted on NegotiationState so follow-ups reuse the list. */
+  bcc?: string[];
 }
 
 export interface StartResult {
@@ -248,6 +271,7 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     subject: letter.subject,
     body_markdown: letter.markdown,
     thread_id,
+    bcc: opts.bcc,
   };
   const sent = await client.send(msg);
 
@@ -261,6 +285,8 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     outcome: { status: "in_progress" },
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    prior_attempts_summary: opts.prior_attempts_summary,
+    bcc: opts.bcc,
   };
   return { thread_id, sent, state };
 }
@@ -269,6 +295,9 @@ export interface StepOpts {
   state: NegotiationState;
   client: EmailClient;
   anthropic?: Anthropic;
+  /** Override on-disk thread directory. Defaults to out/threads/. Tests
+   * use this to point at a tmpdir so parallel runs don't collide. */
+  threadsDir?: string;
 }
 
 /**
@@ -285,13 +314,17 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
 
   if (state.outcome.status !== "in_progress") return state;
 
-  const thread = loadThread(state.thread_id);
+  const thread = loadThread(state.thread_id, opts.threadsDir);
   const inboundSinceLast = thread.inbound.filter(
     (m) => Date.parse(m.received_at) > Date.parse(state.last_seen_inbound_ts),
   );
   if (inboundSinceLast.length === 0) return state; // nothing to do
 
-  const context = renderAnalyzerContext(state.analyzer, state.final_acceptable_floor);
+  const context = renderAnalyzerContext(
+    state.analyzer,
+    state.final_acceptable_floor,
+    state.prior_attempts_summary,
+  );
   const rendered = renderThreadForClaude(thread);
 
   const messages: Anthropic.MessageParam[] = [
@@ -303,6 +336,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
   ];
 
   let newOutcome: NegotiationOutcome = { status: "in_progress" };
+  let terminatedCleanly = false;
 
   for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
     const response = await anthropic.messages.create({
@@ -333,6 +367,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
           body_markdown: input.body_markdown,
           thread_id: state.thread_id,
           in_reply_to: lastInbound?.message_id,
+          bcc: state.bcc,
         };
         const sent = await client.send(out);
         toolResults.push({
@@ -370,7 +405,22 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
       }
     }
     messages.push({ role: "user", content: toolResults });
-    if (terminated) break;
+    if (terminated) {
+      terminatedCleanly = true;
+      break;
+    }
+  }
+
+  // If Claude burned through MAX_TURNS_PER_STEP without ever calling a
+  // terminal tool, we'd otherwise advance last_seen_inbound_ts and silently
+  // freeze the thread. Force an escalation instead — the operator can pick
+  // it up and decide what to do.
+  if (!terminatedCleanly) {
+    newOutcome = {
+      status: "escalated",
+      reason: "unclear",
+      notes: `Agent did not produce a terminal tool call within ${MAX_TURNS_PER_STEP} turns; escalating for human review.`,
+    };
   }
 
   const latestTs = inboundSinceLast[inboundSinceLast.length - 1].received_at;

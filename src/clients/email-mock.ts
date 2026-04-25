@@ -57,6 +57,7 @@ export class MockEmailClient implements EmailClient {
       body_markdown: msg.body_markdown,
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
+      bcc: msg.bcc,
     };
     const thread = loadThread(msg.thread_id, this.threadsDir);
     thread.outbound.push(sent);

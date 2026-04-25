@@ -79,6 +79,9 @@ export interface RunBonsaiOpts {
   user_directives?: string;
   /** Tone the user asked the agent to strike. */
   agent_tone?: "polite" | "firm" | "aggressive";
+  /** BCC recipients on every outbound email — typically the patient's own
+   * inbox so they stay in the loop on every message the agent sends. */
+  bcc?: string[];
 }
 
 export interface ThreadMessage {
@@ -229,6 +232,7 @@ export async function runNegotiationPhase(
       channels_enabled: opts.channels_enabled,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
+      bcc: opts.bcc,
     });
     report.persistent_run = run;
     // Surface the transcripts in the existing thread fields so the current
@@ -271,6 +275,7 @@ export async function runNegotiationPhase(
       final_acceptable_floor: opts.final_acceptable_floor,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
+      bcc: opts.bcc,
     });
     let state = initState;
     saveNegotiationState(state);
