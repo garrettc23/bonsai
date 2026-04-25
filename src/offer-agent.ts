@@ -37,7 +37,8 @@ export type OfferCategory =
   | "specialty_infusion"
   | "dental"
   | "hospital_bill"
-  | "urgent_care";
+  | "urgent_care"
+  | "house_insurance";
 
 export interface Baseline {
   label: string;
@@ -232,10 +233,36 @@ const SOURCE_DIRECTORY: Record<OfferCategory, OfferSource[]> = {
     {
       id: "telehealth",
       name: "Telehealth visit (Teladoc)",
-      channel: "sms",
+      channel: "email",
       persona:
-        "You are a Teladoc SMS assistant. Flat $0–$75 for a video visit, covered by most employer plans. Terse.",
+        "You are a Teladoc support email rep. Flat $0–$75 for a video visit, covered by most employer plans. 4–6 lines, no fluff.",
       quote_multiplier_range: [0.0, 0.08],
+    },
+  ],
+  house_insurance: [
+    {
+      id: "lemonade",
+      name: "Lemonade Homeowners",
+      channel: "email",
+      persona:
+        "You are a Lemonade homeowners-insurance email rep. Quote a policy with equivalent dwelling/personal-property/liability coverage at typically 25–45% below legacy carriers. Show the monthly premium, deductible, and a one-line note on coverage match. Brief, professional.",
+      quote_multiplier_range: [0.55, 0.8],
+    },
+    {
+      id: "hippo",
+      name: "Hippo Home Insurance",
+      channel: "email",
+      persona:
+        "You are a Hippo home-insurance email rep. Quote with equivalent coverage plus their smart-home discount applied (up to 13%). Reply with monthly premium, deductible, and a one-line summary of what's included.",
+      quote_multiplier_range: [0.6, 0.9],
+    },
+    {
+      id: "indep_broker_home",
+      name: "Independent insurance broker (home)",
+      channel: "voice",
+      persona:
+        "You are an independent home-insurance broker on a phone call. You compare 6–8 carriers and quote the best premium for the same dwelling/liability limits. Friendly, concrete. Mention the carrier name and bind timeline.",
+      quote_multiplier_range: [0.65, 0.95],
     },
   ],
 };

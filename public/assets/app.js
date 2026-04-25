@@ -55,6 +55,37 @@ let timelineTimer = null;
 let currentNav = "overview";
 let historyCache = null;
 
+// Unsaved-changes guard for Profile and Settings.
+// `installUnsavedGuard(getValues)` snapshots the form state and registers a
+// dirty-check used by both showNav() (in-app navigation) and beforeunload.
+// Save handlers call `markSaved()` to reset the baseline.
+let unsavedGuard = null;
+function installUnsavedGuard(getValues) {
+  let baseline;
+  try { baseline = JSON.stringify(getValues()); } catch { baseline = ""; }
+  const guard = {
+    isDirty: () => {
+      try { return JSON.stringify(getValues()) !== baseline; } catch { return false; }
+    },
+    markSaved: () => {
+      try { baseline = JSON.stringify(getValues()); } catch { /* ignore */ }
+    },
+  };
+  unsavedGuard = guard;
+  return guard;
+}
+function clearUnsavedGuard() { unsavedGuard = null; }
+async function confirmDiscardUnsaved() {
+  if (!unsavedGuard?.isDirty?.()) return true;
+  if (!(currentNav === "profile" || currentNav === "settings")) return true;
+  return confirmModal({
+    title: "Discard unsaved changes?",
+    body: "You've made changes that haven't been saved. Leaving this tab will lose them.",
+    confirmText: "Discard",
+    cancelText: "Keep editing",
+  });
+}
+
 function fmt$(n) {
   if (n == null) return "—";
   if (typeof n !== "number") n = Number(n);
@@ -79,7 +110,15 @@ function setWorkflowView(view) {
   }
 }
 
-function showNav(name) {
+async function showNav(name) {
+  // Block navigation when leaving Profile or Settings with unsaved edits —
+  // prompts via the in-app confirm modal instead of the browser's native
+  // confirm() dialog.
+  if (name !== currentNav) {
+    const ok = await confirmDiscardUnsaved();
+    if (!ok) return;
+    clearUnsavedGuard();
+  }
   currentNav = name;
   if (name !== "bills") stopBillsPoll();
   // Toggle sidebar nav active state
@@ -216,6 +255,18 @@ async function init() {
   for (const btn of $$(".nav-item")) {
     btn.addEventListener("click", () => showNav(btn.dataset.nav));
   }
+
+  // Drawer trash button sits next to the bill name in the drawer header —
+  // wire once since the element is static markup, not re-rendered.
+  $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
+
+  // Browser-level unsaved-changes prompt on full page reload / tab close.
+  window.addEventListener("beforeunload", (ev) => {
+    if (unsavedGuard?.isDirty?.()) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+  });
 
   // Fixture dropdown
   const fixtures = await fetch("/api/fixtures").then((r) => r.json()).catch(() => ({ fixtures: [] }));
@@ -530,11 +581,16 @@ function updateNavCounts() {
   ).length;
   setNavCount("#nav-approval-count", pendingApprovals);
 
-  // Bills: audits that finished (resolved or escalated) since the last visit.
-  const newlyFinished = audits.filter(
-    (a) => (a.outcome === "resolved" || a.outcome === "escalated") && !billSeen(a.name),
+  // Bills: anything that needs the user's attention right now — real
+  // audits in attention state (escalated / failed / awaiting / cancelled)
+  // plus mock rows tagged with an attentionReason that haven't been
+  // dismissed.
+  const auditsInAttention = audits.filter((a) => attentionReason(a)).length;
+  const hiddenMocks = getHiddenMocks();
+  const mocksInAttention = MOCK_RECURRING_BILLS.filter(
+    (b) => !hiddenMocks.has(b.id) && b.attentionReason,
   ).length;
-  setNavCount("#nav-bills-count", newlyFinished);
+  setNavCount("#nav-bills-count", auditsInAttention + mocksInAttention);
 
   // Offers: recommended offers that weren't in the baseline at first load.
   const newOffers = MOCK_OFFERS.filter((o) => o.recommended && !offerSeen(o.id)).length;
@@ -1250,7 +1306,7 @@ function renderConversation(report) {
     const panel = document.createElement("div");
     panel.className = "persistent-panel";
     const outcomeTag = pr.outcome === "floor_hit"
-      ? `<span class="tag tag-mono tag-green">FLOOR HIT</span>`
+      ? `<span class="tag tag-mono tag-green">LOWEST PRICE</span>`
       : pr.outcome === "exhausted_with_offer"
       ? `<span class="tag tag-mono tag-amber">BEST OFFER</span>`
       : `<span class="tag tag-mono tag-red">NO CONCESSION</span>`;
@@ -1270,7 +1326,7 @@ function renderConversation(report) {
     }).join("");
     panel.innerHTML = `
       <div class="persistent-head">${outcomeTag} <span class="persistent-headline">${escapeHtml(pr.headline)}</span></div>
-      <div class="persistent-meta">Floor: <strong>${fmt$(pr.floor)}</strong> · Original: <strong>${fmt$(pr.original_balance)}</strong> · Total saved: <strong>${pr.total_saved ? fmt$(pr.total_saved) : "—"}</strong></div>
+      <div class="persistent-meta">Original: <strong>${fmt$(pr.original_balance)}</strong> · Total saved: <strong>${pr.total_saved ? fmt$(pr.total_saved) : "—"}</strong></div>
       <div class="persistent-rows">${attemptRows}</div>`;
     root.appendChild(panel);
   }
@@ -1391,7 +1447,7 @@ function renderApprovalsOnOverview() {
         <div class="approval-card-save">${fmt$(a.patient_saved ?? 0)}</div>
       </div>
       <div class="approval-card-title">${escapeHtml(a.provider_name ?? a.name)}</div>
-      <div class="approval-card-body">Provider countered. Defensible floor: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve to accept or push back.</div>
+      <div class="approval-card-body">Provider countered. Defensible amount: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve the counter or push back for a lower price.</div>
       <div class="approval-card-actions">
         <button class="btn btn-ghost" data-act="reject">Push back</button>
         <button class="btn btn-primary" data-act="approve">Approve</button>
@@ -1456,6 +1512,72 @@ const MOCK_RECURRING_BILLS = [
     auto: true,
   },
   {
+    id: "mock-houseins-1", kind: "house-insurance", vendor: "State Farm Homeowners",
+    account: "Dwelling $450k · liability $300k",
+    lastCheck: "4 hours ago",
+    addedAt: Date.now() - 60 * 24 * 3600 * 1000,
+    balance: 145, rate: "/mo",
+    category: "House insurance",
+    score: 42,
+    auto: true,
+  },
+  // ─── Synthetic "needs attention" rows for testing the four states ────
+  // Each carries a lifecycle + attentionReason so the inline chip and the
+  // drawer Status pill light up exactly as a real audit would.
+  {
+    id: "mock-attn-awaiting", kind: "audit", vendor: "Memorial Hospital ER",
+    account: "Visit · 2026-04-12 · CPT 99284",
+    lastCheck: "8 minutes ago",
+    addedAt: Date.now() - 2 * 24 * 3600 * 1000,
+    balance: 1842, rate: "",
+    category: "Medical bills",
+    score: 60,
+    auto: true,
+    lifecycle: "attention",
+    attentionReason: { key: "awaiting", label: "Awaiting your approval" },
+  },
+  {
+    id: "mock-attn-escalated", kind: "audit", vendor: "Sutter Health",
+    account: "Outpatient procedure · 2026-03-20",
+    lastCheck: "31 minutes ago",
+    addedAt: Date.now() - 14 * 24 * 3600 * 1000,
+    balance: 3420, rate: "",
+    category: "Medical bills",
+    score: 34,
+    auto: true,
+    lifecycle: "attention",
+    attentionReason: { key: "escalated", label: "Provider countered — review" },
+    counter: {
+      original: 3420,
+      counter_amount: 1900,
+      notes: "Best we can do — 44% off the facility fees, but professional charges stand.",
+    },
+  },
+  {
+    id: "mock-attn-paused", kind: "cell", vendor: "AT&T Wireless",
+    account: "3 lines · unlimited plan",
+    lastCheck: "1 hour ago",
+    addedAt: Date.now() - 8 * 24 * 3600 * 1000,
+    balance: 142, rate: "/mo",
+    category: "Cell phone",
+    score: 52,
+    auto: false,
+    lifecycle: "attention",
+    attentionReason: { key: "paused", label: "Paused by you" },
+  },
+  {
+    id: "mock-attn-error", kind: "electricity", vendor: "ConEdison",
+    account: "Residential · account 7733-X",
+    lastCheck: "23 minutes ago",
+    addedAt: Date.now() - 5 * 24 * 3600 * 1000,
+    balance: 198, rate: "/mo",
+    category: "Electricity",
+    score: 18,
+    auto: true,
+    lifecycle: "attention",
+    attentionReason: { key: "error", label: "Agent error" },
+  },
+  {
     id: "mock-other-1", kind: "other", vendor: "Planet Fitness",
     account: "Black Card · annual renewal",
     lastCheck: "6 hours ago",
@@ -1477,6 +1599,7 @@ const KIND_ICON = {
   security: ICONS.shield,
   electricity: ICONS.pulse,
   "car-insurance": ICONS.shield,
+  "house-insurance": ICONS.shield,
   audit: ICONS.doc,
 };
 
@@ -1487,7 +1610,7 @@ const KIND_ICON = {
 // surfaces the actual quotes.
 const MOCK_OFFERS = [
   {
-    id: "off-1", category: "Prescriptions", source: "GoodRx coupon",
+    id: "off-1", category: "Medical bills", source: "GoodRx coupon",
     icon: "pill",
     confidence: "HIGH",
     current: 214, offered: 62, saves: 152, unit: "/mo",
@@ -1502,7 +1625,7 @@ const MOCK_OFFERS = [
     },
   },
   {
-    id: "off-2", category: "Premium", source: "Covered California silver",
+    id: "off-2", category: "Medical bills", source: "Covered California silver",
     icon: "shield",
     confidence: "HIGH",
     current: 487, offered: 312, saves: 175, unit: "/mo",
@@ -1517,7 +1640,7 @@ const MOCK_OFFERS = [
     },
   },
   {
-    id: "off-3", category: "Hospital bill", source: "Sutter Health charity care",
+    id: "off-3", category: "Medical bills", source: "Sutter Health charity care",
     icon: "hospital",
     confidence: "MEDIUM",
     current: 3420, offered: 0, saves: 3420, unit: "",
@@ -1533,7 +1656,7 @@ const MOCK_OFFERS = [
     },
   },
   {
-    id: "off-4", category: "Lab", source: "Labcorp direct-pay",
+    id: "off-4", category: "Medical bills", source: "Labcorp direct-pay",
     icon: "doc",
     confidence: "HIGH",
     current: 186, offered: 49, saves: 137, unit: "",
@@ -1549,7 +1672,7 @@ const MOCK_OFFERS = [
     },
   },
   {
-    id: "off-5", category: "Payment plan", source: "Kaiser 0% APR",
+    id: "off-5", category: "Medical bills", source: "Kaiser 0% APR",
     icon: "hospital",
     confidence: "HIGH",
     current: 0, offered: 0, saves: 340, unit: "/yr",
@@ -1565,7 +1688,7 @@ const MOCK_OFFERS = [
     },
   },
   {
-    id: "off-6", category: "Dental", source: "Anthem Dental Complete",
+    id: "off-6", category: "Medical bills", source: "Anthem Dental Complete",
     icon: "shield",
     confidence: "MEDIUM",
     current: 82, offered: 54, saves: 28, unit: "/mo",
@@ -1579,6 +1702,42 @@ const MOCK_OFFERS = [
       specifics: "individual PPO, monthly premium",
       region: "SF 94114",
     },
+  },
+  {
+    id: "off-7", category: "House insurance", source: "Lemonade Homeowners",
+    icon: "shield",
+    confidence: "HIGH",
+    current: 145, offered: 92, saves: 53, unit: "/mo",
+    why: "Equivalent dwelling, personal-property, and liability coverage at a lower monthly premium. Lemonade re-quotes annually so the rate doesn't drift.",
+    friction: "10-min online application. Bind same day; old policy cancels on the new effective date.",
+    eta: "Apply in 10 min",
+    recommended: true,
+    baseline: {
+      label: "Homeowners policy", category: "house_insurance",
+      current_provider: "State Farm Homeowners", current_price: 145,
+      specifics: "dwelling $450k, personal property $225k, liability $300k, $1k deductible",
+      region: "SF 94114",
+    },
+  },
+  {
+    id: "off-8", category: "Cell phone", source: "Mint Mobile Unlimited",
+    icon: "phone",
+    confidence: "HIGH",
+    current: 80, offered: 30, saves: 50, unit: "/mo",
+    why: "Same network coverage (T-Mobile), unlimited talk/text + 15 GB high-speed. Bring your own number.",
+    friction: "Order SIM, swap in <5 min when it arrives. Port-out fee waived.",
+    eta: "Switch in 5 min",
+    recommended: false,
+  },
+  {
+    id: "off-9", category: "Internet", source: "T-Mobile Home Internet",
+    icon: "pulse",
+    confidence: "MEDIUM",
+    current: 89, offered: 50, saves: 39, unit: "/mo",
+    why: "Flat $50/mo, no equipment fee, no contract. 5G home internet covers your block.",
+    friction: "Self-install gateway. Cancel cable internet — they'll try retention; agent can handle that call.",
+    eta: "Order today",
+    recommended: false,
   },
 ];
 
@@ -1651,9 +1810,11 @@ function renderBills() {
       audit: a,
       status: isNegotiating ? "negotiating" : (isCancelled ? "cancelled" : (isFailed ? "failed" : "completed")),
       lifecycle,
+      attentionReason: lifecycle === "attention" ? attentionReason(a) : null,
     };
   });
-  const rows = [...auditRows, ...MOCK_RECURRING_BILLS];
+  const hiddenMocks = getHiddenMocks();
+  const rows = [...auditRows, ...MOCK_RECURRING_BILLS.filter((b) => !hiddenMocks.has(b.id))];
 
   // Three numbers the user cares about: how many negotiations are running,
   // how many need attention, and total saved lifetime.
@@ -1772,21 +1933,18 @@ function renderBillsRows(allRows) {
   for (const r of visible) {
     const row = document.createElement("div");
     row.className = "bills-row bill-item" + (r.lifecycle === "active" ? " bill-item-active" : "");
-    const activePill = r.lifecycle === "active"
-      ? `<span class="bill-inline-active"><span class="status-dot"></span>Negotiating</span>`
-      : "";
-    const barColor = r.score >= 70 ? "var(--green)" : r.score >= 50 ? "var(--amber)" : "var(--red)";
-    const scoreCell = `<div class="bill-score-head">
-              <span class="bill-score-num">${r.score}</span>
-              <span class="mono" style="font-size:10.5px;color:var(--ink-mute);letter-spacing:.04em;text-transform:uppercase">${r.scoreLabel}</span>
-            </div>
-            <div class="bill-score-bar"><div class="bill-score-fill" style="width:${r.score}%;background:${barColor}"></div></div>`;
+    // Every row gets a status chip — never blank — so the user can see the
+    // negotiation state at a glance without opening the drawer.
+    const chip = rowStatusChip(r);
+    const statusPill = chip.key === "active"
+      ? `<span class="bill-inline-active"><span class="status-dot"></span>${escapeHtml(chip.label)}</span>`
+      : `<span class="bill-inline-attention bill-inline-${escapeHtml(chip.key)}">${escapeHtml(chip.label)}</span>`;
     row.innerHTML = `
       <div class="bill-main">
         <div class="bill-ic">${KIND_ICON[r.kind] ?? ICONS.doc}</div>
         <div style="min-width:0">
-          <div class="bill-name">${escapeHtml(r.vendor)}${activePill}</div>
-          <div class="bill-account mono">${escapeHtml(r.account)} · ${r.lastCheck}</div>
+          <div class="bill-name">${escapeHtml(r.vendor)}${statusPill}</div>
+          <div class="bill-account mono">${r.lastCheck}</div>
         </div>
       </div>
       <div>
@@ -1794,9 +1952,6 @@ function renderBillsRows(allRows) {
         ${r.rate ? `<div class="bill-price-sub">${r.rate}</div>` : ""}
       </div>
       <div class="bill-category"><span class="tag tag-mono">${escapeHtml(r.category.toUpperCase())}</span></div>
-      <div class="bill-score">
-        ${scoreCell}
-      </div>
       <div class="bill-arrow">${ICONS.arrow}</div>`;
     row.addEventListener("click", () => openBillDrawer(r));
     root.appendChild(row);
@@ -1809,6 +1964,37 @@ function debounce(fn, ms) {
     clearTimeout(t);
     t = setTimeout(() => fn(...args), ms);
   };
+}
+
+// Single source of truth for the status chip on every Bills row. Returns
+// { key, label } where key drives the color via .bill-inline-<key>.
+function rowStatusChip(r) {
+  if (r.lifecycle === "active") return { key: "active", label: "Negotiating" };
+  if (r.attentionReason) return r.attentionReason;
+  if (r.lifecycle === "resolved") return { key: "resolved", label: "Resolved" };
+  // Mock bills paused via the drawer's Stop button surface that on the
+  // Bills row even though there's no audit record for them.
+  if (!r.audit && getMockPaused(r.id)) return { key: "paused", label: "Paused by you" };
+  return { key: "watching", label: "Watching" };
+}
+
+// Maps an audit's attention state to a human reason. Returns one of:
+//   awaiting   — audited but not yet approved/started
+//   escalated  — provider countered, the dispute is unresolved
+//   paused     — user hit Stop on the agent
+//   error      — agent crashed or otherwise failed mid-flight
+// Returns null when the bill isn't in the attention bucket. Used both for
+// the inline chip on the Bills list and as the drawer's Status label.
+function attentionReason(audit) {
+  if (!audit) return null;
+  const status = audit.status;
+  const outcome = audit.outcome;
+  if (status === "failed" || outcome === "failed") return { key: "error", label: "Agent error" };
+  if (status === "cancelled" || outcome === "cancelled") return { key: "paused", label: "Paused by you" };
+  if (outcome === "escalated") return { key: "escalated", label: "Provider countered — review" };
+  if (status === "negotiating" || outcome === "negotiating") return null;
+  if (outcome === "resolved") return null;
+  return { key: "awaiting", label: "Awaiting your approval" };
 }
 
 function relTime(ms) {
@@ -1837,6 +2023,11 @@ function inferCategory(a) {
   // Electricity / utilities
   if (/pg&?e|edison|duke energy|con ?edison|pepco|national grid|pse&g|eversource|dominion|xcel energy|electric|power|utility/.test(n)) {
     return "Electricity";
+  }
+  // House insurance — match home-only carriers and explicit home/dwelling cues
+  // first, before falling through to the broader auto-insurance list.
+  if (/lemonade|hippo|kin insurance|homeowners?|home insurance|house insurance|renters? insurance|dwelling|property insurance/.test(n)) {
+    return "House insurance";
   }
   // Car insurance
   if (/geico|progressive|allstate|state farm|liberty mutual|farmers|nationwide|usaa|esurance|travelers|the general|metromile/.test(n)) {
@@ -1886,7 +2077,7 @@ function scoreLabelFor(score) {
 
 // ─── Offers ────────────────────────────────────────────────────
 
-let offersFilter = "All";
+let offersFilter = "Recommended";
 
 function renderOffers() {
   const total = MOCK_OFFERS
@@ -1896,20 +2087,17 @@ function renderOffers() {
   updatePageHeader({
     eyebrow: "Offers",
     title: "Cheaper alternatives, found for you",
-    stats: [
-      { label: "Opportunities", value: String(MOCK_OFFERS.length) },
-      { label: "Recommended", value: String(MOCK_OFFERS.filter((o) => o.recommended).length), tone: "green" },
-      { label: "Annualized", value: fmt$(total), tone: "green" },
-    ],
+    stats: null,
   });
 
   $("#banner-amount").textContent = fmt$(total);
-  $("#banner-sub").textContent = `Agent running continuously — ${MOCK_OFFERS.length} offers across ${new Set(MOCK_OFFERS.map((o) => o.category)).size} categories. Accept individually or all recommended at once.`;
 
-  // Filters
+  // Filters — "Recommended" leads (it's the agent's curated subset and what
+  // we want users to consider first), then "All" as the escape hatch, then
+  // the per-category chips.
   const filtersRoot = $("#offers-filters");
   filtersRoot.innerHTML = "";
-  const cats = ["All", ...Array.from(new Set(MOCK_OFFERS.map((o) => o.category)))];
+  const cats = ["Recommended", "All", ...Array.from(new Set(MOCK_OFFERS.map((o) => o.category)))];
   for (const c of cats) {
     const chip = document.createElement("button");
     chip.className = "filter-chip" + (c === offersFilter ? " active" : "");
@@ -1920,59 +2108,11 @@ function renderOffers() {
 
   const grid = $("#offers-grid");
   grid.innerHTML = "";
-  const visible = offersFilter === "All" ? MOCK_OFFERS : MOCK_OFFERS.filter((o) => o.category === offersFilter);
-  for (const o of visible) {
-    const card = document.createElement("div");
-    card.className = "offer-card" + (o.recommended ? " recommended" : "");
-    card.innerHTML = `
-      <div class="offer-head">
-        <div class="offer-ic">${ICONS[o.icon] ?? ICONS.sparkle}</div>
-        <div class="offer-head-main">
-          <div class="offer-meta">${o.category}</div>
-          <div class="offer-source">${escapeHtml(o.source)}</div>
-        </div>
-        <span class="tag tag-mono ${o.confidence === "HIGH" ? "tag-green" : "tag-amber"}">${o.confidence}</span>
-      </div>
-      <div class="offer-price-row">
-        <div>
-          <div class="col-label">Current</div>
-          <div class="offer-current">${o.current ? fmt$(o.current) + (o.unit ? ' <span style="font-size:11px">' + o.unit + '</span>' : "") : "—"}</div>
-        </div>
-        <div class="offer-arrow">${ICONS.arrow}</div>
-        <div>
-          <div class="col-label">Offer</div>
-          <div class="offer-new">${o.offered ? fmt$(o.offered) + (o.unit ? ' <span style="font-size:11px">' + o.unit + '</span>' : "") : "Free"}</div>
-        </div>
-        <div class="offer-pad"></div>
-        <div class="offer-right">
-          <div class="col-label">You save</div>
-          <div class="offer-saves">${fmt$(o.saves)}${o.unit ? ' <span style="font-size:11px">' + o.unit + '</span>' : ""}</div>
-        </div>
-      </div>
-      <div>
-        <div class="offer-sub-title">Why it fits</div>
-        <div class="offer-sub">${escapeHtml(o.why)}</div>
-      </div>
-      <div>
-        <div class="offer-sub-title">Switch friction</div>
-        <div class="offer-sub">${escapeHtml(o.friction)}</div>
-      </div>
-      <div class="offer-eta">${escapeHtml(o.eta)}</div>
-      <div class="offer-hunt-slot" data-hunt-slot="${o.id}"></div>
-      <div class="offer-actions">
-        <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
-        <button class="btn btn-ghost" data-action="compare">Compare</button>
-        <button class="btn btn-primary" data-action="hunt">Switch for me</button>
-      </div>`;
-    const switchBtn = card.querySelector('[data-action="hunt"]');
-    if (switchBtn && o.baseline) {
-      switchBtn.addEventListener("click", () => runOfferHuntForCard(o, card));
-    } else if (switchBtn) {
-      switchBtn.disabled = true;
-      switchBtn.title = "No baseline wired for this offer";
-    }
-    grid.appendChild(card);
-  }
+  let visible;
+  if (offersFilter === "All") visible = MOCK_OFFERS;
+  else if (offersFilter === "Recommended") visible = MOCK_OFFERS.filter((o) => o.recommended);
+  else visible = MOCK_OFFERS.filter((o) => o.category === offersFilter);
+  for (const o of visible) grid.appendChild(buildOfferCard(o));
 
   // Accept-all: run hunts for every recommended offer that has a baseline.
   const acceptAll = $("#offers-accept-all");
@@ -1990,6 +2130,133 @@ function renderOffers() {
     });
     acceptAll.dataset.wired = "1";
   }
+}
+
+function buildOfferCard(o) {
+  const card = document.createElement("div");
+  card.className = "offer-card" + (o.recommended ? " recommended" : "");
+  card.innerHTML = `
+    <div class="offer-head">
+      <div class="offer-ic">${ICONS[o.icon] ?? ICONS.sparkle}</div>
+      <div class="offer-head-main">
+        <div class="offer-meta">${o.category}</div>
+        <div class="offer-source">${escapeHtml(o.source)}</div>
+      </div>
+      <span class="tag tag-mono ${o.confidence === "HIGH" ? "tag-green" : "tag-amber"}">${o.confidence}</span>
+    </div>
+    <div class="offer-price-row">
+      <div>
+        <div class="col-label">Current</div>
+        <div class="offer-current">${o.current ? `<span class="offer-amt offer-amt-strike">${fmt$(o.current)}</span>` + (o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : "") : "—"}</div>
+      </div>
+      <div class="offer-arrow">${ICONS.arrow}</div>
+      <div>
+        <div class="col-label">Offer</div>
+        <div class="offer-new">${o.offered ? `<span class="offer-amt">${fmt$(o.offered)}</span>` + (o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : "") : "Free"}</div>
+      </div>
+      <div class="offer-pad"></div>
+      <div class="offer-right">
+        <div class="col-label">You save</div>
+        <div class="offer-saves"><span class="offer-amt">${fmt$(o.saves)}</span>${o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : ""}</div>
+      </div>
+    </div>
+    <div>
+      <div class="offer-sub-title">Why it fits</div>
+      <div class="offer-sub">${escapeHtml(o.why)}</div>
+    </div>
+    <div>
+      <div class="offer-sub-title">Switch friction</div>
+      <div class="offer-sub">${escapeHtml(o.friction)}</div>
+    </div>
+    <div class="offer-eta">${escapeHtml(o.eta)}</div>
+    <div class="offer-hunt-slot" data-hunt-slot="${o.id}"></div>
+    <div class="offer-actions">
+      <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
+      <button class="btn btn-ghost" data-action="compare">Compare</button>
+      <button class="btn btn-primary" data-action="hunt">Switch for me</button>
+    </div>`;
+  const switchBtn = card.querySelector('[data-action="hunt"]');
+  if (switchBtn && o.baseline) {
+    switchBtn.addEventListener("click", () => runOfferHuntForCard(o, card));
+  } else if (switchBtn) {
+    switchBtn.disabled = true;
+    switchBtn.title = "No baseline wired for this offer";
+  }
+  const compareBtn = card.querySelector('[data-action="compare"]');
+  if (compareBtn) {
+    compareBtn.addEventListener("click", () => openCompareModal(o, card));
+  }
+  const dismissBtn = card.querySelector('[data-action="dismiss"]');
+  if (dismissBtn) {
+    dismissBtn.addEventListener("click", () => {
+      card.classList.add("offer-card-dismissed");
+      setTimeout(() => card.remove(), 180);
+    });
+  }
+  return card;
+}
+
+function openCompareModal(offer, card) {
+  const modal = $("#cmp-modal");
+  const scrim = $("#cmp-scrim");
+  if (!modal || !scrim) return;
+
+  const unit = offer.unit ?? "";
+  const fmtWithUnit = (n) => n ? fmt$(n) + (unit ? `<span class="cmp-unit">${escapeHtml(unit)}</span>` : "") : "Free";
+  const annualizedSaves = offer.unit === "/mo" ? offer.saves * 12 : offer.saves;
+
+  $("#cmp-category").textContent = offer.category ?? "—";
+  $("#cmp-title").textContent = `${offer.baseline?.current_provider ?? "Your current provider"} vs ${offer.source}`;
+  $("#cmp-cur-provider").textContent = offer.baseline?.current_provider ?? "Your current provider";
+  $("#cmp-cur-price").innerHTML = offer.current ? fmtWithUnit(offer.current) : "—";
+  $("#cmp-cur-spec").textContent = offer.baseline?.specifics ?? "Same plan, same coverage — just paying more.";
+  $("#cmp-off-provider").textContent = offer.source ?? "—";
+  $("#cmp-off-price").innerHTML = fmtWithUnit(offer.offered);
+  $("#cmp-off-saves").innerHTML = `Saves <strong>${fmt$(offer.saves)}</strong>${unit ? `<span class="cmp-unit">${escapeHtml(unit)}</span>` : ""}${unit === "/mo" ? ` · <strong>${fmt$(annualizedSaves)}</strong> a year` : ""}`;
+  $("#cmp-why").textContent = offer.why ?? "—";
+  $("#cmp-friction").textContent = offer.friction ?? "—";
+  $("#cmp-eta").textContent = offer.eta ?? "—";
+  $("#cmp-confidence").textContent = offer.confidence ?? "—";
+
+  const switchBtn = $("#cmp-switch");
+  if (offer.baseline) {
+    switchBtn.disabled = false;
+    switchBtn.title = "";
+  } else {
+    switchBtn.disabled = true;
+    switchBtn.title = "No baseline wired for this offer";
+  }
+
+  scrim.hidden = false;
+  modal.hidden = false;
+  requestAnimationFrame(() => {
+    scrim.classList.add("open");
+    modal.classList.add("open");
+  });
+
+  const cleanup = () => {
+    scrim.classList.remove("open");
+    modal.classList.remove("open");
+    setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
+    $("#cmp-close").onclick = null;
+    $("#cmp-dismiss").onclick = null;
+    $("#cmp-switch").onclick = null;
+    scrim.onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
+  $("#cmp-close").onclick = cleanup;
+  $("#cmp-dismiss").onclick = cleanup;
+  scrim.onclick = cleanup;
+  document.addEventListener("keydown", onKey);
+  switchBtn.onclick = () => {
+    cleanup();
+    if (offer.baseline && card) {
+      void runOfferHuntForCard(offer, card);
+      // Scroll to the card so the user sees the hunt panel populate.
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
 }
 
 async function runOfferHuntForCard(offer, card) {
@@ -2167,7 +2434,9 @@ async function renderProfile() {
   const profile = sdata.profile ?? {};
 
   root.innerHTML = "";
-  root.appendChild(mkProfileCard(profile));
+  const card = mkProfileCard(profile);
+  root.appendChild(card.el);
+  installUnsavedGuard(card.getValues);
 }
 
 function mkProfileCard(p) {
@@ -2303,21 +2572,23 @@ function mkProfileCard(p) {
     ssnInput.value = ssnInput.value.replace(/\D/g, "").slice(0, 4);
   });
 
+  const getValues = () => ({
+    first_name: g.querySelector("#prof-first").value.trim(),
+    last_name: g.querySelector("#prof-last").value.trim(),
+    email: g.querySelector("#prof-email").value.trim(),
+    phone: g.querySelector("#prof-phone").value.trim(),
+    address: g.querySelector("#prof-address").value.trim(),
+    dob: g.querySelector("#prof-dob").value.trim(),
+    ssn_last4: ssnInput.value.trim(),
+    drivers_license: g.querySelector("#prof-dl").value.trim(),
+    authorized: authBox.checked,
+    hipaa_acknowledged: hipaaBox.checked,
+  });
+
   const saveBtn = g.querySelector("#prof-save-btn");
   const status = g.querySelector("#prof-save-status");
   saveBtn.addEventListener("click", async () => {
-    const body = {
-      first_name: g.querySelector("#prof-first").value.trim(),
-      last_name: g.querySelector("#prof-last").value.trim(),
-      email: g.querySelector("#prof-email").value.trim(),
-      phone: g.querySelector("#prof-phone").value.trim(),
-      address: g.querySelector("#prof-address").value.trim(),
-      dob: g.querySelector("#prof-dob").value.trim(),
-      ssn_last4: ssnInput.value.trim(),
-      drivers_license: g.querySelector("#prof-dl").value.trim(),
-      authorized: authBox.checked,
-      hipaa_acknowledged: hipaaBox.checked,
-    };
+    const body = getValues();
     saveBtn.disabled = true;
     status.textContent = "Saving…";
     status.className = "tg-save-status";
@@ -2329,6 +2600,7 @@ function mkProfileCard(p) {
       });
       if (!res.ok) throw new Error(await res.text());
       flashSavedThenFade(status);
+      unsavedGuard?.markSaved?.();
     } catch (err) {
       status.textContent = `Error: ${err?.message ?? err}`;
       status.className = "tg-save-status err";
@@ -2336,7 +2608,7 @@ function mkProfileCard(p) {
       saveBtn.disabled = false;
     }
   });
-  return g;
+  return { el: g, getValues };
 }
 
 // ─── Tune your agent ───────────────────────────────────────────
@@ -2363,16 +2635,11 @@ async function renderSettings() {
   const tune = mkTuneCard(sdata.tune ?? {});
   root.appendChild(tune.el);
 
-  // Connected accounts — read-only integration statuses.
-  const integRows = (sdata.integrations ?? []).map((i) => ({
-    label: i.label,
-    help: i.detail,
-    value: mkStatusPill(i.status),
-  }));
-  if (integRows.length === 0) {
-    integRows.push({ label: "No integrations detected", help: "Set ANTHROPIC_API_KEY to enable the agent.", value: mkStatusPill("missing") });
-  }
-  root.appendChild(mkSettingsGroup("Connected accounts", integRows));
+  // Connected accounts — editable credentials per integration.
+  const integrations = mkIntegrationsCard(sdata.integrations ?? []);
+  root.appendChild(integrations.el);
+
+  installUnsavedGuard(tune.getValues);
 
   // Data
   const dataGroup = document.createElement("div");
@@ -2451,6 +2718,7 @@ async function renderSettings() {
       });
       if (!res.ok) throw new Error(await res.text());
       flashSavedThenFade(status);
+      unsavedGuard?.markSaved?.();
     } catch (err) {
       status.textContent = `Error: ${err?.message ?? err}`;
       status.className = "tg-save-status err";
@@ -2460,11 +2728,183 @@ async function renderSettings() {
   });
 }
 
+function mkIntegrationsCard(list) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const title = document.createElement("div");
+  title.className = "settings-group-title";
+  title.textContent = "Connected accounts";
+  g.appendChild(title);
+
+  const card = document.createElement("div");
+  card.className = "settings-card";
+  g.appendChild(card);
+
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "settings-row";
+    empty.innerHTML = `<div class="settings-row-main">
+      <div class="settings-row-label">No integrations configured</div>
+      <div class="settings-row-help">Nothing to connect yet.</div>
+    </div>`;
+    card.appendChild(empty);
+  }
+
+  for (const intg of list) {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    const connected = intg.status === "connected";
+    const storedByUser = (intg.fields ?? []).some((f) => f.from_user);
+    row.innerHTML = `
+      <div class="settings-row-main">
+        <div class="settings-row-label">${escapeHtml(intg.label)}${intg.required ? ' <span class="intg-req">required</span>' : ""}</div>
+        <div class="settings-row-help">${escapeHtml(intg.detail ?? "")}</div>
+      </div>
+      <div class="intg-actions"></div>`;
+    const actions = row.querySelector(".intg-actions");
+    actions.appendChild(mkStatusPill(intg.status));
+    const primary = document.createElement("button");
+    primary.type = "button";
+    primary.className = "btn " + (connected ? "btn-ghost" : "btn-primary");
+    primary.textContent = connected ? "Edit" : "Connect";
+    primary.addEventListener("click", () => openIntegrationModal(intg));
+    actions.appendChild(primary);
+    if (storedByUser) {
+      const disc = document.createElement("button");
+      disc.type = "button";
+      disc.className = "btn btn-ghost intg-disconnect";
+      disc.textContent = "Disconnect";
+      disc.addEventListener("click", () => disconnectIntegration(intg));
+      actions.appendChild(disc);
+    }
+    card.appendChild(row);
+  }
+
+  return { el: g };
+}
+
+async function disconnectIntegration(intg) {
+  const ok = await confirmModal({
+    title: `Disconnect ${intg.label}?`,
+    body: "Stored credentials for this integration will be cleared. You can reconnect at any time.",
+    confirmText: "Disconnect",
+    cancelText: "Cancel",
+  });
+  if (!ok) return;
+  const body = {};
+  for (const f of intg.fields ?? []) body[f.name] = "";
+  try {
+    const res = await fetch("/api/settings/integrations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    void renderSettings();
+  } catch (err) {
+    alert(`Disconnect failed: ${err?.message ?? err}`);
+  }
+}
+
+function openIntegrationModal(intg) {
+  const modal = $("#intg-modal");
+  const scrim = $("#intg-scrim");
+  const titleEl = $("#intg-title");
+  const subEl = $("#intg-sub");
+  const fieldsRoot = $("#intg-modal-fields");
+  const statusEl = $("#intg-modal-status");
+  const saveBtn = $("#intg-save");
+  const cancelBtn = $("#intg-cancel");
+  if (!modal || !scrim) return;
+
+  titleEl.textContent = `Connect ${intg.label}`;
+  subEl.textContent = intg.detail ?? "";
+  statusEl.textContent = "";
+  statusEl.className = "intg-modal-status";
+  fieldsRoot.innerHTML = "";
+
+  for (const f of intg.fields ?? []) {
+    const field = document.createElement("label");
+    field.className = "intg-field";
+    const placeholder = f.kind === "secret"
+      ? (f.last4 ? `Current key ends in ${f.last4} — paste a new one to replace` : "Paste your key")
+      : (f.placeholder ?? "");
+    const initial = f.kind === "secret" ? "" : (f.value ?? "");
+    field.innerHTML = `
+      <span class="intg-field-label">${escapeHtml(f.label)}</span>
+      <input
+        type="${f.kind === "secret" ? "password" : "text"}"
+        class="settings-input intg-input"
+        data-intg-field="${escapeHtml(f.name)}"
+        data-initial="${escapeHtml(initial)}"
+        placeholder="${escapeHtml(placeholder)}"
+        autocomplete="off"
+        spellcheck="false"
+        value="${escapeHtml(initial)}"
+      />`;
+    fieldsRoot.appendChild(field);
+  }
+
+  scrim.hidden = false;
+  modal.hidden = false;
+  requestAnimationFrame(() => {
+    scrim.classList.add("open");
+    modal.classList.add("open");
+  });
+  fieldsRoot.querySelector("input")?.focus();
+
+  const cleanup = () => {
+    scrim.classList.remove("open");
+    modal.classList.remove("open");
+    setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
+    saveBtn.onclick = null;
+    cancelBtn.onclick = null;
+    scrim.onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (ev) => {
+    if (ev.key === "Escape") { cleanup(); }
+  };
+  cancelBtn.onclick = cleanup;
+  scrim.onclick = cleanup;
+  document.addEventListener("keydown", onKey);
+  saveBtn.onclick = async () => {
+    const body = {};
+    for (const input of fieldsRoot.querySelectorAll("input[data-intg-field]")) {
+      const name = input.dataset.intgField;
+      const initial = input.dataset.initial ?? "";
+      if (input.value !== initial) body[name] = input.value;
+    }
+    if (Object.keys(body).length === 0) {
+      cleanup();
+      return;
+    }
+    saveBtn.disabled = true;
+    statusEl.textContent = "Saving…";
+    statusEl.className = "intg-modal-status";
+    try {
+      const res = await fetch("/api/settings/integrations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      cleanup();
+      void renderSettings();
+    } catch (err) {
+      statusEl.textContent = `Error: ${err?.message ?? err}`;
+      statusEl.className = "intg-modal-status err";
+    } finally {
+      saveBtn.disabled = false;
+    }
+  };
+}
+
 function mkTuneCard(tune) {
   const g = document.createElement("div");
   g.className = "settings-group";
   const tone = tune.tone ?? "firm";
-  const channels = tune.channels ?? { email: true, sms: true, voice: true };
+  const channels = tune.channels ?? { email: true, voice: true };
   const digestOn = tune.email_digest !== false;
   const mobileOn = tune.mobile_alerts !== false;
   const toneOpt = (v, label, help) =>
@@ -2483,7 +2923,7 @@ function mkTuneCard(tune) {
           <div class="tone-picker">
             ${toneOpt("polite", "Polite", "Lead with cooperation. Soft asks, patient timelines.")}
             ${toneOpt("firm", "Firm", "Clear asks, direct deadlines. Default.")}
-            ${toneOpt("aggressive", "Aggressive", "Hard deadlines, explicit consequences (regulatory complaints, BBB, retention threats).")}
+            ${toneOpt("aggressive", "Aggressive", "Hard deadlines, explicit consequences (regulatory complaints, retention threats).")}
           </div>
         </div>
       </div>
@@ -2493,8 +2933,7 @@ function mkTuneCard(tune) {
           <div class="settings-row-help">Which channels the agent may use. Disabled channels are skipped entirely.</div>
           <div class="channel-toggles">
             <label class="channel-toggle"><input type="checkbox" id="tune-ch-email" ${channels.email !== false ? "checked" : ""} /> <span>Email</span></label>
-            <label class="channel-toggle"><input type="checkbox" id="tune-ch-sms" ${channels.sms !== false ? "checked" : ""} /> <span>SMS</span></label>
-            <label class="channel-toggle"><input type="checkbox" id="tune-ch-voice" ${channels.voice !== false ? "checked" : ""} /> <span>Voice</span></label>
+            <label class="channel-toggle"><input type="checkbox" id="tune-ch-voice" ${channels.voice !== false ? "checked" : ""} /> <span>Call</span></label>
           </div>
         </div>
       </div>
@@ -2534,7 +2973,7 @@ function mkTuneCard(tune) {
     tone: g.querySelector('input[name="tune-tone"]:checked')?.value ?? "firm",
     channels: {
       email: g.querySelector("#tune-ch-email").checked,
-      sms: g.querySelector("#tune-ch-sms").checked,
+      sms: false,
       voice: g.querySelector("#tune-ch-voice").checked,
     },
     email_digest: g.querySelector("#tune-digest").classList.contains("on"),
@@ -2630,15 +3069,15 @@ function mkSelect(options) {
 
 function mkStatusPill(status) {
   const span = document.createElement("span");
+  // Anything that isn't a live, validated connection reads as "NOT CONNECTED"
+  // regardless of whether it's a missing required integration or a soft
+  // fallback to the built-in simulator — the user experience is the same:
+  // they haven't linked it yet.
   const tone = status === "connected" ? "tag-green"
-             : status === "simulated" ? "tag-amber"
              : status === "missing"   ? "tag-red"
-             : "";
+             : "tag-amber";
   span.className = `tag tag-mono ${tone}`;
-  span.textContent = status === "connected" ? "CONNECTED"
-                   : status === "simulated" ? "SIMULATED"
-                   : status === "missing"   ? "NOT SET"
-                   : status.toUpperCase();
+  span.textContent = status === "connected" ? "CONNECTED" : "NOT CONNECTED";
   return span;
 }
 
@@ -2646,6 +3085,40 @@ function mkStatusPill(status) {
 
 let drawerState = { row: null, report: null, activeTab: "activity" };
 const reportCache = new Map();
+
+// Mock bills (no run_id) get a theatrical Stop/Start backed by localStorage so
+// the controls and Feedback tab still work end-to-end without a real audit.
+function mockPausedKey(rowId) { return `bonsai-mock-paused:${rowId}`; }
+function getMockPaused(rowId) {
+  try { return localStorage.getItem(mockPausedKey(rowId)) === "1"; } catch { return false; }
+}
+function setMockPaused(rowId, val) {
+  try {
+    if (val) localStorage.setItem(mockPausedKey(rowId), "1");
+    else localStorage.removeItem(mockPausedKey(rowId));
+  } catch {}
+}
+function mockFeedbackKey(rowId) { return `bonsai-mock-feedback:${rowId}`; }
+function getMockFeedback(rowId) {
+  try { return JSON.parse(localStorage.getItem(mockFeedbackKey(rowId)) ?? "[]"); } catch { return []; }
+}
+function appendMockFeedback(rowId, msg) {
+  const log = getMockFeedback(rowId);
+  log.push(msg);
+  try { localStorage.setItem(mockFeedbackKey(rowId), JSON.stringify(log)); } catch {}
+}
+// Deleting a mock bill just hides it client-side — the /api/delete endpoint
+// would 404 on a synthetic id. The list is keyed by row.id so both
+// MOCK_RECURRING_BILLS entries and any future synthetic rows can be removed.
+const HIDDEN_MOCKS_KEY = "bonsai-hidden-mocks";
+function getHiddenMocks() {
+  try { return new Set(JSON.parse(localStorage.getItem(HIDDEN_MOCKS_KEY) ?? "[]")); } catch { return new Set(); }
+}
+function hideMock(rowId) {
+  const set = getHiddenMocks();
+  set.add(rowId);
+  try { localStorage.setItem(HIDDEN_MOCKS_KEY, JSON.stringify([...set])); } catch {}
+}
 
 async function openBillDrawer(row) {
   drawerState = { row, report: null, activeTab: "activity" };
@@ -2704,57 +3177,102 @@ async function openBillDrawer(row) {
 
   // Stop / Start — always visible for any real audit. The agent's job on a
   // bill isn't one-shot: completed bills still get periodic re-negotiation
-  // rounds. Active → Stop. Anything else (completed, cancelled, failed,
-  // audited-but-not-yet-approved) → Start the next round.
+  // rounds. For mock recurring bills (no run_id) we still expose the control
+  // so the user can mark them paused; the paused flag is persisted client-side
+  // and the Feedback tab still works as a local notebook for that bill.
   const agentBtn = $("#drawer-agent-btn");
-  const feedbackPanel = $("#drawer-feedback");
   const runId = row?.audit?.run_id;
-  const isActive = row.lifecycle === "active" && !!runId;
-  const isStopped = (row.status === "cancelled" || row.status === "failed") && !!runId;
+  const isMock = !runId;
+  const mockPaused = isMock ? getMockPaused(row.id) : false;
+  // Mock rows tagged with an attentionReason are conceptually "not running"
+  // — Awaiting approval, Provider countered, Paused, or Agent error all want
+  // Start (not Stop) and the Feedback tab.
+  const mockAttention = isMock && !!row.attentionReason;
+  const isActive = isMock
+    ? (!mockPaused && !mockAttention)
+    : (row.lifecycle === "active");
+  const isStopped = isMock
+    ? (mockPaused || mockAttention)
+    : (row.status === "cancelled" || row.status === "failed");
 
   if (agentBtn) {
-    if (!runId) {
-      // Mock recurring bills with no real run_id → no button.
-      agentBtn.hidden = true;
-      agentBtn.onclick = null;
-    } else if (isActive) {
-      agentBtn.hidden = false;
+    agentBtn.hidden = false;
+    if (isActive) {
       agentBtn.className = "drawer-agent-btn drawer-stop-btn";
       agentBtn.innerHTML = `
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
         <span>Stop</span>`;
-      agentBtn.onclick = () => stopAgent();
+      agentBtn.onclick = isMock
+        ? () => {
+            setMockPaused(row.id, true);
+            // Wipe any active/attention lifecycle on the row so the
+            // chip on the Bills page falls through to the mockPaused
+            // branch in rowStatusChip and renders "Paused by you".
+            row.lifecycle = null;
+            row.attentionReason = null;
+            if (currentNav === "bills") renderBills();
+            updateNavCounts();
+            void openBillDrawer(row);
+          }
+        : () => stopAgent();
     } else {
-      agentBtn.hidden = false;
       agentBtn.className = "drawer-agent-btn drawer-resume-btn";
       agentBtn.innerHTML = `
         <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6,4 20,12 6,20"/></svg>
         <span>Start</span>`;
-      agentBtn.onclick = () => resumeAgent();
-    }
-  }
-  if (feedbackPanel) {
-    feedbackPanel.hidden = !isStopped;
-    if (isStopped) void loadFeedback(runId);
-    if (!feedbackPanel._bound) {
-      feedbackPanel._bound = true;
-      $("#drawer-feedback-form").addEventListener("submit", (ev) => {
-        ev.preventDefault();
-        sendFeedback();
-      });
+      // Resuming gives the user a choice: kick the next round off now, or
+      // wait for the regularly scheduled re-negotiation. "Resume on
+      // schedule" un-pauses the bill but doesn't re-send anything until
+      // the next scheduled tick (frequency dropdown).
+      agentBtn.onclick = isMock
+        ? () => promptResumeMode(row)
+        : () => promptResumeMode(row);
     }
   }
 
+  // Tab visibility rules:
+  //   • Needs attention — only when the bill has an attentionReason. The
+  //     panel hosts everything the user needs to resolve (counter info,
+  //     inline chat, primary CTA) so they don't have to flip tabs.
+  //   • Feedback        — only when an active negotiation was stopped by
+  //                       the user (paused state). For other attention
+  //                       reasons, chat lives inline on the Attention tab.
+  // When attention is set we land directly on it; else if paused, on
+  // Feedback; else default to Activity.
+  const drawerReason = row.attentionReason ?? (row.audit ? attentionReason(row.audit) : null);
+  const attentionTabBtn = document.querySelector('.drawer-tab[data-dtab="attention"]');
+  if (attentionTabBtn) attentionTabBtn.hidden = !drawerReason;
+  const feedbackTabBtn = document.querySelector('.drawer-tab[data-dtab="feedback"]');
+  const isPaused = drawerReason?.key === "paused";
+  if (feedbackTabBtn) feedbackTabBtn.hidden = !isPaused;
+  const initialTab = drawerReason ? "attention" : (isStopped ? "feedback" : "activity");
+  drawerState.activeTab = initialTab;
+  document.querySelectorAll(".drawer-tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.dtab === initialTab);
+  });
+
+  // Awaiting approval is a *review* surface, not a quick status check —
+  // widen the drawer so the audit findings, plan, and chat have room.
+  // (Using the `drawer` const from the top of this function.)
+  drawer.classList.toggle("drawer-wide", drawerReason?.key === "awaiting");
 
   // Tabs
   bindDrawerTabs();
-  renderDrawerTab("activity");
+  renderDrawerTab(initialTab);
 }
 
-async function loadFeedback(runId) {
+async function loadFeedback(row) {
   const log = $("#drawer-feedback-log");
   if (!log) return;
   log.innerHTML = "";
+  const runId = row?.audit?.run_id;
+  if (!runId) {
+    // Mock bill — render the localStorage-backed log.
+    for (const m of getMockFeedback(row.id)) {
+      appendFeedbackMessage(m.role, m.body);
+    }
+    return;
+  }
   try {
     const res = await fetch(`/api/feedback/${runId}`);
     if (!res.ok) return;
@@ -2777,13 +3295,28 @@ function appendFeedbackMessage(role, body) {
 }
 
 async function sendFeedback() {
-  const runId = drawerState?.row?.audit?.run_id;
-  if (!runId) return;
+  const row = drawerState?.row;
+  if (!row) return;
+  const runId = row?.audit?.run_id;
   const input = $("#drawer-feedback-input");
   const msg = input.value.trim();
   if (!msg) return;
   appendFeedbackMessage("user", msg);
   input.value = "";
+
+  if (!runId) {
+    // Mock bill — store the note locally and acknowledge so the user has a
+    // record they can come back to. No backend round-trip.
+    appendMockFeedback(row.id, { role: "user", body: msg, ts: Date.now() });
+    const reply = "Got it. I'll apply that on the next round.";
+    setTimeout(() => {
+      appendFeedbackMessage("assistant", reply);
+      appendMockFeedback(row.id, { role: "assistant", body: reply, ts: Date.now() });
+      input.focus();
+    }, 320);
+    return;
+  }
+
   input.disabled = true;
   const btn = $("#drawer-feedback-form button");
   if (btn) btn.disabled = true;
@@ -2813,16 +3346,26 @@ async function sendFeedback() {
 
 async function deleteBill() {
   const row = drawerState?.row;
+  if (!row) return;
   const runId = row?.audit?.run_id;
-  if (!runId) return;
   const vendor = row.vendor ?? "this bill";
+  const isMock = !runId;
   const ok = await confirmModal({
     title: `Delete ${vendor}?`,
-    body: "This removes the audit, appeal letter, and uploaded files. Can't be undone.",
+    body: isMock
+      ? "Removes this bill from your tracked list."
+      : "This removes the audit, appeal letter, and uploaded files. Can't be undone.",
     confirmText: "Delete",
     cancelText: "Cancel",
   });
   if (!ok) return;
+  if (isMock) {
+    hideMock(row.id);
+    updateNavCounts();
+    if (currentNav === "bills") renderBills();
+    closeBillDrawer();
+    return;
+  }
   try {
     const res = await fetch("/api/delete", {
       method: "POST",
@@ -3117,43 +3660,39 @@ function renderDrawerStats(row, report) {
   const saved = summary.patient_saved ?? 0;
   const channel = summary.channel_used ?? "—";
 
-  // Traffic-light status lives inside the drawer only. Active = yellow,
-  // resolved = green, attention (escalated/failed/not-started) = red.
+  // Traffic-light status. Active = yellow, resolved = green, attention = red.
+  // For attention rows we surface the *specific* reason (Awaiting approval,
+  // Provider countered, Paused by you, Agent error) so the drawer matches
+  // the inline chip on the Bills row and tells the user exactly what to do.
+  const reason = row.attentionReason ?? (row.audit ? attentionReason(row.audit) : null);
   let statusTone = "attention";
   let statusLabel = "Needs attention";
-  if (row.status === "cancelled" || summary.outcome === "cancelled") {
-    statusTone = "attention";
-    statusLabel = "Stopped";
-  } else if (row.lifecycle === "active" || summary.outcome === "in_progress" || row.status === "negotiating") {
+  if (row.lifecycle === "active" || summary.outcome === "in_progress" || row.status === "negotiating") {
     statusTone = "active";
     statusLabel = "Negotiating";
   } else if (row.lifecycle === "resolved" || summary.outcome === "resolved") {
     statusTone = "resolved";
     statusLabel = "Resolved";
+  } else if (reason) {
+    statusTone = "attention";
+    statusLabel = reason.label;
   } else if (row.kind !== "audit") {
     statusTone = "resolved";
     statusLabel = row.scoreLabel ?? "Watching";
   }
 
-  const hasRunId = !!row?.audit?.run_id;
+  // Trash button lives statically in the drawer header next to the bill
+  // name — wired once in init(). The Status stat here just shows the pill.
   $("#drawer-stats").innerHTML = `
     <div class="drawer-stat"><div class="eyebrow">Original</div><div class="drawer-stat-val ${saved ? "strike" : ""}">${fmt$(was)}</div></div>
     <div class="drawer-stat"><div class="eyebrow">Current</div><div class="drawer-stat-val">${fmt$(now)}</div></div>
     <div class="drawer-stat"><div class="eyebrow">Saved</div><div class="drawer-stat-val green">${saved ? fmt$(saved) : "—"}</div></div>
-    <div class="drawer-stat drawer-stat-status-wrap">
-      <div class="drawer-stat-status-lead">
-        <div class="eyebrow">Status</div>
-        <div class="drawer-stat-status bill-status bill-status-${statusTone}">
-          <span class="status-dot"></span><span>${escapeHtml(statusLabel)}</span>
-        </div>
+    <div class="drawer-stat">
+      <div class="eyebrow">Status</div>
+      <div class="drawer-stat-status bill-status bill-status-${statusTone}">
+        <span class="status-dot"></span><span>${escapeHtml(statusLabel)}</span>
       </div>
-      ${hasRunId ? `
-        <button type="button" id="drawer-delete-btn" class="drawer-delete-icon" title="Delete this bill" aria-label="Delete this bill">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
-        </button>` : ""}
     </div>`;
-  // Wire delete on every re-render since innerHTML replaces it.
-  $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
 }
 
 function renderDrawerTab(which) {
@@ -3161,14 +3700,370 @@ function renderDrawerTab(which) {
   const { row, report } = drawerState;
   if (which === "activity") {
     body.innerHTML = renderActivityTimeline(row, report);
-  } else if (which === "messages") {
-    body.innerHTML = renderDrawerMessages(row, report);
+  } else if (which === "feedback") {
+    body.innerHTML = renderDrawerFeedback(row);
+    wireDrawerFeedback(row);
+  } else if (which === "attention") {
+    body.innerHTML = renderDrawerAttention(row);
+    wireDrawerAttention(row);
   }
+}
+
+// What to show on the Needs-attention tab for each of the four states.
+// Each entry is one short instruction + a primary CTA that funnels into
+// the existing Start / Resume machinery.
+const ATTENTION_CONTENT = {
+  awaiting: {
+    tone: "awaiting",
+    title: "Awaiting your approval",
+    body: "Bonsai audited this bill and built a negotiation plan, but hasn't reached out to the provider yet. Review the plan on the Activity tab, then approve to kick off the first round.",
+    steps: [
+      "Open Activity to read the plan and the appeal letter.",
+      "Use Feedback if you want to steer tone, channels, or talking points.",
+      "Click Approve & start when you're ready.",
+    ],
+    primary: { id: "start", label: "Approve & start" },
+  },
+  escalated: {
+    tone: "urgent",
+    title: "Provider countered — review",
+    body: "The provider responded with a counter-offer. The new amount is below — approve to accept it and close the bill, or keep negotiating to push for an even lower price.",
+    steps: [
+      "Review the counter amount and savings shown below.",
+      "Use Feedback first if you want to steer the next round (e.g. 'reject, anchor at $200 lower').",
+      "Approve to accept, or Keep negotiating to send another round.",
+    ],
+    primary: { id: "approve_counter", label: "Approve counter" },
+    secondary: { id: "keep_negotiating", label: "Keep negotiating" },
+  },
+  paused: {
+    tone: "neutral",
+    title: "You paused this agent",
+    body: "Negotiation is on hold. Use the Feedback tab to redirect the agent — change tone, restrict channels, share new info — then click Resume when you're ready.",
+    steps: [
+      "Open Feedback and tell the agent what to change for the next round.",
+      "Click Resume to pick up where you left off.",
+    ],
+    primary: { id: "resume", label: "Resume agent" },
+  },
+  error: {
+    tone: "urgent",
+    title: "Agent ran into an error",
+    body: "The last round crashed before completing. Most errors are transient — a single retry usually clears them. Activity has the underlying error message.",
+    steps: [
+      "Open Activity to read what failed.",
+      "Click Retry to try the round again.",
+      "If it keeps failing, leave a note in Feedback so the agent skips that channel next time.",
+    ],
+    primary: { id: "retry", label: "Retry now" },
+  },
+};
+
+function renderCounterPanel(row) {
+  const c = row.counter;
+  if (!c) return "";
+  const original = c.original ?? row.balance ?? 0;
+  const counterAmt = c.counter_amount ?? c.amount ?? 0;
+  const saves = c.saves ?? (original - counterAmt);
+  const pct = original > 0 ? Math.round((saves / original) * 100) : 0;
+  return `
+    <div class="dattn-counter">
+      <div class="dattn-counter-grid">
+        <div class="dattn-counter-cell">
+          <div class="dattn-counter-label">Original</div>
+          <div class="dattn-counter-amt"><span class="offer-amt-strike">${fmt$(original)}</span></div>
+        </div>
+        <div class="dattn-counter-arrow" aria-hidden="true">→</div>
+        <div class="dattn-counter-cell">
+          <div class="dattn-counter-label">Provider's counter</div>
+          <div class="dattn-counter-amt dattn-counter-amt-green">${fmt$(counterAmt)}</div>
+        </div>
+        <div class="dattn-counter-cell dattn-counter-saves">
+          <div class="dattn-counter-label">If you approve, you save</div>
+          <div class="dattn-counter-amt"><strong>${fmt$(saves)}</strong>${pct > 0 ? ` <span class="dattn-counter-pct">(${pct}%)</span>` : ""}</div>
+        </div>
+      </div>
+      ${c.notes ? `<div class="dattn-counter-notes">“${escapeHtml(c.notes)}” — billing rep</div>` : ""}
+    </div>`;
+}
+
+function renderDrawerAttention(row) {
+  const reason = row.attentionReason ?? (row.audit ? attentionReason(row.audit) : null);
+  if (!reason) {
+    return `<div class="dact-empty">Nothing to resolve right now.</div>`;
+  }
+  const content = ATTENTION_CONTENT[reason.key];
+  if (!content) {
+    return `<div class="dact-empty">${escapeHtml(reason.label)}</div>`;
+  }
+  const stepsHtml = content.steps.map((s) => `<li>${escapeHtml(s)}</li>`).join("");
+  const secondaryBtn = content.secondary
+    ? `<button type="button" class="btn btn-ghost" data-attn-action="${escapeHtml(content.secondary.id)}">${escapeHtml(content.secondary.label)}</button>`
+    : "";
+  const counterPanel = (reason.key === "escalated" && row.counter) ? renderCounterPanel(row) : "";
+  // Inline chat surface — same IDs the Feedback tab uses, so the existing
+  // sendFeedback / loadFeedback helpers work without modification. Hidden
+  // for "paused" because that state has its own dedicated Feedback tab.
+  const showInlineChat = reason.key !== "paused";
+  const chatPanel = showInlineChat ? `
+    <div class="dattn-chat">
+      <div class="dattn-chat-eyebrow">Chat with the agent</div>
+      <div class="dattn-chat-sub">Anything you say here will steer the next round.</div>
+      <div class="qa-log dattn-chat-log" id="drawer-feedback-log"></div>
+      <form class="qa-form qa-form-chat" id="drawer-feedback-form">
+        <input type="text" id="drawer-feedback-input" placeholder="e.g. 'Reject and counter at $1,500' · 'Add HIPAA card on file'" autocomplete="off" />
+        <button type="submit" class="qa-send" aria-label="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+        </button>
+      </form>
+    </div>` : "";
+  return `
+    <div class="dattn dattn-${escapeHtml(content.tone)}">
+      <div class="dattn-eyebrow">${escapeHtml(reason.label)}</div>
+      <div class="dattn-title">${escapeHtml(content.title)}</div>
+      <div class="dattn-body">${escapeHtml(content.body)}</div>
+      ${counterPanel}
+      <ol class="dattn-steps">${stepsHtml}</ol>
+      ${chatPanel}
+      <div class="dattn-actions">
+        ${secondaryBtn}
+        <button type="button" class="btn btn-primary dattn-primary" data-attn-action="${escapeHtml(content.primary.id)}">${escapeHtml(content.primary.label)}</button>
+      </div>
+    </div>`;
+}
+
+function wireDrawerAttention(row) {
+  const body = $("#drawer-body");
+  if (!body) return;
+  body.querySelectorAll("[data-attn-action]").forEach((btn) => {
+    btn.addEventListener("click", () => handleAttentionAction(btn.dataset.attnAction, row));
+  });
+  // If the inline chat surface is rendered (escalated / awaiting / error)
+  // wire the same submit + load handlers the Feedback tab uses.
+  const form = body.querySelector("#drawer-feedback-form");
+  if (form) {
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      sendFeedback();
+    });
+    void loadFeedback(row);
+  }
+}
+
+async function promptResumeMode(row) {
+  const startNow = await confirmModal({
+    title: "Resume agent",
+    body: "Start a fresh negotiation round now, or just take this bill off pause and wait for the next scheduled run?",
+    confirmText: "Start now",
+    cancelText: "Resume on schedule",
+  });
+  const isMock = !row?.audit?.run_id;
+  if (isMock) {
+    setMockPaused(row.id, false);
+    row.attentionReason = null;
+    if (startNow) {
+      // Active immediately — chip flips to Negotiating.
+      row.lifecycle = "active";
+    } else {
+      // Off the paused list but waiting for the schedule — chip falls
+      // back to Watching until the next tick fires.
+      row.lifecycle = null;
+    }
+    if (currentNav === "bills") renderBills();
+    updateNavCounts();
+    void openBillDrawer(row);
+    return;
+  }
+  // Real audit: only the "start now" path has a backend hook today.
+  // "Resume on schedule" is a no-op until scheduling is wired up.
+  if (startNow) {
+    void resumeAgent();
+  }
+}
+
+function handleAttentionAction(action, row) {
+  const runId = row?.audit?.run_id;
+  // start / resume / retry / keep_negotiating all = "kick off the next round".
+  // approve_counter = "accept the counter, close out as resolved".
+  // For real audits this is /api/resume (or a future /api/accept-counter);
+  // for mock rows we toggle the local flag so the demo round-trips.
+  if (action === "approve_counter") {
+    if (runId) {
+      // Real backend doesn't have a dedicated accept endpoint yet — fall
+      // through to resume so the agent's next round can confirm. The user
+      // can also leave a Feedback note ("accept their counter, no further
+      // negotiation") to make it explicit.
+      void resumeAgent();
+      return;
+    }
+    setMockPaused(row.id, false);
+    row.attentionReason = null;
+    row.lifecycle = "resolved";
+    if (currentNav === "bills") renderBills();
+    updateNavCounts();
+    void openBillDrawer(row);
+    return;
+  }
+  if (action === "start" || action === "resume" || action === "retry" || action === "keep_negotiating") {
+    if (runId) {
+      void resumeAgent();
+      return;
+    }
+    setMockPaused(row.id, false);
+    row.attentionReason = null;
+    row.lifecycle = "active";
+    if (currentNav === "bills") renderBills();
+    updateNavCounts();
+    void openBillDrawer(row);
+  }
+}
+
+function renderDrawerFeedback(row) {
+  return `
+    <div class="dfb-tab">
+      <div class="dfb-head">
+        <div class="eyebrow">Feedback for next round</div>
+        <div class="dfb-sub">The agent's paused on this bill. Tell it what to change — it'll apply your notes on resume.</div>
+      </div>
+      <div class="qa-log" id="drawer-feedback-log"></div>
+      <form class="qa-form qa-form-chat" id="drawer-feedback-form">
+        <input type="text" id="drawer-feedback-input" placeholder="e.g. 'Stop being aggressive' · 'Only email, no calls'" autocomplete="off" />
+        <button type="submit" class="qa-send" aria-label="Send feedback">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+        </button>
+      </form>
+    </div>`;
+}
+
+function wireDrawerFeedback(row) {
+  if (!row) return;
+  const form = $("#drawer-feedback-form");
+  if (form) {
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      sendFeedback();
+    });
+  }
+  void loadFeedback(row);
+}
+
+// Per-state synthetic timeline used when an attention row has no real
+// negotiation report. Mirrors the cadence of a real audit (intake →
+// extract → findings → plan → action) tailored to the reason.
+function buildSyntheticAttentionTimeline(row) {
+  const now = Date.now();
+  const balance = row.balance ?? 0;
+  const events = [
+    {
+      ts: now - 4 * 3600 * 1000,
+      headline: `Bill received from ${row.vendor}`,
+      detail: `Amount ${fmt$(balance)}${row.rate ?? ""}.`,
+      channel: "intake",
+      actor: "You",
+      tone: "ink",
+    },
+    {
+      ts: now - 3.5 * 3600 * 1000,
+      headline: `Parsed bill & supporting docs`,
+      detail: `Bonsai's analyzer pulled the line items, totals, and provider details from the document.`,
+      channel: "claude",
+      actor: "Bonsai · analyzer",
+      tone: "ink",
+    },
+    {
+      ts: now - 3 * 3600 * 1000,
+      headline: `Audited for billing errors`,
+      detail: `Found 3 high-confidence and 2 medium-confidence findings worth disputing.`,
+      channel: "finding",
+      actor: "Bonsai · analyzer",
+      tone: "amber",
+    },
+    {
+      ts: now - 2.5 * 3600 * 1000,
+      headline: `Plan built`,
+      detail: `Drafted appeal letter + chosen channels (email → call escalation).`,
+      channel: "claude",
+      actor: "Bonsai · planner",
+      tone: "ink",
+    },
+  ];
+  const reasonKey = row.attentionReason?.key;
+  if (reasonKey === "awaiting") {
+    events.push({
+      ts: now - 30 * 60 * 1000,
+      headline: `Waiting for your approval`,
+      detail: `Open the Needs attention tab to review the plan and approve.`,
+      channel: "watch",
+      actor: "Bonsai",
+      tone: "amber",
+    });
+  } else if (reasonKey === "escalated") {
+    events.push({
+      ts: now - 90 * 60 * 1000,
+      headline: `First round dispatched`,
+      detail: `Email sent to billing dept citing the high-confidence findings.`,
+      channel: "mail",
+      actor: "Bonsai · agent",
+      tone: "ink",
+    });
+    const c = row.counter;
+    events.push({
+      ts: now - 35 * 60 * 1000,
+      headline: c
+        ? `Provider counter-offered ${fmt$(c.counter_amount)}`
+        : `Provider counter-offered`,
+      detail: c?.notes ?? `Counter is above the agent's target — your call to accept or push back.`,
+      channel: "inbox",
+      actor: row.vendor,
+      tone: "red",
+    });
+  } else if (reasonKey === "paused") {
+    events.push({
+      ts: now - 80 * 60 * 1000,
+      headline: `Negotiation in progress`,
+      detail: `Email round sent to ${row.vendor}, awaiting reply.`,
+      channel: "mail",
+      actor: "Bonsai · agent",
+      tone: "ink",
+    });
+    events.push({
+      ts: now - 25 * 60 * 1000,
+      headline: `You paused the agent`,
+      detail: `Bonsai is holding off on the next round until you resume.`,
+      channel: "system",
+      actor: "You",
+      tone: "amber",
+    });
+  } else if (reasonKey === "error") {
+    events.push({
+      ts: now - 90 * 60 * 1000,
+      headline: `First round dispatched`,
+      detail: `Email sent to billing dept.`,
+      channel: "mail",
+      actor: "Bonsai · agent",
+      tone: "ink",
+    });
+    events.push({
+      ts: now - 22 * 60 * 1000,
+      headline: `Round failed`,
+      detail: `Voice call simulator timed out reaching the provider line. Retrying usually clears it.`,
+      channel: "system",
+      actor: "Bonsai · agent",
+      tone: "red",
+    });
+  }
+  return events.sort((a, b) => a.ts - b.ts);
 }
 
 /* Build a sequenced activity timeline from the full report. */
 function buildTimelineEvents(row, report) {
   const events = [];
+  // Synthetic timeline for attention test rows that don't have a real
+  // backend report yet — the user still needs to see *something* coherent
+  // so they understand what landed them in this state.
+  if (!report && row.attentionReason) {
+    return buildSyntheticAttentionTimeline(row);
+  }
   if (!report && row.kind !== "audit") {
     // Mock recurring bill — synthesize a simple watchlist timeline
     events.push({
