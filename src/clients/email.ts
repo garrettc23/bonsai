@@ -23,11 +23,13 @@ export interface OutboundEmail {
   attachments?: Array<{ filename: string; content: string }>;
   /** Set when this is a reply; threading headers. */
   in_reply_to?: string;
-  /** Blind-copy recipients. Used to keep the patient in the loop on every
-   * outbound the agent sends on their behalf — Resend is sending from a
-   * Bonsai-controlled domain, so without a BCC the patient never sees the
-   * thread in their own inbox. */
-  bcc?: string[];
+  /** CC recipients — typically the user's own email. Visible to the
+   * billing office on purpose: shows there's a real account holder on
+   * the line (legitimacy + deliverability) and lets the rep Reply-All so
+   * the user sees replies natively. The user-bypass case (rep clicks
+   * Reply not Reply-All) is covered by a backstop forward in the inbound
+   * webhook. */
+  cc?: string[];
 }
 
 export interface SentEmail {
@@ -39,7 +41,7 @@ export interface SentEmail {
   body_markdown: string;
   thread_id: string;
   in_reply_to?: string;
-  bcc?: string[];
+  cc?: string[];
 }
 
 export interface InboundEmail {

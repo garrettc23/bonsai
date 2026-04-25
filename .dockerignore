@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+out
+node_modules
+test
+scripts
+*.md
+!README.md
+.context
+.claude

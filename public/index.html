@@ -31,7 +31,7 @@
           </button>
           <button class="nav-item" data-nav="offers">
             <span class="nav-ic" data-icon="sparkle"></span><span>Comparison</span>
-            <span class="nav-count alert" id="nav-offers-count" hidden>0</span>
+            <span class="nav-tbd">TBD</span>
           </button>
           <button class="nav-item" data-nav="profile">
             <span class="nav-ic" data-icon="user"></span><span>Profile</span>
@@ -189,6 +189,31 @@
               </section>
             </div>
 
+            <!-- Provider-contact card: shows where Bonsai will send the appeal,
+                 surfaced as soon as the background lookup lands. Editable. -->
+            <section class="contact-card card" id="contact-card" hidden>
+              <div class="contact-head">
+                <div>
+                  <div class="eyebrow">Where Bonsai will reach out</div>
+                  <div class="contact-title" id="contact-title">Looking up the billing contact…</div>
+                </div>
+              </div>
+              <div class="contact-body" id="contact-body">
+                <div class="contact-row">
+                  <label>Email <input type="email" id="contact-email" placeholder="billing@example.com" /></label>
+                  <label>Phone <input type="text" id="contact-phone" placeholder="+1-415-555-0132" /></label>
+                </div>
+                <div class="contact-foot">
+                  <div class="contact-notes" id="contact-notes"></div>
+                  <div class="contact-actions">
+                    <button type="button" class="contact-retry" id="contact-retry">Re-search</button>
+                    <button type="button" class="contact-save" id="contact-save">Save</button>
+                  </div>
+                </div>
+                <div class="contact-sources" id="contact-sources"></div>
+              </div>
+            </section>
+
             <!-- Plan customization + ask: a single chat panel below. -->
             <section class="review-chat card">
               <div class="review-chat-head">
@@ -208,10 +233,6 @@
 
             <div class="review-actions">
               <button id="review-approve-btn" class="btn btn-primary">Accept &amp; start the plan</button>
-              <div class="review-bcc-hint" id="review-bcc-hint" hidden>
-                <span class="bcc-dot" aria-hidden="true">●</span>
-                <span>You'll be BCC'd on every email Bonsai sends, so the thread lands in your inbox too.</span>
-              </div>
             </div>
           </div>
 
@@ -347,7 +368,7 @@
 
           <!-- OFFERS -->
           <div class="view view-offers hidden" id="view-offers">
-            <div class="offers-banner">
+            <div class="offers-banner" id="offers-banner" hidden>
               <div class="banner-lead">
                 <div class="eyebrow eyebrow-inverted">Annual savings if you switch to all recommended</div>
                 <div class="banner-amount" id="banner-amount">—</div>
@@ -389,6 +410,7 @@
         </button>
       </header>
       <div class="drawer-stats" id="drawer-stats"></div>
+      <div id="drawer-outcome-banner" hidden></div>
       <div class="drawer-controls">
         <label class="drawer-control">
           <span class="eyebrow">Negotiation Frequency</span>

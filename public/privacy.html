@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bonsai — Privacy Policy</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body class="legal-page">
+    <main class="legal-wrap">
+      <a href="/" class="legal-brand brand">
+        <span class="brand-mark" aria-hidden="true">
+          <img src="/assets/bonsai-logo.svg" alt="" />
+        </span>
+        <span class="wordmark">
+          <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+        </span>
+      </a>
+      <div class="legal-eyebrow">Privacy Policy</div>
+      <h1 class="legal-title">What we keep, why, and for how long.</h1>
+      <p class="legal-lede">
+        Bonsai stores the minimum amount of data needed to negotiate your
+        bills on your behalf. Your data is yours — you can export or delete
+        it at any time from Settings → Account.
+      </p>
+
+      <h2>1. What we store</h2>
+      <ul>
+        <li><strong>Account:</strong> your email address and a hashed password (argon2id — we never see the plaintext).</li>
+        <li><strong>Bills you upload:</strong> the original PDFs/images and the structured audit Bonsai derives from them.</li>
+        <li><strong>Negotiation history:</strong> the email threads and call transcripts the agent generates with providers, plus any feedback you give the agent.</li>
+        <li><strong>Settings:</strong> tone, channels, savings floor, notification preferences.</li>
+      </ul>
+
+      <h2>2. What we don't store</h2>
+      <p>
+        We don't sell your data, share it with advertisers, or use it to
+        train external models. Bonsai uses the Anthropic Claude API for
+        agent reasoning; per Anthropic's terms, API inputs and outputs are
+        not used to train their models.
+      </p>
+
+      <h2>3. Subprocessors</h2>
+      <p>
+        Bonsai uses these vendors to deliver the service:
+      </p>
+      <ul>
+        <li><strong>Anthropic</strong> — Claude API for the auditing and negotiation agents.</li>
+        <li><strong>Resend</strong> — transactional and negotiation email delivery.</li>
+        <li><strong>ElevenLabs</strong> — voice synthesis for outbound calls.</li>
+      </ul>
+      <p>
+        Each vendor receives only the data needed to perform its task
+        (e.g. Resend sees the email body and recipient; it does not see
+        your bill PDFs).
+      </p>
+
+      <h2>4. Identifying you to companies</h2>
+      <p>
+        When the agent contacts a billing department, it identifies itself
+        as negotiating on your behalf and uses the account-holder name on
+        the bill to reach the right account. It does not impersonate you
+        or pretend to be you. You're CC'd on every outbound and see a
+        transcript of every call.
+      </p>
+
+      <h2>5. Retention</h2>
+      <p>
+        We retain your data for as long as your account is active. When you
+        delete your account, all associated bills, transcripts, threads,
+        and settings are permanently deleted within 30 days. Aggregate,
+        non-identifying logs (e.g. "X negotiations succeeded this month")
+        may be retained.
+      </p>
+
+      <h2>6. Your rights</h2>
+      <p>
+        You can export everything Bonsai has stored for your account from
+        Settings → Account → Export, and delete your account from the same
+        screen. If you have additional rights under your local jurisdiction
+        (GDPR, CCPA), reply to any Bonsai email and we will honor them.
+      </p>
+
+      <h2>7. Security</h2>
+      <p>
+        Passwords are hashed with argon2id. Sessions are HTTP-only,
+        same-site cookies. Inbound webhooks (Resend reply mailbox) are
+        verified via svix HMAC signatures. Bonsai is in active development
+        — if you spot a security issue, tell us first; we'll credit you and
+        fix it before publishing.
+      </p>
+
+      <h2>8. Changes</h2>
+      <p>
+        If we materially change this policy we'll notify you by email
+        before the change takes effect.
+      </p>
+
+      <p class="legal-foot">
+        <a href="/">← Back to Bonsai</a>
+      </p>
+    </main>
+  </body>
+</html>

@@ -54,7 +54,7 @@ const client = new MockEmailClient();
 const { thread_id, sent, state: initialState } = await startNegotiation({
   analyzer,
   client,
-  patient_email: PATIENT_EMAIL,
+  user_email: PATIENT_EMAIL,
   provider_email: PROVIDER_EMAIL,
 });
 
@@ -79,7 +79,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     persona,
     analyzer,
     provider_email: PROVIDER_EMAIL,
-    patient_email: PATIENT_EMAIL,
+    user_email: PATIENT_EMAIL,
     reply_to_subject: latestSubject,
     latest_outbound_body: latestOutbound?.body_markdown ?? "",
     client,

@@ -29,7 +29,7 @@ import { newId } from "./clients/email.ts";
 import type { AgentTone } from "./lib/user-settings.ts";
 import { toneGuidance } from "./lib/feedback-parser.ts";
 
-const MODEL = "claude-sonnet-4-5";
+const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 2048;
 const MAX_TURNS_PER_STEP = 4;
 
@@ -41,7 +41,7 @@ export type NegotiationOutcome =
 export interface NegotiationState {
   thread_id: string;
   analyzer: AnalyzerResult;
-  patient_email: string;
+  user_email: string;
   provider_email: string;
   /** Lowest final amount the patient is willing to pay for this claim. */
   final_acceptable_floor: number;
@@ -58,10 +58,12 @@ export interface NegotiationState {
    * Injected into the analyzer context so a later-channel agent knows the
    * history (e.g., "email got partial concession on line A, refused line B"). */
   prior_attempts_summary?: string;
-  /** BCC recipients copied on every outbound email the agent sends. Used to
-   * keep the patient in the loop when Resend is sending from a Bonsai-
-   * controlled domain rather than the patient's own inbox. */
-  bcc?: string[];
+  /** CC recipients on every outbound email the agent sends — typically the
+   * user's own email. Visible by design: shows the rep there's a real
+   * account holder on the line and lets them Reply-All to keep the user
+   * in sync. The webhook backstops Reply-by-itself by forwarding rep
+   * replies. */
+  cc?: string[];
 }
 
 function buildSystemPrompt(state: Pick<NegotiationState, "user_directives" | "agent_tone">): string {
@@ -235,7 +237,7 @@ ${priorBlock}`;
 export interface StartOpts {
   analyzer: AnalyzerResult;
   client: EmailClient;
-  patient_email: string;
+  user_email: string;
   provider_email: string;
   final_acceptable_floor?: number; // defaults to eob patient responsibility
   user_directives?: string;
@@ -243,9 +245,9 @@ export interface StartOpts {
   /** Compact summary of prior negotiation attempts on other channels.
    * Stored on state so every step's analyzer context includes it. */
   prior_attempts_summary?: string;
-  /** BCC recipients (typically the patient's email) copied on every
-   * outbound. Persisted on NegotiationState so follow-ups reuse the list. */
-  bcc?: string[];
+  /** CC recipients (typically the user's email) copied on every outbound.
+   * Persisted on NegotiationState so follow-ups reuse the list. */
+  cc?: string[];
 }
 
 export interface StartResult {
@@ -260,25 +262,25 @@ export interface StartResult {
  * via step() when inbound arrives (or run the simulator which generates one).
  */
 export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
-  const { analyzer, client, patient_email, provider_email } = opts;
+  const { analyzer, client, user_email, provider_email } = opts;
   const floor = opts.final_acceptable_floor ?? analyzer.metadata.eob_patient_responsibility ?? 0;
   const thread_id = newId("thread");
   const letter = generateAppealLetter(analyzer);
 
   const msg: OutboundEmail = {
     to: provider_email,
-    from: patient_email,
+    from: user_email,
     subject: letter.subject,
     body_markdown: letter.markdown,
     thread_id,
-    bcc: opts.bcc,
+    cc: opts.cc,
   };
   const sent = await client.send(msg);
 
   const state: NegotiationState = {
     thread_id,
     analyzer,
-    patient_email,
+    user_email,
     provider_email,
     final_acceptable_floor: floor,
     last_seen_inbound_ts: new Date(0).toISOString(),
@@ -286,7 +288,7 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
     prior_attempts_summary: opts.prior_attempts_summary,
-    bcc: opts.bcc,
+    cc: opts.cc,
   };
   return { thread_id, sent, state };
 }
@@ -362,12 +364,12 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
         const lastInbound = inboundSinceLast[inboundSinceLast.length - 1];
         const out: OutboundEmail = {
           to: state.provider_email,
-          from: state.patient_email,
+          from: state.user_email,
           subject: input.subject,
           body_markdown: input.body_markdown,
           thread_id: state.thread_id,
           in_reply_to: lastInbound?.message_id,
-          bcc: state.bcc,
+          cc: state.cc,
         };
         const sent = await client.send(out);
         toolResults.push({
@@ -434,21 +436,25 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
 
 /**
  * Save/load NegotiationState. We keep this next to the thread file for easy
- * inspection: out/threads/{thread_id}.state.json
+ * inspection: out/users/<user_id>/threads/{thread_id}.state.json
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = join(__dirname, "..", "out", "threads");
+import { join } from "node:path";
+import { currentUserPaths } from "./lib/user-paths.ts";
 
-export function saveNegotiationState(state: NegotiationState): void {
-  mkdirSync(STATE_DIR, { recursive: true });
-  writeFileSync(join(STATE_DIR, `${state.thread_id}.state.json`), JSON.stringify(state, null, 2), "utf8");
+function stateDir(): string {
+  return currentUserPaths().threadsDir;
 }
 
-export function loadNegotiationState(thread_id: string): NegotiationState | null {
-  const path = join(STATE_DIR, `${thread_id}.state.json`);
+export function saveNegotiationState(state: NegotiationState, threadsDir?: string): void {
+  const dir = threadsDir ?? stateDir();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${state.thread_id}.state.json`), JSON.stringify(state, null, 2), "utf8");
+}
+
+export function loadNegotiationState(thread_id: string, threadsDir?: string): NegotiationState | null {
+  const dir = threadsDir ?? stateDir();
+  const path = join(dir, `${thread_id}.state.json`);
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, "utf8"));
 }

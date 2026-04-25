@@ -32,7 +32,6 @@ import { groundTruthFromText } from "./lib/ground-truth.ts";
 import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
 import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
-import type { SmsPersona } from "./simulate-sms-reply.ts";
 import { BillContact, BillKind, hasContactChannel, type BillContact as BillContactT } from "./types.ts";
 import {
   runOfferHunt,
@@ -42,12 +41,41 @@ import {
   type Baseline,
   type OfferCategory,
 } from "./offer-agent.ts";
+import {
+  AuthError,
+  clearSessionCookieHeader,
+  consumePasswordResetToken,
+  createPasswordResetToken,
+  createSession,
+  createUser,
+  deleteAllSessionsForUser,
+  deleteSession,
+  deleteUser,
+  getUserByEmail,
+  getUserById,
+  readSessionCookie,
+  requireUser,
+  setSessionCookieHeader,
+  verifyCredentials,
+  type User,
+} from "./lib/auth.ts";
+import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
+import { withUserContext } from "./lib/user-context.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const FIXTURES_DIR = join(ROOT, "fixtures");
-const UPLOAD_DIR = join(ROOT, "out", "uploads");
 const PUBLIC_DIR = join(ROOT, "public");
+
+function uploadDir(): string {
+  return currentUserPaths().uploadsDir;
+}
+function pendingDir(): string {
+  return currentUserPaths().pendingDir;
+}
+function userOutDir(): string {
+  return currentUserPaths().baseDir;
+}
 
 function extensionOf(filename: string): string | null {
   const m = filename.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -81,7 +109,6 @@ async function handleRunFixture(req: Request): Promise<Response> {
     channel?: Channel;
     email_persona?: EmailPersona;
     voice_persona?: VoicePersona;
-    sms_persona?: SmsPersona;
   };
   const billName = body.fixture ?? "bill-001";
   const eobName = body.eob ?? billName.replace(/^bill-/, "eob-");
@@ -97,11 +124,11 @@ async function handleRunFixture(req: Request): Promise<Response> {
     channel: body.channel ?? "auto",
     email_persona: body.email_persona,
     voice_persona: body.voice_persona,
-    sms_persona: body.sms_persona,
   });
-  mkdirSync(join(ROOT, "out"), { recursive: true });
-  writeFileSync(join(ROOT, "out", `report-${billName}.json`), JSON.stringify(report, null, 2));
-  writeFileSync(join(ROOT, "out", `appeal-${billName}.md`), report.appeal.markdown);
+  const paths = currentUserPaths();
+  mkdirSync(paths.reportsDir, { recursive: true });
+  writeFileSync(paths.reportPath(billName), JSON.stringify(report, null, 2));
+  writeFileSync(paths.appealPath(billName), report.appeal.markdown);
   return Response.json(report);
 }
 
@@ -116,8 +143,6 @@ async function handleRunFixture(req: Request): Promise<Response> {
 // State is persisted to disk under out/pending/*.json keyed by run_id so that
 // a page refresh between steps doesn't drop progress.
 
-const PENDING_DIR = join(ROOT, "out", "pending");
-
 interface PendingRun {
   run_id: string;
   fixture_name: string; // the name used for final report-<name>.json output
@@ -129,7 +154,6 @@ interface PendingRun {
   channel: Channel;
   email_persona?: EmailPersona;
   voice_persona?: VoicePersona;
-  sms_persona?: SmsPersona;
   partial_report: BonsaiReport;
   plan_edits?: string; // accumulated natural-language directives for negotiation agents
   plan_chat?: Array<{ role: "user" | "assistant"; body: string; ts: string }>;
@@ -153,7 +177,7 @@ interface PendingRun {
    */
   feedback?: Array<{ role: "user" | "assistant"; body: string; ts: string }>;
   /** Per-run channel gating derived from feedback + tune config. */
-  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  channels_enabled?: { email?: boolean; voice?: boolean };
   /** Per-run tone override derived from feedback + tune config. */
   agent_tone?: "polite" | "firm" | "aggressive";
   /** Per-run free-form directives from parsed feedback. */
@@ -163,10 +187,49 @@ interface PendingRun {
   /**
    * User-entered contact info for the billing/support department. The agent
    * launch button is gated on hasContactChannel(contact) — at least one of
-   * support_email or support_phone must be present.
+   * support_email or support_phone must be present. Populated by the user
+   * via the drawer Contact tab; if `resolved_contact` below has populated a
+   * suggestion from web search, the UI prefills these fields.
    */
   contact?: BillContactT;
+  /**
+   * Provider-contact resolution status. Set to "pending" when audit finishes
+   * and the background lookup is in flight; populated with the result when
+   * done; "failed" if the lookup threw. The user can override the resolved
+   * contact via /api/contact/override before approve.
+   */
+  contact_status?: "pending" | "resolved" | "failed";
+  contact_error?: string;
+  /**
+   * Web-search-grounded provider contact suggestion (from
+   * `src/lib/provider-contact.ts`). Editable by the user before they hit
+   * Approve. The launch gate continues to read from `contact` above —
+   * `resolved_contact` is only the prefill source.
+   */
+  resolved_contact?: {
+    email: string | null;
+    phone: string | null;
+    source_urls: string[];
+    confidence: "high" | "medium" | "low";
+    notes: string;
+    /** True when the user manually edited the contact (skip future re-resolution). */
+    user_edited?: boolean;
+    resolved_at: number;
+  };
+  /**
+   * Outcome verification. After a negotiation resolves, we ask the user
+   * "did your next bill match?" — once they confirm, we have ground truth
+   * for whether the agreed amount actually showed up. Until they verify,
+   * resolved bills older than VERIFY_OUTCOME_AFTER_DAYS surface in the
+   * Bills attention bucket as "verify_outcome".
+   */
+  outcome_verified?: "yes" | "no" | "partial";
+  outcome_notes?: string;
+  outcome_verified_at?: number;
 }
+
+/** Days after a resolved negotiation before we nudge the user to verify. */
+const VERIFY_OUTCOME_AFTER_DAYS = 21;
 
 const MAX_BILL_FILES = 10;
 
@@ -189,11 +252,11 @@ function newRunId(): string {
 
 function pendingPath(runId: string): string {
   const safe = runId.replace(/[^a-zA-Z0-9_-]/g, "");
-  return join(PENDING_DIR, `${safe}.json`);
+  return join(pendingDir(), `${safe}.json`);
 }
 
 function savePending(run: PendingRun): void {
-  mkdirSync(PENDING_DIR, { recursive: true });
+  mkdirSync(pendingDir(), { recursive: true });
   writeFileSync(pendingPath(run.run_id), JSON.stringify(run, null, 2));
 }
 
@@ -217,7 +280,6 @@ async function handleAudit(req: Request): Promise<Response> {
   let channel: Channel = "persistent";
   let email_persona: EmailPersona | undefined;
   let voice_persona: VoicePersona | undefined;
-  let sms_persona: SmsPersona | undefined;
   let analyzeInput: AnalyzeInput | undefined;
   let multipartMeta:
     | { bill_paths: string[]; bill_names: string[]; eob_name?: string }
@@ -230,7 +292,6 @@ async function handleAudit(req: Request): Promise<Response> {
       channel?: Channel;
       email_persona?: EmailPersona;
       voice_persona?: VoicePersona;
-      sms_persona?: SmsPersona;
     };
     fixtureName = body.fixture ?? "bill-001";
     const eobName = body.eob ?? fixtureName.replace(/^bill-/, "eob-");
@@ -242,7 +303,6 @@ async function handleAudit(req: Request): Promise<Response> {
     channel = body.channel ?? "persistent";
     email_persona = body.email_persona;
     voice_persona = body.voice_persona;
-    sms_persona = body.sms_persona;
   } else {
     // multipart upload — any file types. 1–N bill pages (all treated as one
     // bill, fed to the analyzer as separate content blocks). Optional EOB.
@@ -263,7 +323,7 @@ async function handleAudit(req: Request): Promise<Response> {
         { status: 400 },
       );
     }
-    mkdirSync(UPLOAD_DIR, { recursive: true });
+    mkdirSync(uploadDir(), { recursive: true });
     const uploadId = `upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
     const billPaths: string[] = [];
@@ -271,7 +331,7 @@ async function handleAudit(req: Request): Promise<Response> {
     for (let i = 0; i < billFiles.length; i++) {
       const f = billFiles[i];
       const ext = extensionOf(f.name) ?? "bin";
-      const p = join(UPLOAD_DIR, `${uploadId}-bill-${i + 1}.${ext}`);
+      const p = join(uploadDir(), `${uploadId}-bill-${i + 1}.${ext}`);
       writeFileSync(p, new Uint8Array(await f.arrayBuffer()));
       billPaths.push(p);
       billNames.push(f.name);
@@ -283,7 +343,7 @@ async function handleAudit(req: Request): Promise<Response> {
     let eobName: string | undefined;
     if (eobFile) {
       const eobExt = extensionOf(eobFile.name) ?? "bin";
-      eobPath = join(UPLOAD_DIR, `${uploadId}-eob.${eobExt}`);
+      eobPath = join(uploadDir(), `${uploadId}-eob.${eobExt}`);
       writeFileSync(eobPath, new Uint8Array(await eobFile.arrayBuffer()));
       eobName = eobFile.name;
       eobNormalized = await normalizeBillFile(eobPath, eobFile.name);
@@ -345,7 +405,6 @@ async function handleAudit(req: Request): Promise<Response> {
     channel,
     email_persona,
     voice_persona,
-    sms_persona,
   });
 
   const billPaths = multipartMeta?.bill_paths ?? [billPath];
@@ -363,19 +422,127 @@ async function handleAudit(req: Request): Promise<Response> {
     channel,
     email_persona,
     voice_persona,
-    sms_persona,
     partial_report: partial,
     qa: [],
     created_at: Date.now(),
     status: "audited",
     // Pre-seed contact info for canonical fixtures so 'Try a sample' keeps
     // working with the contact gate enabled. Real uploads start with no
-    // contact; the user fills it in via the Contact tab.
+    // contact; the user fills it in via the Contact tab. The web-search
+    // resolver kicked off below populates `resolved_contact` as a prefill
+    // suggestion alongside this.
     contact: defaultContactForFixture(fixtureName),
+    contact_status: "pending",
   };
   savePending(run);
 
+  // Kick off the provider-contact lookup in the background. The plan-review
+  // tab polls /api/contact/:run_id and shows it as soon as it lands.
+  kickoffContactResolution(run.run_id).catch((err) => {
+    console.error(`[contact ${run.run_id}]`, err);
+  });
+
   return Response.json({ run_id: run.run_id, report: partial });
+}
+
+/**
+ * Background worker: pull the provider name + billing address off the audit
+ * report, ask Claude to look up the billing-dept email/phone via web search,
+ * and stash the result on the PendingRun. Idempotent — safe to re-call if
+ * the audit page is reloaded mid-flight.
+ */
+async function kickoffContactResolution(runId: string): Promise<void> {
+  const run = loadPending(runId);
+  if (!run) return;
+  if (run.contact_status === "resolved" && run.resolved_contact?.user_edited) return;
+  const meta = run.partial_report?.analyzer?.metadata ?? {};
+  const provider_name = (meta.provider_name ?? "").trim();
+  if (!provider_name) {
+    run.contact_status = "failed";
+    run.contact_error = "No provider name found on the bill — cannot search.";
+    savePending(run);
+    return;
+  }
+  try {
+    const { resolveProviderContact } = await import("./lib/provider-contact.ts");
+    const contact = await resolveProviderContact({
+      provider_name,
+      provider_address: meta.provider_billing_address ?? null,
+    });
+    const latest = loadPending(runId);
+    if (!latest) return;
+    if (latest.resolved_contact?.user_edited) return; // user beat us to it
+    latest.resolved_contact = {
+      email: contact.email,
+      phone: contact.phone,
+      source_urls: contact.source_urls,
+      confidence: contact.confidence,
+      notes: contact.notes,
+      resolved_at: contact.resolved_at,
+    };
+    latest.contact_status = "resolved";
+    delete latest.contact_error;
+    savePending(latest);
+  } catch (err) {
+    const latest = loadPending(runId);
+    if (!latest) return;
+    latest.contact_status = "failed";
+    latest.contact_error = (err as Error)?.message ?? String(err);
+    savePending(latest);
+  }
+}
+
+async function handleContactStatus(runId: string): Promise<Response> {
+  const run = loadPending(runId);
+  if (!run) return Response.json({ error: "Run not found" }, { status: 404 });
+  return Response.json({
+    run_id: run.run_id,
+    status: run.contact_status ?? "pending",
+    contact: run.resolved_contact ?? null,
+    error: run.contact_error ?? null,
+    provider_name: run.partial_report?.analyzer?.metadata?.provider_name ?? null,
+    provider_address: run.partial_report?.analyzer?.metadata?.provider_billing_address ?? null,
+  });
+}
+
+async function handleContactOverride(req: Request): Promise<Response> {
+  const body = (await req.json()) as { run_id?: string; email?: string | null; phone?: string | null };
+  if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found" }, { status: 404 });
+  const cleanEmail = typeof body.email === "string" ? body.email.trim() : null;
+  const cleanPhone = typeof body.phone === "string" ? body.phone.trim() : null;
+  run.resolved_contact = {
+    email: cleanEmail || null,
+    phone: cleanPhone || null,
+    source_urls: run.resolved_contact?.source_urls ?? [],
+    confidence: "high", // user-asserted
+    notes: "Manually entered by the user.",
+    user_edited: true,
+    resolved_at: Date.now(),
+  };
+  run.contact_status = "resolved";
+  delete run.contact_error;
+  savePending(run);
+  return Response.json({ ok: true, contact: run.resolved_contact });
+}
+
+async function handleContactRetry(req: Request): Promise<Response> {
+  const body = (await req.json()) as { run_id?: string };
+  if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found" }, { status: 404 });
+  run.contact_status = "pending";
+  delete run.contact_error;
+  // Drop the user_edited flag so a retry can overwrite.
+  if (run.resolved_contact) {
+    run.resolved_contact.user_edited = false;
+  }
+  savePending(run);
+  kickoffContactResolution(run.run_id).catch((err) => {
+    console.error(`[contact retry ${run.run_id}]`, err);
+  });
+  return Response.json({ ok: true, status: run.contact_status });
 }
 
 async function handleAsk(req: Request): Promise<Response> {
@@ -424,7 +591,7 @@ async function handleAsk(req: Request): Promise<Response> {
   try {
     const anthropic = new Anthropic();
     const resp = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
+      model: "claude-opus-4-7",
       max_tokens: 400,
       system,
       messages: [{ role: "user", content: userMsg }],
@@ -478,7 +645,7 @@ async function handlePlanChat(req: Request): Promise<Response> {
     "",
     "Reply via the update_plan tool call (no prose outside the tool). The tool has four fields:",
     "- chat_reply: 1-3 sentences that either answer the question OR acknowledge the plan change.",
-    "- strategy_chosen: one of email / voice / sms / persistent. Pick the channel that matches the user's intent. Default to the existing channel if the user didn't explicitly change it.",
+    "- strategy_chosen: one of email / voice / persistent. Pick the channel that matches the user's intent. Default to the existing channel if the user didn't explicitly change it.",
     "- strategy_reason: one short sentence explaining the chosen channel in light of all user input so far.",
     "- plan_edits_append: the NEW directive in this turn only (prior directives are already on file). Empty string if this turn is just Q&A.",
     "",
@@ -502,7 +669,7 @@ async function handlePlanChat(req: Request): Promise<Response> {
       required: ["chat_reply", "strategy_chosen", "strategy_reason", "plan_edits_append"],
       properties: {
         chat_reply: { type: "string", description: "1-2 sentence reply shown in the chat log." },
-        strategy_chosen: { type: "string", enum: ["email", "voice", "sms", "persistent"] },
+        strategy_chosen: { type: "string", enum: ["email", "voice", "persistent"] },
         strategy_reason: { type: "string", description: "One short sentence explaining the chosen channel." },
         plan_edits_append: { type: "string", description: "New natural-language directive to append, or empty string." },
       },
@@ -527,7 +694,7 @@ async function handlePlanChat(req: Request): Promise<Response> {
     }
     const input = toolBlock.input as {
       chat_reply: string;
-      strategy_chosen: "email" | "voice" | "sms" | "persistent";
+      strategy_chosen: "email" | "voice" | "persistent";
       strategy_reason: string;
       plan_edits_append: string;
     };
@@ -697,6 +864,24 @@ async function handleApprove(req: Request): Promise<Response> {
     );
   }
 
+  // Operator-side gate: refuse to launch unless Resend is configured at
+  // the platform level. Email delivery is operator-owned (single verified
+  // sending domain for all users), so this fails-closed when the operator
+  // hasn't set the env vars yet — better than silently running the
+  // simulator and writing a fake "resolved" outcome.
+  const resendKey = process.env.RESEND_API_KEY ?? null;
+  const resendFrom = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL ?? null;
+  if (!resendKey || !resendFrom) {
+    return Response.json(
+      {
+        error: "email_not_configured",
+        message:
+          "Bonsai isn't set up to send real email yet. The operator needs to verify a Resend sending domain and set RESEND_API_KEY + RESEND_FROM.",
+      },
+      { status: 503 },
+    );
+  }
+
   if (body.plan_edits) {
     run.plan_edits = body.plan_edits;
     run.partial_report.strategy.reason =
@@ -739,11 +924,11 @@ async function kickoffNegotiation(runId: string): Promise<void> {
   const floorFromTune =
     originalBalance > 0 ? originalBalance * (1 - tune.floor_pct / 100) : undefined;
   try {
-    // BCC the patient on every outbound so they stay in the loop. Resend is
-    // sending from a Bonsai-controlled domain (not the patient's own inbox),
-    // so without this they never see the thread that was negotiated on
-    // their behalf.
-    const bcc = profile.email ? [profile.email] : undefined;
+    // CC the user on every outbound so the rep sees a real account holder
+    // on the line (legitimacy + deliverability) and can Reply-All to keep
+    // them in sync. Backstop forward in the inbound webhook covers reps
+    // who hit just Reply.
+    const cc = profile.email ? [profile.email] : undefined;
     const full = await runNegotiationPhase(run.partial_report, {
       billPdfPath: run.bill_path,
       eobPdfPath: run.eob_path,
@@ -751,14 +936,22 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       channel: run.channel,
       email_persona: run.email_persona,
       voice_persona: run.voice_persona,
-      sms_persona: run.sms_persona,
-      patient_email: profile.email ?? undefined,
-      patient_phone: profile.phone ?? undefined,
+      user_email: profile.email ?? undefined,
+      user_phone: profile.phone ?? undefined,
+      // Provider contact precedence: user-typed contact (Contact tab) wins
+      // over the AI-resolved one, which wins over the orchestrator's
+      // placeholder. The user-set value is the only one we trust to be
+      // correct for non-synthetic providers — the AI lookup may have
+      // failed (web search hit no real source) or be stale.
+      provider_email:
+        run.contact?.support_email ?? run.resolved_contact?.email ?? undefined,
+      provider_phone:
+        run.contact?.support_phone ?? run.resolved_contact?.phone ?? undefined,
       final_acceptable_floor: run.final_acceptable_floor ?? floorFromTune,
       channels_enabled: run.channels_enabled ?? tune.channels,
       agent_tone: run.agent_tone ?? tune.tone,
       user_directives: run.user_directives,
-      bcc,
+      cc,
     });
     const latest = loadPending(runId);
     if (latest?.status === "cancelled") {
@@ -766,9 +959,10 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       // or write the completed report to disk.
       return;
     }
-    mkdirSync(join(ROOT, "out"), { recursive: true });
-    writeFileSync(join(ROOT, "out", `report-${run.fixture_name}.json`), JSON.stringify(full, null, 2));
-    writeFileSync(join(ROOT, "out", `appeal-${run.fixture_name}.md`), full.appeal.markdown);
+    const paths = currentUserPaths();
+    mkdirSync(paths.reportsDir, { recursive: true });
+    writeFileSync(paths.reportPath(run.fixture_name), JSON.stringify(full, null, 2));
+    writeFileSync(paths.appealPath(run.fixture_name), full.appeal.markdown);
     if (latest) {
       latest.partial_report = full;
       latest.status = "completed";
@@ -824,15 +1018,16 @@ async function handleDeleteBill(req: Request): Promise<Response> {
   };
 
   tryUnlink(pendingPath(run.run_id));
-  tryUnlink(join(ROOT, "out", `report-${run.fixture_name}.json`));
-  tryUnlink(join(ROOT, "out", `appeal-${run.fixture_name}.md`));
+  const userP = currentUserPaths();
+  tryUnlink(userP.reportPath(run.fixture_name));
+  tryUnlink(userP.appealPath(run.fixture_name));
   // Uploaded bill files are per-user content — clean those up too so the
   // uploads dir doesn't grow without bound. Scoped strictly to this run's
   // recorded paths; nothing else gets touched.
   for (const p of run.bill_paths ?? []) {
-    if (p.startsWith(UPLOAD_DIR)) tryUnlink(p);
+    if (p.startsWith(uploadDir())) tryUnlink(p);
   }
-  if (run.eob_path && run.eob_path.startsWith(UPLOAD_DIR)) tryUnlink(run.eob_path);
+  if (run.eob_path && run.eob_path.startsWith(uploadDir())) tryUnlink(run.eob_path);
 
   return Response.json({ ok: true, run_id: run.run_id });
 }
@@ -867,7 +1062,6 @@ async function handleResumeNegotiation(req: Request): Promise<Response> {
     const parsed = parseFeedbackDirectives(userFeedback);
     run.channels_enabled = {
       email: parsed.channels?.email ?? tune.channels.email,
-      sms: parsed.channels?.sms ?? tune.channels.sms,
       voice: parsed.channels?.voice ?? tune.channels.voice,
     };
     run.agent_tone = parsed.tone ?? tune.tone;
@@ -894,6 +1088,31 @@ async function handleGetFeedback(runId: string): Promise<Response> {
     run_id: run.run_id,
     status: run.status ?? "audited",
     feedback: run.feedback ?? [],
+  });
+}
+
+async function handleVerifyOutcome(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as
+    | { run_id?: string; verified?: "yes" | "no" | "partial"; notes?: string }
+    | null;
+  if (!body?.run_id || !body?.verified) {
+    return Response.json({ error: "Missing run_id or verified" }, { status: 400 });
+  }
+  if (!["yes", "no", "partial"].includes(body.verified)) {
+    return Response.json({ error: "Invalid verified value" }, { status: 400 });
+  }
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found" }, { status: 404 });
+  run.outcome_verified = body.verified;
+  run.outcome_verified_at = Date.now();
+  if (body.notes?.trim()) run.outcome_notes = body.notes.trim();
+  savePending(run);
+  return Response.json({
+    ok: true,
+    run_id: run.run_id,
+    outcome_verified: run.outcome_verified,
+    outcome_verified_at: run.outcome_verified_at,
+    outcome_notes: run.outcome_notes ?? null,
   });
 }
 
@@ -1049,9 +1268,9 @@ async function handleUpload(req: Request): Promise<Response> {
   if (!billFile) {
     return Response.json({ error: "Missing bill file" }, { status: 400 });
   }
-  mkdirSync(UPLOAD_DIR, { recursive: true });
+  mkdirSync(uploadDir(), { recursive: true });
   const uploadId = `upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  const billPath = join(UPLOAD_DIR, `${uploadId}-bill.pdf`);
+  const billPath = join(uploadDir(), `${uploadId}-bill.pdf`);
   writeFileSync(billPath, new Uint8Array(await billFile.arrayBuffer()));
 
   // NOTE: real user uploads won't have a markdown ground truth; the grounding
@@ -1077,7 +1296,7 @@ async function handleUpload(req: Request): Promise<Response> {
   // if neither exists, surface a clear error.
   let eobPath: string | null = null;
   if (eobFile) {
-    eobPath = join(UPLOAD_DIR, `${uploadId}-eob.pdf`);
+    eobPath = join(uploadDir(), `${uploadId}-eob.pdf`);
     writeFileSync(eobPath, new Uint8Array(await eobFile.arrayBuffer()));
   } else {
     const fixtureEobName = baseName.replace(/^bill-/, "eob-");
@@ -1115,7 +1334,7 @@ async function handleViewBill(runId: string, indexStr: string): Promise<Response
   const path = run.bill_paths[index];
   // Defense in depth: the path must live under the uploads dir or the
   // fixtures dir (fixture runs keep a reference to fixtures/<name>.pdf).
-  if (!path.startsWith(UPLOAD_DIR) && !path.startsWith(FIXTURES_DIR)) {
+  if (!path.startsWith(uploadDir()) && !path.startsWith(FIXTURES_DIR)) {
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
   if (!existsSync(path)) return Response.json({ error: "File missing on disk" }, { status: 404 });
@@ -1175,13 +1394,29 @@ async function handleListBill(runId: string): Promise<Response> {
 
 async function handleStatic(pathname: string): Promise<Response> {
   let path = pathname === "/" ? "/index.html" : pathname;
-  const fsPath = join(PUBLIC_DIR, path);
+  // Allow extensionless URLs like `/terms` to resolve to `terms.html` so we
+  // don't have to special-case static legal pages in the route table.
+  let fsPath = join(PUBLIC_DIR, path);
+  if (!existsSync(fsPath) && !path.includes(".")) {
+    const htmlPath = `${path}.html`;
+    const htmlFs = join(PUBLIC_DIR, htmlPath);
+    if (existsSync(htmlFs)) {
+      path = htmlPath;
+      fsPath = htmlFs;
+    }
+  }
   if (!existsSync(fsPath)) return new Response("Not found", { status: 404 });
   // naive path traversal guard: must start with PUBLIC_DIR
   const resolved = fsPath;
   if (!resolved.startsWith(PUBLIC_DIR)) return new Response("Forbidden", { status: 403 });
   return new Response(readFileSync(resolved), {
-    headers: { "Content-Type": contentType(path) },
+    headers: {
+      "Content-Type": contentType(path),
+      // Force re-validation on every load so iterating on app.js/app.css
+      // doesn't strand the user on a stale build. Cheap during dev; can
+      // tighten in production once we have hashed asset URLs.
+      "Cache-Control": "no-cache, must-revalidate",
+    },
   });
 }
 
@@ -1196,7 +1431,7 @@ async function handleListFixtures(): Promise<Response> {
 
 async function handleHistory(): Promise<Response> {
   const { readdirSync, statSync } = await import("node:fs");
-  const outDir = join(ROOT, "out");
+  const outDir = currentUserPaths().reportsDir;
   if (!existsSync(outDir)) return Response.json({ audits: [], letters: [] });
   const entries = readdirSync(outDir);
 
@@ -1205,11 +1440,11 @@ async function handleHistory(): Promise<Response> {
   // Start. Completed runs still have a pending file (we update status to
   // 'completed' but keep the record).
   const pendingByName = new Map<string, PendingRun>();
-  if (existsSync(PENDING_DIR)) {
-    for (const file of readdirSync(PENDING_DIR)) {
+  if (existsSync(pendingDir())) {
+    for (const file of readdirSync(pendingDir())) {
       if (!file.endsWith(".json")) continue;
       try {
-        const run = JSON.parse(readFileSync(join(PENDING_DIR, file), "utf-8")) as PendingRun;
+        const run = JSON.parse(readFileSync(join(pendingDir(), file), "utf-8")) as PendingRun;
         pendingByName.set(run.fixture_name, run);
       } catch { /* skip malformed */ }
     }
@@ -1226,6 +1461,16 @@ async function handleHistory(): Promise<Response> {
       const summary = report?.summary ?? {};
       const meta = report?.analyzer?.metadata ?? {};
       const pending = pendingByName.get(name);
+      // "Verify outcome" flag: resolved bills older than the threshold that
+      // the user hasn't confirmed match their next statement. The frontend
+      // funnels these into the Needs-attention bucket so they don't get
+      // forgotten — measuring outcomes is what makes the agent trustworthy.
+      const resolvedAt = pending?.completed_at ?? stat.mtimeMs;
+      const ageDays = (Date.now() - resolvedAt) / (1000 * 60 * 60 * 24);
+      const needsOutcomeCheck =
+        summary.outcome === "resolved" &&
+        !pending?.outcome_verified &&
+        ageDays >= VERIFY_OUTCOME_AFTER_DAYS;
       return {
         name,
         modified: stat.mtimeMs,
@@ -1245,6 +1490,10 @@ async function handleHistory(): Promise<Response> {
         contact: pending?.contact ?? null,
         can_launch: hasContactChannel(pending?.contact ?? null),
         bill_kind: (pending?.contact?.bill_kind ?? meta.bill_kind ?? "medical") as string,
+        outcome_verified: pending?.outcome_verified ?? null,
+        outcome_notes: pending?.outcome_notes ?? null,
+        outcome_verified_at: pending?.outcome_verified_at ?? null,
+        needs_outcome_check: needsOutcomeCheck,
       };
     });
 
@@ -1280,6 +1529,10 @@ async function handleHistory(): Promise<Response> {
       contact: run.contact ?? null,
       can_launch: hasContactChannel(run.contact ?? null),
       bill_kind: (run.contact?.bill_kind ?? meta.bill_kind ?? "medical") as string,
+      outcome_verified: run.outcome_verified ?? null,
+      outcome_notes: run.outcome_notes ?? null,
+      outcome_verified_at: run.outcome_verified_at ?? null,
+      needs_outcome_check: false,
     });
   }
 
@@ -1299,7 +1552,7 @@ async function handleHistory(): Promise<Response> {
 
 async function handleReceipts(): Promise<Response> {
   const { readdirSync, statSync } = await import("node:fs");
-  const outDir = join(ROOT, "out");
+  const outDir = currentUserPaths().reportsDir;
   if (!existsSync(outDir)) {
     return Response.json({ rows: [], total_saved: 0, count: 0 });
   }
@@ -1368,7 +1621,7 @@ async function handleReceipts(): Promise<Response> {
 async function handleReport(name: string): Promise<Response> {
   const safe = name.replace(/[^a-zA-Z0-9_-]/g, "");
   if (!safe || safe !== name) return Response.json({ error: "Bad name" }, { status: 400 });
-  const full = join(ROOT, "out", `report-${safe}.json`);
+  const full = currentUserPaths().reportPath(safe);
   if (!existsSync(full)) return Response.json({ error: "Not found" }, { status: 404 });
   return new Response(readFileSync(full, "utf-8"), {
     headers: { "Content-Type": "application/json; charset=utf-8" },
@@ -1378,7 +1631,7 @@ async function handleReport(name: string): Promise<Response> {
 async function handleLetter(name: string): Promise<Response> {
   const safe = name.replace(/[^a-zA-Z0-9_-]/g, "");
   if (!safe || safe !== name) return Response.json({ error: "Bad name" }, { status: 400 });
-  const full = join(ROOT, "out", `appeal-${safe}.md`);
+  const full = currentUserPaths().appealPath(safe);
   if (!existsSync(full)) return Response.json({ error: "Not found" }, { status: 404 });
   return new Response(readFileSync(full, "utf-8"), {
     headers: { "Content-Type": "text/markdown; charset=utf-8" },
@@ -1483,7 +1736,7 @@ async function handleSaveProfile(req: Request): Promise<Response> {
 
 async function handleExport(): Promise<Response> {
   const { readdirSync } = await import("node:fs");
-  const outDir = join(ROOT, "out");
+  const outDir = currentUserPaths().reportsDir;
   const dump: {
     exported_at: string;
     profile: unknown;
@@ -1506,11 +1759,11 @@ async function handleExport(): Promise<Response> {
   } catch (err) {
     console.warn("[export] settings load failed", err);
   }
-  if (existsSync(PENDING_DIR)) {
-    for (const name of readdirSync(PENDING_DIR)) {
+  if (existsSync(pendingDir())) {
+    for (const name of readdirSync(pendingDir())) {
       if (!name.endsWith(".json")) continue;
       try {
-        dump.bills.push(JSON.parse(readFileSync(join(PENDING_DIR, name), "utf-8")));
+        dump.bills.push(JSON.parse(readFileSync(join(pendingDir(), name), "utf-8")));
       } catch (err) {
         console.warn("[export] bad pending file", name, err);
       }
@@ -1539,7 +1792,7 @@ async function handleExport(): Promise<Response> {
   });
 }
 
-async function handleDeleteAccount(req: Request): Promise<Response> {
+async function handleDeleteAccount(req: Request, user: User): Promise<Response> {
   // Server-side confirmation guard. Without this, any browser tab on localhost
   // could drive-by wipe the user's data via a single fetch. The body is the
   // only thing that distinguishes an intentional delete from a CSRF.
@@ -1552,58 +1805,31 @@ async function handleDeleteAccount(req: Request): Promise<Response> {
   if (body.confirm !== "DELETE") {
     return Response.json({ error: "Confirmation required" }, { status: 400 });
   }
-  const { readdirSync, rmSync } = await import("node:fs");
-  const outDir = join(ROOT, "out");
-  const tryUnlink = (p: string): void => {
-    if (!existsSync(p)) return;
+  const { rmSync } = await import("node:fs");
+  // Nuke the entire per-user tree — single dir, no cherry-picking required.
+  const baseDir = userOutDir();
+  if (existsSync(baseDir)) {
     try {
-      unlinkSync(p);
+      rmSync(baseDir, { recursive: true, force: true });
     } catch (err) {
-      console.warn("[delete-account] unlink failed", p, err);
-    }
-  };
-  const tryRmDir = (p: string): void => {
-    if (!existsSync(p)) return;
-    try {
-      rmSync(p, { recursive: true, force: true });
-    } catch (err) {
-      console.warn("[delete-account] rm dir failed", p, err);
-    }
-  };
-  // Pending runs
-  if (existsSync(PENDING_DIR)) {
-    for (const name of readdirSync(PENDING_DIR)) {
-      if (!name.endsWith(".json")) continue;
-      tryUnlink(join(PENDING_DIR, name));
+      console.warn("[delete-account] rm user tree failed", baseDir, err);
     }
   }
-  // Reports + appeals
-  if (existsSync(outDir)) {
-    for (const name of readdirSync(outDir)) {
-      if (
-        (name.startsWith("report-") && name.endsWith(".json")) ||
-        (name.startsWith("appeal-") && name.endsWith(".md"))
-      ) {
-        tryUnlink(join(outDir, name));
-      }
-    }
-  }
-  // Per-channel transcript state directories. The modal promises to wipe
-  // "every negotiation transcript" — these are where transcripts live.
-  tryRmDir(join(outDir, "threads"));
-  tryRmDir(join(outDir, "sms-threads"));
-  tryRmDir(join(outDir, "offers"));
-  // User settings (profile + tune)
-  tryUnlink(join(outDir, "user-settings.json"));
-  // Uploaded bill files — only the directory we own.
-  tryRmDir(UPLOAD_DIR);
-  return Response.json({ ok: true });
+  // Drop the user row + all their sessions from the auth db.
+  deleteAllSessionsForUser(user.id);
+  deleteUser(user.id);
+  return new Response(JSON.stringify({ ok: true }), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Set-Cookie": clearSessionCookieHeader(),
+    },
+  });
 }
 
 async function handleSaveTune(req: Request): Promise<Response> {
   const body = (await req.json()) as {
     tone?: "polite" | "firm" | "aggressive";
-    channels?: { email?: boolean; sms?: boolean; voice?: boolean };
+    channels?: { email?: boolean; voice?: boolean };
     floor_pct?: number;
     email_digest?: boolean;
     mobile_alerts?: boolean;
@@ -1662,40 +1888,20 @@ async function handleSettings(): Promise<Response> {
   return Response.json({
     profile,
     tune,
+    // Operator-managed services (Anthropic Claude + Resend email) live in
+    // the host's env vars now — every user shares the same operator-paid
+    // analysis + the same verified sending domain. Hidden from the user
+    // because there's nothing for them to configure. Voice (ElevenLabs)
+    // stays per-user since it's optional and per-account.
     integrations: [
-      {
-        key: "anthropic",
-        label: "Anthropic Claude",
-        status: anthropicConnected ? "connected" : "missing",
-        detail: anthropicConnected
-          ? "Sonnet 4.5 powering analyzer + negotiation loops."
-          : "Paste an API key from console.anthropic.com. Required for every Claude call.",
-        required: true,
-        fields: [
-          { name: "anthropic_api_key", label: "API key", kind: "secret", last4: last4(eff.anthropic_api_key), from_user: !!stored.anthropic_api_key },
-        ],
-      },
-      {
-        key: "resend",
-        label: "Resend (email)",
-        status: resendConnected ? "connected" : "missing",
-        detail: resendConnected
-          ? `Real outbound email from ${eff.resend_from ?? "(sender unset)"}. Inbound via simulator until a webhook is wired.`
-          : "Required to send real negotiation email. Until connected, email flows fall back to the in-memory simulator.",
-        required: true,
-        fields: [
-          { name: "resend_api_key", label: "API key", kind: "secret", last4: last4(eff.resend_api_key), from_user: !!stored.resend_api_key },
-          { name: "resend_from", label: "From address", kind: "text", value: eff.resend_from ?? "", placeholder: "Bonsai <appeals@yourdomain.com>", from_user: !!stored.resend_from },
-        ],
-      },
       {
         key: "elevenlabs",
         label: "ElevenLabs (call)",
         status: elevenConnected ? "connected" : "missing",
         detail: elevenConnected
           ? `Agent ID ${eff.elevenlabs_agent_id ?? "(unset — create via client.createAgent())"}.`
-          : "Required to place real negotiation calls. Until connected, voice flows run the dual-Claude simulator.",
-        required: true,
+          : "Optional — connects voice negotiation. Until connected, voice flows run the dual-Claude simulator.",
+        required: false,
         fields: [
           { name: "elevenlabs_api_key", label: "API key", kind: "secret", last4: last4(eff.elevenlabs_api_key), from_user: !!stored.elevenlabs_api_key },
           { name: "elevenlabs_agent_id", label: "Agent ID", kind: "text", value: eff.elevenlabs_agent_id ?? "", placeholder: "agent_xxxxxxxxxxxx", from_user: !!stored.elevenlabs_agent_id },
@@ -1703,6 +1909,13 @@ async function handleSettings(): Promise<Response> {
         ],
       },
     ],
+    // Status of the operator-managed services, surfaced read-only so the
+    // dashboard can show "Email delivery: live" without giving the user a
+    // form to fill in.
+    platform: {
+      claude_ready: anthropicConnected,
+      email_ready: resendConnected,
+    },
     fixtures: {
       count: (await import("node:fs")).readdirSync(FIXTURES_DIR)
         .filter((f) => f.startsWith("bill-") && f.endsWith(".pdf")).length,
@@ -1731,30 +1944,13 @@ async function handleSaveIntegrations(req: Request): Promise<Response> {
   return Response.json({ ok: true, integrations: getIntegrationsConfig() });
 }
 
-// Push any integration credentials the user has saved through the UI into
-// process.env before the server starts accepting requests — so the very
-// first Claude/Resend/ElevenLabs client built inside any request handler
-// sees them without needing a restart loop.
-try {
-  const { applyIntegrationsToEnv } = await import("./lib/user-settings.ts");
-  applyIntegrationsToEnv();
-} catch (err) {
-  console.warn("[integrations] could not apply stored credentials:", (err as Error).message);
-}
+// Settings-stored integration credentials are now per-user. They get
+// pushed to process.env when the active user touches the settings page
+// (see setIntegrationsConfig → applyIntegrationsToEnv). For a process-
+// global default, set them in `.env` — that's what operators use to seed
+// every fresh account on startup.
 
 const PORT = Number(process.env.PORT ?? 3333);
-
-// Seed pre-shipped receipts on cold start so the overview dashboard isn't
-// empty for first-time / fresh-clone demos. Idempotent.
-try {
-  const { seedReceipts } = await import("./seed-receipts.ts");
-  const { copied } = seedReceipts();
-  if (copied.length > 0) {
-    console.log(`[seed-receipts] copied ${copied.length} fixture(s): ${copied.join(", ")}`);
-  }
-} catch (err) {
-  console.warn("[seed-receipts] could not seed receipts:", (err as Error).message);
-}
 
 // The sample-bill flow reads fixtures/<name>.pdf, but those PDFs are
 // .gitignored build artifacts generated from fixtures/*.md by
@@ -1775,60 +1971,330 @@ try {
   );
 }
 
+// ─── Auth endpoints (unauthenticated) ─────────────────────────────
+function userPublic(user: User): {
+  id: string;
+  email: string;
+  accepted_terms_at: number | null;
+} {
+  return {
+    id: user.id,
+    email: user.email,
+    accepted_terms_at: user.accepted_terms_at,
+  };
+}
+
+async function handleSignup(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as
+    | { email?: string; password?: string; accepted_terms?: boolean }
+    | null;
+  if (!body?.email || !body?.password) {
+    return Response.json({ error: "Missing email or password" }, { status: 400 });
+  }
+  try {
+    const user = await createUser(body.email, body.password, {
+      acceptedTerms: !!body.accepted_terms,
+    });
+    const session = createSession(user.id);
+    ensureUserDirs(userPaths(user.id));
+    // Seed the profile email with the account email so the agent's CC +
+    // inbound-forward features fire for day-one users without them having
+    // to find the Profile tab. Wrapped in withUserContext because
+    // setProfileConfig resolves the per-user settings file via the ALS
+    // store. User can still overwrite it in Settings → Profile later.
+    await withUserContext(user, async () => {
+      const { setProfileConfig } = await import("./lib/user-settings.ts");
+      setProfileConfig({ email: user.email });
+    });
+    return new Response(JSON.stringify({ user: userPublic(user) }), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Set-Cookie": setSessionCookieHeader(session.id),
+      },
+    });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return Response.json({ error: err.message, code: err.code }, { status: 400 });
+    }
+    throw err;
+  }
+}
+
+async function handleLogin(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { email?: string; password?: string } | null;
+  if (!body?.email || !body?.password) {
+    return Response.json({ error: "Missing email or password" }, { status: 400 });
+  }
+  try {
+    const user = await verifyCredentials(body.email, body.password);
+    const session = createSession(user.id);
+    ensureUserDirs(userPaths(user.id));
+    return new Response(JSON.stringify({ user: userPublic(user) }), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Set-Cookie": setSessionCookieHeader(session.id),
+      },
+    });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return Response.json({ error: err.message, code: err.code }, { status: 401 });
+    }
+    throw err;
+  }
+}
+
+async function handleLogout(req: Request): Promise<Response> {
+  const token = readSessionCookie(req);
+  if (token) deleteSession(token);
+  return new Response(JSON.stringify({ ok: true }), {
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Set-Cookie": clearSessionCookieHeader(),
+    },
+  });
+}
+
+/**
+ * Send a password-reset email via Resend, when configured. Returns true if
+ * the email was actually dispatched, false if Resend isn't set up (caller
+ * falls back to logging the link to the server console for dev).
+ */
+/**
+ * Generic Resend transactional-email sender for non-negotiation flows
+ * (password reset, email verification, etc.). Returns true when the API
+ * accepted the message; false when Resend isn't configured or the call
+ * failed — caller is responsible for the dev-log fallback in that case.
+ */
+async function sendTransactionalEmailViaResend(opts: {
+  to: string;
+  subject: string;
+  text: string;
+  scope?: string; // tag for log lines, e.g. "forgot" / "verify"
+}): Promise<boolean> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL;
+  if (!apiKey || !from) return false;
+  const tag = opts.scope ?? "transactional";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [opts.to],
+        subject: opts.subject,
+        text: opts.text,
+      }),
+    });
+    if (!res.ok) {
+      console.warn(`[${tag}] Resend rejected request:`, res.status, await res.text().catch(() => ""));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[${tag}] Resend send failed:`, (err as Error).message);
+    return false;
+  }
+}
+
+async function sendResetEmailViaResend(toEmail: string, link: string): Promise<boolean> {
+  return sendTransactionalEmailViaResend({
+    to: toEmail,
+    subject: "Reset your Bonsai password",
+    scope: "forgot",
+    text: [
+      "Someone — hopefully you — asked to reset the password on your Bonsai account.",
+      "",
+      "Click the link below to set a new one. It expires in one hour.",
+      "",
+      link,
+      "",
+      "If you didn't request this, just ignore the email.",
+    ].join("\n"),
+  });
+}
+
+async function handleForgotPassword(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { email?: string } | null;
+  const email = body?.email?.trim();
+  if (!email) return Response.json({ error: "Missing email" }, { status: 400 });
+  const user = getUserByEmail(email);
+  // Don't leak whether the email is on file. Always look like we sent
+  // something — only the dev-mode hint differs.
+  if (!user) {
+    return Response.json({ ok: true });
+  }
+  const reset = createPasswordResetToken(user.id);
+  const url = new URL(req.url);
+  // Build the link off the request's own host so dev (localhost:3344),
+  // ngrok tunnels, and production all produce a working link.
+  const link = `${url.protocol}//${url.host}/?reset=${encodeURIComponent(reset.token)}`;
+  const sent = await sendResetEmailViaResend(user.email, link);
+  if (!sent) {
+    // Resend isn't wired — surface the link in the server log so the
+    // developer can grab it. Front-end shows a hint when dev_link is true.
+    console.log(`[forgot] dev reset link for ${user.email}: ${link}`);
+    return Response.json({ ok: true, dev_link: true });
+  }
+  return Response.json({ ok: true });
+}
+
+async function handleResetPassword(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { token?: string; password?: string } | null;
+  if (!body?.token || !body?.password) {
+    return Response.json({ error: "Missing token or password" }, { status: 400 });
+  }
+  try {
+    const user = await consumePasswordResetToken(body.token, body.password);
+    // Password is reset and every old session was cleared as part of the
+    // transaction. Mint a fresh session so the user lands logged in.
+    const session = createSession(user.id);
+    ensureUserDirs(userPaths(user.id));
+    return new Response(JSON.stringify({ user: { id: user.id, email: user.email } }), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Set-Cookie": setSessionCookieHeader(session.id),
+      },
+    });
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return Response.json({ error: err.message, code: err.code }, { status: 400 });
+    }
+    throw err;
+  }
+}
+
+function handleMe(user: User | null): Response {
+  if (!user) return Response.json({ user: null }, { status: 200 });
+  return Response.json({ user: userPublic(user) });
+}
+
+const PUBLIC_API_PATHS = new Set([
+  "/api/auth/signup",
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/me",
+  "/api/auth/forgot",
+  "/api/auth/reset",
+]);
+
+// Fail-fast on missing required env. The Anthropic SDK only complains
+// when the first audit fires, which is a confusing place for a "missing
+// API key" error to land. Catch it at boot so the operator gets a clear
+// pointer to .env.example instead of a stack trace at request time.
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error(
+    "\n[bonsai] Refusing to start: ANTHROPIC_API_KEY is not set.\n" +
+      "  Bun reads `.env` from the project root automatically. Either:\n" +
+      "    1. Copy `.env.example` to `.env` and fill in your real key, or\n" +
+      "    2. `export ANTHROPIC_API_KEY=...` in your shell.\n" +
+      "  Get a key at https://console.anthropic.com/.\n",
+  );
+  process.exit(1);
+}
+
 const server = Bun.serve({
   port: PORT,
   idleTimeout: 240,
   async fetch(req) {
     const url = new URL(req.url);
     try {
-      if (req.method === "GET" && url.pathname === "/api/fixtures") return handleListFixtures();
-      if (req.method === "GET" && url.pathname === "/api/history") return handleHistory();
-      if (req.method === "GET" && url.pathname === "/api/receipts") return handleReceipts();
-      if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
-      if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
-      if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
-      if (req.method === "POST" && url.pathname === "/api/settings/integrations") return handleSaveIntegrations(req);
-      if (req.method === "GET" && url.pathname === "/api/export") return handleExport();
-      if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req);
-      if (req.method === "GET" && url.pathname === "/api/offer-sources") return handleOfferSources();
-      if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
-      if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
-      const offerRunMatch = url.pathname.match(/^\/api\/offer-run\/([a-zA-Z0-9._-]+)$/);
-      if (req.method === "GET" && offerRunMatch) return handleOfferRun(offerRunMatch[1]);
-      const reportMatch = url.pathname.match(/^\/api\/report\/([a-zA-Z0-9_-]+)$/);
-      if (req.method === "GET" && reportMatch) return handleReport(reportMatch[1]);
-      const letterMatch = url.pathname.match(/^\/api\/letter\/([a-zA-Z0-9_-]+)$/);
-      if (req.method === "GET" && letterMatch) return handleLetter(letterMatch[1]);
+      // Liveness probe for Railway / any platform health check. Cheap and
+      // public — never gated on auth so the platform's checker doesn't
+      // need credentials. Returns 200 as long as the event loop is alive.
+      if (req.method === "GET" && url.pathname === "/healthz") {
+        return new Response("ok", { headers: { "Content-Type": "text/plain" } });
+      }
+      // Auth endpoints first — these run without a session.
+      if (req.method === "POST" && url.pathname === "/api/auth/signup") return handleSignup(req);
+      if (req.method === "POST" && url.pathname === "/api/auth/login") return handleLogin(req);
+      if (req.method === "POST" && url.pathname === "/api/auth/logout") return handleLogout(req);
+      if (req.method === "GET" && url.pathname === "/api/auth/me") return handleMe(requireUser(req));
+      if (req.method === "POST" && url.pathname === "/api/auth/forgot") return handleForgotPassword(req);
+      if (req.method === "POST" && url.pathname === "/api/auth/reset") return handleResetPassword(req);
+
+      // Resend's inbound webhook is unauthenticated — it carries an svix
+      // HMAC signature instead of a session cookie. Lives outside the auth
+      // gate so the email rep's reply lands without a 401.
       if (req.method === "POST" && url.pathname === "/webhooks/resend-inbound") {
         const { handleResendInbound } = await import("./server/webhooks.ts");
         return handleResendInbound(req);
       }
-      if (req.method === "POST" && url.pathname === "/api/run-fixture") return handleRunFixture(req);
-      if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
-      if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);
-      if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
-      if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
-      if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
-      if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);
-      if (req.method === "POST" && url.pathname === "/api/approve") return handleApprove(req);
-      if (req.method === "POST" && url.pathname === "/api/stop") return handleStopNegotiation(req);
-      if (req.method === "POST" && url.pathname === "/api/resume") return handleResumeNegotiation(req);
-      if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
-      if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
-      const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
-      if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
-      const contactMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/contact$/);
-      if (contactMatch) {
-        if (req.method === "GET") return handleGetContact(contactMatch[1]);
-        if (req.method === "POST" || req.method === "PATCH") return handleSetContact(req, contactMatch[1]);
+
+      // Static pages render unauthenticated; the front-end calls /api/auth/me
+      // and switches to the login screen when no user is returned.
+      if ((req.method === "GET" || req.method === "HEAD") && !url.pathname.startsWith("/api/")) {
+        return handleStatic(url.pathname);
       }
-      const billListMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)$/);
-      if (req.method === "GET" && billListMatch) return handleListBill(billListMatch[1]);
-      const billViewMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/(\d+)$/);
-      if (req.method === "GET" && billViewMatch)
-        return handleViewBill(billViewMatch[1], billViewMatch[2]);
-      if (req.method === "GET" || req.method === "HEAD") return handleStatic(url.pathname);
-      return new Response("Method not allowed", { status: 405 });
+
+      // Every /api/* route past this point requires a session.
+      if (PUBLIC_API_PATHS.has(url.pathname)) {
+        return new Response("Not found", { status: 404 });
+      }
+      const user = requireUser(req);
+      if (!user) {
+        return Response.json({ error: "Authentication required" }, { status: 401 });
+      }
+      // Make sure the user's tree exists (cheap, idempotent) — nothing
+      // downstream will succeed without it.
+      ensureUserDirs(userPaths(user.id));
+
+      return await withUserContext(user, async () => {
+        if (req.method === "GET" && url.pathname === "/api/fixtures") return handleListFixtures();
+        if (req.method === "GET" && url.pathname === "/api/history") return handleHistory();
+        if (req.method === "GET" && url.pathname === "/api/receipts") return handleReceipts();
+        if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
+        if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
+        if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
+        if (req.method === "POST" && url.pathname === "/api/settings/integrations") return handleSaveIntegrations(req);
+        if (req.method === "GET" && url.pathname === "/api/export") return handleExport();
+        if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req, user);
+        if (req.method === "GET" && url.pathname === "/api/offer-sources") return handleOfferSources();
+        if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
+        if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
+        const offerRunMatch = url.pathname.match(/^\/api\/offer-run\/([a-zA-Z0-9._-]+)$/);
+        if (req.method === "GET" && offerRunMatch) return handleOfferRun(offerRunMatch[1]);
+        const reportMatch = url.pathname.match(/^\/api\/report\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && reportMatch) return handleReport(reportMatch[1]);
+        const letterMatch = url.pathname.match(/^\/api\/letter\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && letterMatch) return handleLetter(letterMatch[1]);
+        if (req.method === "POST" && url.pathname === "/api/run-fixture") return handleRunFixture(req);
+        if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
+        if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);
+        if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
+        if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
+        if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
+        if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);
+        if (req.method === "POST" && url.pathname === "/api/approve") return handleApprove(req);
+        if (req.method === "POST" && url.pathname === "/api/stop") return handleStopNegotiation(req);
+        if (req.method === "POST" && url.pathname === "/api/resume") return handleResumeNegotiation(req);
+        if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
+        if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
+        if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
+        const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
+        const contactStatusMatch = url.pathname.match(/^\/api\/contact\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && contactStatusMatch) return handleContactStatus(contactStatusMatch[1]);
+        if (req.method === "POST" && url.pathname === "/api/contact/override") return handleContactOverride(req);
+        if (req.method === "POST" && url.pathname === "/api/contact/retry") return handleContactRetry(req);
+        // Per-bill user-typed contact (Contact tab in the drawer). Distinct
+        // from /api/contact/:run_id above which surfaces the web-search
+        // resolver's status.
+        const billContactMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/contact$/);
+        if (billContactMatch) {
+          if (req.method === "GET") return handleGetContact(billContactMatch[1]);
+          if (req.method === "POST" || req.method === "PATCH") return handleSetContact(req, billContactMatch[1]);
+        }
+        const billListMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && billListMatch) return handleListBill(billListMatch[1]);
+        const billViewMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/(\d+)$/);
+        if (req.method === "GET" && billViewMatch)
+          return handleViewBill(billViewMatch[1], billViewMatch[2]);
+        return new Response("Method not allowed", { status: 405 });
+      });
     } catch (err) {
       console.error("server error:", err);
       return Response.json(

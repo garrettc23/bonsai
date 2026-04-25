@@ -13,14 +13,15 @@
  *   - Otherwise → email (cheaper, async, lower friction).
  *   - User can always override via channel option.
  *
- * Every step is simulated end-to-end unless Resend/Twilio/ElevenLabs env
- * vars are set. Swapping to real is a one-env-var flip.
+ * Every step is simulated end-to-end unless Resend/ElevenLabs env vars are
+ * set. Swapping to real is a one-env-var flip.
  */
 import { analyze } from "./analyzer.ts";
 import { generateAppealLetter, type AppealLetter } from "./appeal-letter.ts";
 import type { AnalyzerResult } from "./types.ts";
 import { loadFixtureAnalyzeInput, type AnalyzeInput } from "./lib/fixture-audit.ts";
 import { MockEmailClient, loadThread } from "./clients/email-mock.ts";
+import { autoEmailClient } from "./clients/email-resend.ts";
 import {
   startNegotiation,
   stepNegotiation,
@@ -30,17 +31,9 @@ import {
 import { simulateReply, type Persona as EmailPersona } from "./simulate-reply.ts";
 import { simulateCall, type RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { CallState } from "./voice/tool-handlers.ts";
-import { MockSmsClient, loadSmsThread } from "./clients/sms-mock.ts";
-import {
-  startSmsNegotiation,
-  stepSmsNegotiation,
-  saveSmsNegotiationState,
-  type SmsNegotiationState,
-} from "./negotiate-sms.ts";
-import { simulateSmsReply, type SmsPersona } from "./simulate-sms-reply.ts";
 import { runNegotiationAgent, type PersistentNegotiationResult } from "./negotiate-agent.ts";
 
-export type Channel = "email" | "voice" | "sms" | "persistent" | "auto";
+export type Channel = "email" | "voice" | "persistent" | "auto";
 
 export interface RunBonsaiOpts {
   /**
@@ -62,26 +55,24 @@ export interface RunBonsaiOpts {
    * analyzer runs against these instead of loading from fixtures.
    */
   analyzeInput?: AnalyzeInput;
-  patient_email?: string;
+  user_email?: string;
   provider_email?: string;
-  patient_phone?: string;
+  user_phone?: string;
   provider_phone?: string;
   channel?: Channel;
   email_persona?: EmailPersona; // for simulation
   voice_persona?: VoicePersona; // for simulation
-  sms_persona?: SmsPersona; // for simulation
   final_acceptable_floor?: number;
   max_email_rounds?: number;
-  max_sms_rounds?: number;
-  /** Per-run channel gating. Overrides default email→sms→voice order. */
-  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  /** Per-run channel gating. Overrides default email→voice order. */
+  channels_enabled?: { email?: boolean; voice?: boolean };
   /** Free-form user directives piped into every negotiator's system prompt. */
   user_directives?: string;
   /** Tone the user asked the agent to strike. */
   agent_tone?: "polite" | "firm" | "aggressive";
-  /** BCC recipients on every outbound email — typically the patient's own
+  /** CC recipients on every outbound email — typically the user's own
    * inbox so they stay in the loop on every message the agent sends. */
-  bcc?: string[];
+  cc?: string[];
 }
 
 export interface ThreadMessage {
@@ -91,18 +82,11 @@ export interface ThreadMessage {
   ts: string;
 }
 
-export interface SmsThreadMessage {
-  role: "outbound" | "inbound";
-  body: string;
-  ts: string;
-  segments?: number;
-}
-
 export interface BonsaiReport {
   analyzer: AnalyzerResult;
   appeal: AppealLetter;
   strategy: {
-    chosen: "email" | "voice" | "sms" | "persistent";
+    chosen: "email" | "voice" | "persistent";
     reason: string;
   };
   persistent_run?: PersistentNegotiationResult;
@@ -116,18 +100,12 @@ export interface BonsaiReport {
     state: CallState;
     transcript: Array<{ who: "agent" | "rep" | "tool"; text: string }>;
   };
-  sms_thread?: {
-    thread_id: string;
-    state: SmsNegotiationState;
-    messages: SmsThreadMessage[];
-    handed_off_to_voice?: boolean;
-  };
   summary: {
     original_balance: number;
     defensible_disputed: number;
     final_balance: number | null;
     patient_saved: number | null;
-    channel_used: "email" | "voice" | "sms" | "persistent";
+    channel_used: "email" | "voice" | "persistent";
     outcome: "resolved" | "escalated" | "in_progress";
     outcome_detail: string;
   };
@@ -136,14 +114,13 @@ export interface BonsaiReport {
 export function chooseChannel(
   analyzer: AnalyzerResult,
   explicit: Channel,
-): { chosen: "email" | "voice" | "sms" | "persistent"; reason: string } {
+): { chosen: "email" | "voice" | "persistent"; reason: string } {
   if (explicit === "email") return { chosen: "email", reason: "Caller explicitly requested email." };
   if (explicit === "voice") return { chosen: "voice", reason: "Caller explicitly requested voice." };
-  if (explicit === "sms") return { chosen: "sms", reason: "Caller explicitly requested SMS." };
   if (explicit === "persistent")
     return {
       chosen: "persistent",
-      reason: "Persistent mode: run email → SMS → voice until floor is hit or all channels exhausted.",
+      reason: "Persistent mode: run email → voice until floor is hit or both channels exhausted.",
     };
   const hasBB = analyzer.errors.some((e) => e.confidence === "high" && e.error_type === "balance_billing");
   const total = analyzer.summary.high_confidence_total;
@@ -211,28 +188,26 @@ export async function runNegotiationPhase(
   const strategy = report.strategy;
   const originalBalance = report.summary.original_balance;
 
-  const patientEmail = opts.patient_email ?? "patient@example.com";
+  const patientEmail = opts.user_email ?? "patient@example.com";
   const providerEmail = opts.provider_email ?? "billing@provider.example.com";
-  const patientPhone = opts.patient_phone ?? "+14155550100";
+  const patientPhone = opts.user_phone ?? "+14155550100";
   const providerPhone = opts.provider_phone ?? "+14155550132";
 
   if (strategy.chosen === "persistent") {
     const run = await runNegotiationAgent({
       analyzer,
-      patient_email: patientEmail,
+      user_email: patientEmail,
       provider_email: providerEmail,
-      patient_phone: patientPhone,
+      user_phone: patientPhone,
       provider_phone: providerPhone,
       email_persona: opts.email_persona,
-      sms_persona: opts.sms_persona,
       voice_persona: opts.voice_persona,
       final_acceptable_floor: opts.final_acceptable_floor,
       max_email_rounds: opts.max_email_rounds,
-      max_sms_rounds: opts.max_sms_rounds,
       channels_enabled: opts.channels_enabled,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
-      bcc: opts.bcc,
+      cc: opts.cc,
     });
     report.persistent_run = run;
     // Surface the transcripts in the existing thread fields so the current
@@ -244,13 +219,6 @@ export async function runNegotiationPhase(
         messages: run.email.messages,
       };
     }
-    if (run.sms) {
-      report.sms_thread = {
-        thread_id: run.attempts.find((a) => a.channel === "sms")?.thread_id ?? "",
-        state: run.sms.state,
-        messages: run.sms.messages,
-      };
-    }
     if (run.voice) {
       report.voice_call = {
         call_id: run.attempts.find((a) => a.channel === "voice")?.call_id ?? "",
@@ -260,44 +228,56 @@ export async function runNegotiationPhase(
     }
     report.summary.final_balance = run.best?.final_amount ?? null;
     report.summary.patient_saved = run.best?.saved ?? null;
-    report.summary.outcome = run.outcome === "exhausted_no_offer" ? "escalated" : "resolved";
+    report.summary.outcome =
+      run.outcome === "in_progress"
+        ? "in_progress"
+        : run.outcome === "exhausted_no_offer"
+          ? "escalated"
+          : "resolved";
     report.summary.outcome_detail = run.headline;
     return report;
   }
 
   if (strategy.chosen === "email") {
-    const client = new MockEmailClient();
+    // Pick Resend when env is configured, fall back to MockEmailClient
+    // for local dev without keys. autoEmailClient handles the env check.
+    const client = await autoEmailClient();
+    const isReal = !(client instanceof MockEmailClient);
     const { thread_id, state: initState } = await startNegotiation({
       analyzer,
       client,
-      patient_email: patientEmail,
+      user_email: patientEmail,
       provider_email: providerEmail,
       final_acceptable_floor: opts.final_acceptable_floor,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
-      bcc: opts.bcc,
+      cc: opts.cc,
     });
     let state = initState;
     saveNegotiationState(state);
 
     const maxRounds = opts.max_email_rounds ?? 4;
-    for (let round = 1; round <= maxRounds; round++) {
-      const thread = loadThread(thread_id);
-      const latest = thread.outbound[thread.outbound.length - 1];
-      await simulateReply({
-        thread_id,
-        turn_number: round,
-        persona: opts.email_persona ?? "stall_then_concede",
-        analyzer,
-        provider_email: providerEmail,
-        patient_email: patientEmail,
-        reply_to_subject: latest?.subject ?? report.appeal.subject,
-        latest_outbound_body: latest?.body_markdown ?? "",
-        client,
-      });
-      state = await stepNegotiation({ state, client });
-      saveNegotiationState(state);
-      if (state.outcome.status !== "in_progress") break;
+    if (!isReal) {
+      // Demo mode — synthetic loop. Real mode dispatches one email and
+      // waits for the inbound webhook to step the agent on actual replies.
+      for (let round = 1; round <= maxRounds; round++) {
+        const thread = loadThread(thread_id);
+        const latest = thread.outbound[thread.outbound.length - 1];
+        await simulateReply({
+          thread_id,
+          turn_number: round,
+          persona: opts.email_persona ?? "stall_then_concede",
+          analyzer,
+          provider_email: providerEmail,
+          user_email: patientEmail,
+          reply_to_subject: latest?.subject ?? report.appeal.subject,
+          latest_outbound_body: latest?.body_markdown ?? "",
+          client: client as MockEmailClient,
+        });
+        state = await stepNegotiation({ state, client });
+        saveNegotiationState(state);
+        if (state.outcome.status !== "in_progress") break;
+      }
     }
 
     const final = loadThread(thread_id);
@@ -323,88 +303,6 @@ export async function runNegotiationPhase(
     } else {
       report.summary.outcome = "in_progress";
       report.summary.outcome_detail = `Still in progress after ${maxRounds} rounds.`;
-    }
-  } else if (strategy.chosen === "sms") {
-    const smsClient = new MockSmsClient();
-    const { thread_id, state: initSmsState } = await startSmsNegotiation({
-      analyzer,
-      client: smsClient,
-      patient_phone: patientPhone,
-      provider_phone: providerPhone,
-      final_acceptable_floor: opts.final_acceptable_floor,
-      user_directives: opts.user_directives,
-      agent_tone: opts.agent_tone,
-    });
-    let smsState = initSmsState;
-    saveSmsNegotiationState(smsState);
-
-    const maxSmsRounds = opts.max_sms_rounds ?? 4;
-    for (let round = 1; round <= maxSmsRounds; round++) {
-      const t = loadSmsThread(thread_id);
-      const latest = t.outbound[t.outbound.length - 1];
-      await simulateSmsReply({
-        thread_id,
-        turn_number: round,
-        persona: opts.sms_persona ?? "stall_then_concede",
-        analyzer,
-        provider_phone: providerPhone,
-        patient_phone: patientPhone,
-        latest_outbound_body: latest?.body ?? "",
-        in_reply_to: latest?.message_id,
-        client: smsClient,
-      });
-      smsState = await stepSmsNegotiation({ state: smsState, client: smsClient });
-      saveSmsNegotiationState(smsState);
-      if (smsState.outcome.status !== "in_progress") break;
-    }
-
-    const finalThread = loadSmsThread(thread_id);
-    const messages: SmsThreadMessage[] = [];
-    for (const m of finalThread.outbound) messages.push({ role: "outbound", body: m.body, ts: m.sent_at, segments: m.segments });
-    for (const m of finalThread.inbound) messages.push({ role: "inbound", body: m.body, ts: m.received_at });
-    messages.sort((a, b) => a.ts.localeCompare(b.ts));
-
-    report.sms_thread = { thread_id, state: smsState, messages };
-
-    // Handoff to voice: SMS negotiator bailed out — run the voice agent with the
-    // same analyzer findings and the handoff reason as context.
-    if (smsState.outcome.status === "handed_off_to_voice") {
-      report.sms_thread.handed_off_to_voice = true;
-      const { call_id, state: voiceState, transcript } = await simulateCall({
-        analyzer,
-        persona: opts.voice_persona ?? "cooperative",
-        final_acceptable_floor: opts.final_acceptable_floor,
-        max_turns: 14,
-      });
-      report.voice_call = {
-        call_id,
-        state: voiceState,
-        transcript: transcript.map((t) => ({ who: t.who, text: t.text })),
-      };
-      // Final outcome dominated by the voice call since that's the channel that
-      // actually closed the dispute.
-      if (voiceState.outcome.status === "success" || voiceState.outcome.status === "partial") {
-        report.summary.outcome = "resolved";
-        report.summary.final_balance = voiceState.outcome.negotiated_amount ?? null;
-        if (voiceState.outcome.negotiated_amount != null) {
-          report.summary.patient_saved = originalBalance - voiceState.outcome.negotiated_amount;
-        }
-        report.summary.outcome_detail = `SMS handed off to voice (${smsState.outcome.reason}). Voice call ${voiceState.outcome.status}. ${voiceState.outcome.commitment_notes ?? ""}`;
-      } else {
-        report.summary.outcome = voiceState.outcome.status === "handoff" || voiceState.outcome.status === "voicemail_left" ? "escalated" : "in_progress";
-        report.summary.outcome_detail = `SMS handed off to voice (${smsState.outcome.reason}). Voice ended: ${voiceState.outcome.status}.`;
-      }
-    } else if (smsState.outcome.status === "resolved") {
-      report.summary.outcome = "resolved";
-      report.summary.final_balance = smsState.outcome.final_amount_owed;
-      report.summary.patient_saved = originalBalance - smsState.outcome.final_amount_owed;
-      report.summary.outcome_detail = `SMS negotiation resolved — ${smsState.outcome.resolution}. ${smsState.outcome.notes}`;
-    } else if (smsState.outcome.status === "escalated") {
-      report.summary.outcome = "escalated";
-      report.summary.outcome_detail = `SMS escalated to human: ${smsState.outcome.reason}. ${smsState.outcome.notes}`;
-    } else {
-      report.summary.outcome = "in_progress";
-      report.summary.outcome_detail = `SMS still in progress after ${maxSmsRounds} rounds.`;
     }
   } else {
     // voice

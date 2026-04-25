@@ -1,11 +1,11 @@
 /**
  * Persistent Negotiation Agent.
  *
- * Runs the negotiation across ALL three channels until either:
+ * Runs the negotiation across both available channels until either:
  *   1. The rep concedes at or below the floor (EOB patient responsibility), OR
  *   2. Every channel has been tried and the best offer recorded.
  *
- * Ordering (cheapest first): email → sms → voice.
+ * Ordering (cheapest first): email → voice.
  *
  * Each subsequent channel gets a "prior attempts" preface injected into its
  * analyzer context so Claude knows the dispute history and can anchor from the
@@ -20,6 +20,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AnalyzerResult } from "./types.ts";
 import { MockEmailClient, loadThread } from "./clients/email-mock.ts";
+import { autoEmailClient } from "./clients/email-resend.ts";
 import {
   startNegotiation,
   stepNegotiation,
@@ -27,19 +28,11 @@ import {
   type NegotiationState,
 } from "./negotiate-email.ts";
 import { simulateReply, type Persona as EmailPersona } from "./simulate-reply.ts";
-import { MockSmsClient, loadSmsThread } from "./clients/sms-mock.ts";
-import {
-  startSmsNegotiation,
-  stepSmsNegotiation,
-  saveSmsNegotiationState,
-  type SmsNegotiationState,
-} from "./negotiate-sms.ts";
-import { simulateSmsReply, type SmsPersona } from "./simulate-sms-reply.ts";
 import { simulateCall, type RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { CallState } from "./voice/tool-handlers.ts";
 import type { AgentTone } from "./lib/user-settings.ts";
 
-export type AttemptChannel = "email" | "sms" | "voice";
+export type AttemptChannel = "email" | "voice";
 
 export interface NegotiationAttempt {
   channel: AttemptChannel;
@@ -47,7 +40,7 @@ export interface NegotiationAttempt {
   saved: number | null;
   outcome: "resolved" | "escalated" | "in_progress" | "handed_off";
   outcome_detail: string;
-  thread_id?: string; // email or sms
+  thread_id?: string; // email
   call_id?: string; // voice
   turns: number;
 }
@@ -57,18 +50,18 @@ export interface PersistentNegotiationResult {
   original_balance: number;
   attempts: NegotiationAttempt[];
   best: NegotiationAttempt | null;
-  outcome: "floor_hit" | "exhausted_with_offer" | "exhausted_no_offer";
+  outcome:
+    | "floor_hit"
+    | "exhausted_with_offer"
+    | "exhausted_no_offer"
+    | "in_progress";
   total_saved: number;
   /** Human-facing one-line summary. */
   headline: string;
-  /** Collected for UI rendering so the page can show all 3 transcripts. */
+  /** Collected for UI rendering so the page can show both transcripts. */
   email?: {
     state: NegotiationState;
     messages: Array<{ role: "outbound" | "inbound"; subject: string; body: string; ts: string }>;
-  };
-  sms?: {
-    state: SmsNegotiationState;
-    messages: Array<{ role: "outbound" | "inbound"; body: string; ts: string; segments?: number }>;
   };
   voice?: {
     state: CallState;
@@ -78,27 +71,26 @@ export interface PersistentNegotiationResult {
 
 export interface RunNegotiationAgentOpts {
   analyzer: AnalyzerResult;
-  patient_email?: string;
+  user_email?: string;
   provider_email?: string;
-  patient_phone?: string;
+  user_phone?: string;
   provider_phone?: string;
   email_persona?: EmailPersona;
-  sms_persona?: SmsPersona;
   voice_persona?: VoicePersona;
   final_acceptable_floor?: number;
   max_email_rounds?: number;
-  max_sms_rounds?: number;
-  /** If true, always run all 3 channels even if floor is hit. For demos. Default false. */
+  /** If true, always run every channel even if floor is hit. For demos. Default false. */
   always_exhaust?: boolean;
   /** Which channels are allowed to run this round. Defaults to all enabled. */
-  channels_enabled?: { email?: boolean; sms?: boolean; voice?: boolean };
+  channels_enabled?: { email?: boolean; voice?: boolean };
   /** Free-form user directives piped into every negotiator's system prompt. */
   user_directives?: string;
   /** Tone override for every negotiator's system prompt. */
   agent_tone?: AgentTone;
-  /** BCC recipients on every outbound email — typically the patient's own
-   * inbox so they stay in the loop on every message the agent sends. */
-  bcc?: string[];
+  /** CC recipients on every outbound email — typically the user's own
+   * inbox so they stay in the loop on every message the agent sends.
+   * Visible to the rep on purpose. */
+  cc?: string[];
   anthropic?: Anthropic;
 }
 
@@ -117,7 +109,7 @@ function formatPriorAttempts(attempts: NegotiationAttempt[]): string {
  */
 async function runEmailAttempt(opts: {
   analyzer: AnalyzerResult;
-  patient_email: string;
+  user_email: string;
   provider_email: string;
   floor: number;
   persona: EmailPersona;
@@ -126,44 +118,56 @@ async function runEmailAttempt(opts: {
   user_directives?: string;
   agent_tone?: AgentTone;
   prior_attempts_summary?: string;
-  bcc?: string[];
+  cc?: string[];
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["email"] }> {
-  const client = new MockEmailClient();
+  // Pick Resend if env is configured, else fall back to MockEmailClient.
+  // The two modes have very different orchestration: real Resend dispatches
+  // one email and waits for the webhook to step the agent on actual rep
+  // replies; mock mode runs a synthetic loop (Claude pretends to be the
+  // rep) so the demo completes in seconds without external dependencies.
+  const client = await autoEmailClient();
+  const isReal = !(client instanceof MockEmailClient);
   const { thread_id, state: initState } = await startNegotiation({
     analyzer: opts.analyzer,
     client,
-    patient_email: opts.patient_email,
+    user_email: opts.user_email,
     provider_email: opts.provider_email,
     final_acceptable_floor: opts.floor,
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
     prior_attempts_summary: opts.prior_attempts_summary,
-    bcc: opts.bcc,
+    cc: opts.cc,
   });
   let state = initState;
   saveNegotiationState(state);
-  let turns = 0;
-  for (let round = 1; round <= opts.max_rounds; round++) {
-    const t = loadThread(thread_id);
-    const latest = t.outbound[t.outbound.length - 1];
-    await simulateReply({
-      thread_id,
-      turn_number: round,
-      persona: opts.persona,
-      analyzer: opts.analyzer,
-      provider_email: opts.provider_email,
-      patient_email: opts.patient_email,
-      reply_to_subject: latest?.subject ?? "Appeal",
-      latest_outbound_body: latest?.body_markdown ?? "",
-      client,
-      anthropic: opts.anthropic,
-    });
-    state = await stepNegotiation({ state, client, anthropic: opts.anthropic });
-    saveNegotiationState(state);
-    turns = round;
-    if (state.outcome.status !== "in_progress") break;
+  let turns = isReal ? 1 : 0;
+  if (!isReal) {
+    // Demo mode: synthetic back-and-forth via the simulator. Closes out
+    // resolved/escalated within a few seconds.
+    for (let round = 1; round <= opts.max_rounds; round++) {
+      const t = loadThread(thread_id);
+      const latest = t.outbound[t.outbound.length - 1];
+      await simulateReply({
+        thread_id,
+        turn_number: round,
+        persona: opts.persona,
+        analyzer: opts.analyzer,
+        provider_email: opts.provider_email,
+        user_email: opts.user_email,
+        reply_to_subject: latest?.subject ?? "Appeal",
+        latest_outbound_body: latest?.body_markdown ?? "",
+        client: client as MockEmailClient,
+        anthropic: opts.anthropic,
+      });
+      state = await stepNegotiation({ state, client, anthropic: opts.anthropic });
+      saveNegotiationState(state);
+      turns = round;
+      if (state.outcome.status !== "in_progress") break;
+    }
   }
+  // In real mode, state.outcome.status is "in_progress" until the webhook
+  // (src/server/webhooks.ts) catches a rep reply and calls stepNegotiation.
   const finalThread = loadThread(thread_id);
   const messages = [
     ...finalThread.outbound.map((m) => ({ role: "outbound" as const, subject: m.subject, body: m.body_markdown, ts: m.sent_at })),
@@ -185,89 +189,6 @@ async function runEmailAttempt(opts: {
   return {
     attempt: {
       channel: "email",
-      final_amount,
-      saved,
-      outcome,
-      outcome_detail: detail,
-      thread_id,
-      turns,
-    },
-    view: { state, messages },
-  };
-}
-
-async function runSmsAttempt(opts: {
-  analyzer: AnalyzerResult;
-  patient_phone: string;
-  provider_phone: string;
-  floor: number;
-  persona: SmsPersona;
-  max_rounds: number;
-  original_balance: number;
-  user_directives?: string;
-  agent_tone?: AgentTone;
-  prior_attempts_summary?: string;
-  anthropic: Anthropic;
-}): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["sms"] }> {
-  const client = new MockSmsClient();
-  const { thread_id, state: initState } = await startSmsNegotiation({
-    analyzer: opts.analyzer,
-    client,
-    patient_phone: opts.patient_phone,
-    provider_phone: opts.provider_phone,
-    final_acceptable_floor: opts.floor,
-    user_directives: opts.user_directives,
-    agent_tone: opts.agent_tone,
-    prior_attempts_summary: opts.prior_attempts_summary,
-    anthropic: opts.anthropic,
-  });
-  let state = initState;
-  saveSmsNegotiationState(state);
-  let turns = 0;
-  for (let round = 1; round <= opts.max_rounds; round++) {
-    const t = loadSmsThread(thread_id);
-    const latest = t.outbound[t.outbound.length - 1];
-    await simulateSmsReply({
-      thread_id,
-      turn_number: round,
-      persona: opts.persona,
-      analyzer: opts.analyzer,
-      provider_phone: opts.provider_phone,
-      patient_phone: opts.patient_phone,
-      latest_outbound_body: latest?.body ?? "",
-      in_reply_to: latest?.message_id,
-      client,
-      anthropic: opts.anthropic,
-    });
-    state = await stepSmsNegotiation({ state, client, anthropic: opts.anthropic });
-    saveSmsNegotiationState(state);
-    turns = round;
-    if (state.outcome.status !== "in_progress") break;
-  }
-  const finalThread = loadSmsThread(thread_id);
-  const messages = [
-    ...finalThread.outbound.map((m) => ({ role: "outbound" as const, body: m.body, ts: m.sent_at, segments: m.segments })),
-    ...finalThread.inbound.map((m) => ({ role: "inbound" as const, body: m.body, ts: m.received_at })),
-  ].sort((a, b) => a.ts.localeCompare(b.ts));
-
-  let final_amount: number | null = null;
-  let outcome: NegotiationAttempt["outcome"] = "in_progress";
-  let detail = `SMS in progress after ${turns} rounds.`;
-  if (state.outcome.status === "resolved") {
-    final_amount = state.outcome.final_amount_owed;
-    outcome = "resolved";
-    detail = `SMS ${state.outcome.resolution}. ${state.outcome.notes}`;
-  } else if (state.outcome.status === "escalated") {
-    outcome = "escalated";
-    detail = `SMS escalated (${state.outcome.reason}). ${state.outcome.notes}`;
-  } else if (state.outcome.status === "handed_off_to_voice") {
-    outcome = "handed_off";
-    detail = `SMS handed off to voice (${state.outcome.reason}). ${state.outcome.notes}`;
-  }
-  const saved = final_amount != null ? opts.original_balance - final_amount : null;
-  return {
-    attempt: {
-      channel: "sms",
       final_amount,
       saved,
       outcome,
@@ -321,15 +242,14 @@ async function runVoiceAttempt(opts: {
 }
 
 /**
- * Main agent loop. Runs email → sms → voice until the floor is hit or all
+ * Main agent loop. Runs email → voice until the floor is hit or both
  * channels are exhausted. Picks the single best attempt and reports it.
  *
- * Prior-attempt context (`formatPriorAttempts`) is threaded into each later
- * channel's analyzer context via `prior_attempts_summary`, so the SMS agent
- * doesn't repeat the email's failed arguments verbatim and the voice agent
- * sees both. Voice currently uses the simulator path which doesn't accept
- * the summary yet — flagged as TODO; persona escalation continues to fill
- * that gap.
+ * Prior-attempt context (`formatPriorAttempts`) is threaded into the voice
+ * channel's analyzer context via `prior_attempts_summary` so the voice
+ * agent doesn't repeat the email's failed arguments verbatim. Voice
+ * currently uses the simulator path which doesn't accept the summary yet —
+ * flagged as TODO; persona escalation continues to fill that gap.
  */
 export async function runNegotiationAgent(
   opts: RunNegotiationAgentOpts,
@@ -339,10 +259,8 @@ export async function runNegotiationAgent(
     opts.final_acceptable_floor ?? opts.analyzer.metadata.eob_patient_responsibility ?? 0;
   const original_balance = opts.analyzer.metadata.bill_current_balance_due ?? 0;
 
-  const patient_email = opts.patient_email ?? "patient@example.com";
+  const user_email = opts.user_email ?? "patient@example.com";
   const provider_email = opts.provider_email ?? "billing@provider.example.com";
-  const patient_phone = opts.patient_phone ?? "+14155550100";
-  const provider_phone = opts.provider_phone ?? "+14155550132";
 
   const attempts: NegotiationAttempt[] = [];
   const result: PersistentNegotiationResult = {
@@ -374,7 +292,6 @@ export async function runNegotiationAgent(
 
   const channels = {
     email: opts.channels_enabled?.email !== false,
-    sms: opts.channels_enabled?.sms !== false,
     voice: opts.channels_enabled?.voice !== false,
   };
 
@@ -383,7 +300,7 @@ export async function runNegotiationAgent(
     try {
       const { attempt, view } = await runEmailAttempt({
         analyzer: opts.analyzer,
-        patient_email,
+        user_email,
         provider_email,
         floor,
         persona: opts.email_persona ?? "stall_then_concede",
@@ -391,7 +308,7 @@ export async function runNegotiationAgent(
         original_balance,
         user_directives: opts.user_directives,
         agent_tone: opts.agent_tone,
-        bcc: opts.bcc,
+        cc: opts.cc,
         anthropic,
       });
       attempts.push(attempt);
@@ -400,6 +317,16 @@ export async function runNegotiationAgent(
       if (hitFloor(attempt) && !opts.always_exhaust) {
         result.outcome = "floor_hit";
         result.headline = `Email hit the floor at $${attempt.final_amount?.toFixed(2)}. No further channels needed.`;
+        return result;
+      }
+      // Real-email mode: dispatched one outbound and now waiting on the
+      // webhook for replies. Don't proceed to the voice simulator — that
+      // would mix a real-but-pending email negotiation with a synthetic
+      // voice "resolved" outcome and the report would lie. Stop here;
+      // the webhook will step the agent on real inbounds.
+      if (attempt.outcome === "in_progress" && process.env.RESEND_API_KEY) {
+        result.outcome = "in_progress";
+        result.headline = `Email dispatched. Awaiting reply from ${provider_email}.`;
         return result;
       }
     } catch (err) {
@@ -414,45 +341,14 @@ export async function runNegotiationAgent(
     }
   }
 
-  // 2. SMS — gets prior-attempt context so it can anchor on what email
-  // already extracted and avoid re-arguing settled points.
-  if (channels.sms) {
-    try {
-      const { attempt, view } = await runSmsAttempt({
-        analyzer: opts.analyzer,
-        patient_phone,
-        provider_phone,
-        floor,
-        persona: opts.sms_persona ?? "stall_then_concede",
-        max_rounds: opts.max_sms_rounds ?? 4,
-        original_balance,
-        user_directives: opts.user_directives,
-        agent_tone: opts.agent_tone,
-        prior_attempts_summary: formatPriorAttempts(attempts),
-        anthropic,
-      });
-      attempts.push(attempt);
-      result.sms = view;
-      updateBest();
-      if (hitFloor(attempt) && !opts.always_exhaust) {
-        result.outcome = "floor_hit";
-        result.headline = `SMS hit the floor at $${attempt.final_amount?.toFixed(2)} after email stalled. Escalation worked.`;
-        return result;
-      }
-    } catch (err) {
-      attempts.push({
-        channel: "sms",
-        final_amount: null,
-        saved: null,
-        outcome: "escalated",
-        outcome_detail: `SMS attempt crashed: ${(err as Error).message}`,
-        turns: 0,
-      });
-    }
-  }
-
-  // 3. Voice — last resort, highest conversion on tough disputes
-  if (channels.voice) {
+  // 2. Voice — last resort, highest conversion on tough disputes. Skipped
+  // entirely in real-email mode because voice is still simulator-only;
+  // pairing real email with fake voice was producing reports that claimed
+  // a fake "Voice resolved at $X" outcome on top of a real-and-pending
+  // email negotiation. Re-enable here once ElevenLabs is wired for real.
+  const voiceSkippedForRealEmail = !!process.env.RESEND_API_KEY;
+  if (channels.voice && !voiceSkippedForRealEmail) {
+    void formatPriorAttempts(attempts); // reserved for the real ElevenLabs path
     try {
       const { attempt, view } = await runVoiceAttempt({
         analyzer: opts.analyzer,
@@ -465,7 +361,7 @@ export async function runNegotiationAgent(
       updateBest();
       if (hitFloor(attempt)) {
         result.outcome = "floor_hit";
-        result.headline = `Voice hit the floor at $${attempt.final_amount?.toFixed(2)} after email and SMS stalled.`;
+        result.headline = `Voice hit the floor at $${attempt.final_amount?.toFixed(2)} after email stalled.`;
         return result;
       }
     } catch (err) {
@@ -487,13 +383,26 @@ export async function runNegotiationAgent(
     return result;
   }
 
-  // Exhausted all 3 channels.
+  // Real-email mode and email errored before dispatch (Resend 403, etc.).
+  // Voice was skipped intentionally; report email's failure clearly so the
+  // operator can fix the underlying config (verify domain, check from
+  // address, etc.) instead of seeing a misleading "exhausted" headline.
+  if (voiceSkippedForRealEmail && attempts.length === 1 && attempts[0].channel === "email") {
+    const a = attempts[0];
+    if (a.outcome === "escalated") {
+      result.outcome = "exhausted_no_offer";
+      result.headline = `Email send failed before dispatch. ${a.outcome_detail}`;
+      return result;
+    }
+  }
+
+  // Exhausted both channels.
   if (result.best && result.best.final_amount != null) {
     result.outcome = "exhausted_with_offer";
-    result.headline = `All 3 channels exhausted. Best offer: ${result.best.channel.toUpperCase()} at $${result.best.final_amount.toFixed(2)} (saved $${result.total_saved.toFixed(2)}). Floor of $${floor.toFixed(2)} not reached.`;
+    result.headline = `Both channels exhausted. Best offer: ${result.best.channel.toUpperCase()} at $${result.best.final_amount.toFixed(2)} (saved $${result.total_saved.toFixed(2)}). Floor of $${floor.toFixed(2)} not reached.`;
   } else {
     result.outcome = "exhausted_no_offer";
-    result.headline = `All 3 channels exhausted, no concession secured. Recommend human escalation.`;
+    result.headline = `Both channels exhausted, no concession secured. Recommend human escalation.`;
   }
 
   return result;

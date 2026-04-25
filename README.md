@@ -11,7 +11,7 @@ Bill PDF + EOB PDF
        │
        ▼
   ┌─────────────┐
-  │  Analyzer   │  Claude Sonnet 4.5, tool-use loop, grounding contract
+  │  Analyzer   │  Claude Opus 4.7, tool-use loop, grounding contract
   │  (src/      │  → every finding quotes a verbatim bill line
   │   analyzer) │  → overlap-aware totals (balance_billing is an envelope)
   └──────┬──────┘
@@ -52,6 +52,49 @@ bun run test                # 33 tests, <100ms
 bun run bonsai              # end-to-end CLI on bill-001, auto channel
 bun run serve               # web UI at http://localhost:3333
 ```
+
+## Deploy to Railway
+
+Bonsai ships with a `Dockerfile` and `railway.json` that get you to a live
+HTTPS URL in a few minutes. Persistent volume holds SQLite + per-user
+files so signups + bills survive deploys.
+
+```bash
+# 1. Install the Railway CLI and log in (one-time)
+brew install railway          # or: npm i -g @railway/cli
+railway login
+
+# 2. From the repo root: create a project and push the current branch
+railway init                  # follow prompts; creates a new project
+railway up                    # uploads + builds via the Dockerfile
+
+# 3. In the Railway dashboard for this service:
+#    → Variables: add ANTHROPIC_API_KEY  (required, operator-paid)
+#    → Variables: NODE_ENV=production    (cookie Secure flag, fail-closed webhook)
+#    → Variables: BONSAI_DATA_DIR=/app/data  (matches the Dockerfile volume)
+#    → Settings → Volumes: New Volume
+#         Mount path: /app/data
+#         Size: 1 GB (raise later if you grow)
+#    → Settings → Networking: Generate Domain  (gives you a *.up.railway.app URL)
+
+# 4. Redeploy so the volume + new env vars are picked up
+railway up
+```
+
+Health check: Railway hits `/healthz` automatically (already wired in
+`railway.json`). Once it passes, the public URL is live.
+
+**Resend inbound webhook (optional but recommended).** After the domain
+is up, in your Resend dashboard set the inbound mailbox webhook to
+`https://<your-domain>/webhooks/resend-inbound` and copy the signing
+secret into Railway as `RESEND_WEBHOOK_SECRET`. With `NODE_ENV=production`
+Bonsai requires the secret — fail-closed by design.
+
+**Cost shape.** Railway Hobby is $5/month and includes the volume.
+Anthropic API usage is operator-paid (every audit on Opus 4.7 runs
+~$0.25-1.00 in tokens). Each user supplies their own Resend +
+ElevenLabs keys via Settings → Integrations, so those costs don't
+land on the operator.
 
 ## What works
 

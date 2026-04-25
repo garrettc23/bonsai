@@ -1392,29 +1392,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   line-height: 1.55;
 }
 
-/* SMS — tighter, narrower, capped width for texting feel */
-.conv-msg.sms {
-  max-width: 520px;
-  padding: 10px 14px;
-  border-radius: 14px;
-}
-.conv-msg.sms.us {
-  margin-left: auto;
-  background: var(--ink);
-  color: var(--bg);
-  border-left: none;
-}
-.conv-msg.sms.us .conv-meta,
-.conv-msg.sms.us .conv-body {
-  color: var(--bg);
-}
-.conv-msg.sms.us .conv-meta .who-us { color: var(--bg); }
-.conv-msg.sms.them {
-  margin-right: auto;
-  background: var(--surface-alt);
-}
-.conv-body.sms-body { font-size: 13.5px; white-space: normal; }
-
 .conv-section-head {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -1609,27 +1586,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 }
 .live-indicator[hidden] { display: none; }
 
-/* ─── Review BCC hint ──────────────────────────────────────── */
-
-.review-bcc-hint {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  padding: 8px 12px;
-  background: var(--surface-alt, #fafaf7);
-  border: 1px solid var(--ink-faint, rgba(0, 0, 0, 0.08));
-  border-radius: 8px;
-  font-size: 12.5px;
-  color: var(--ink-soft);
-  line-height: 1.4;
-}
-.review-bcc-hint[hidden] { display: none; }
-.bcc-dot {
-  color: var(--green);
-  font-size: 14px;
-  line-height: 1;
-}
 
 /* ─── Agent reasoning timeline ─────────────────────────────── */
 
@@ -2257,6 +2213,10 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   align-items: center;
   gap: 24px;
 }
+/* `display: flex` above wins over the default [hidden] display:none, so
+   spell out the hidden rule explicitly for the banner. Same for the
+   filter chips so they don't render alone when there are no offers. */
+.offers-banner[hidden] { display: none; }
 .banner-lead { flex: 1; min-width: 0; }
 .eyebrow-inverted {
   color: rgba(255, 255, 255, 0.6);
@@ -4029,6 +3989,9 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink-mute, #888);
   line-height: 1.4;
 }
+/* Drawer Contact-tab actions row (drawer-only — main intro). The plan-review
+   `.contact-card .contact-actions` rule below resets margin/align via its
+   own selectors, so this default doesn't bleed into the audit page. */
 .contact-actions {
   display: flex;
   align-items: center;
@@ -4064,3 +4027,513 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   cursor: not-allowed;
 }
 .drawer-agent-btn-locked:hover { opacity: 0.55; }
+
+/* ─── Auth screen ───────────────────────────────────────────────── */
+body.auth-screen {
+  background: var(--bg);
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  margin: 0;
+}
+.auth-wrap {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  padding: 40px 16px;
+}
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 32px 28px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.04);
+}
+.auth-brand.brand {
+  /* Match the sidebar brand mark + wordmark exactly so the auth screen
+     reads as the same product, not a separate sign-in surface. */
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+}
+.auth-brand .brand-mark {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+}
+.auth-brand .brand-mark img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.auth-brand .wordmark {
+  font-family: var(--font-display, var(--font-serif, Georgia, serif));
+  font-size: 28px;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.auth-tag {
+  margin-top: 4px;
+  color: var(--ink-mute);
+  font-size: 13.5px;
+}
+.auth-tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 24px;
+  border-bottom: 1px solid var(--line);
+}
+.auth-tab {
+  background: none;
+  border: none;
+  padding: 10px 4px;
+  margin-right: 22px;
+  font-size: 14px;
+  color: var(--ink-mute);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.auth-tab.is-active {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.auth-form {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.auth-field span {
+  font-size: 12px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+}
+.auth-field input {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 14px;
+  color: var(--ink);
+  font-family: inherit;
+}
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+.auth-submit {
+  margin-top: 8px;
+  padding: 11px 14px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.auth-error {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  font-size: 13px;
+  border-radius: 6px;
+}
+.auth-info {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #14532d;
+  font-size: 13px;
+  border-radius: 6px;
+}
+/* Auth foot lays out the forgot-password link and the signup terms
+   checkbox in the same grid cell so toggling between login and signup
+   modes doesn't change card height. Only one is visible at a time —
+   `hidden` swaps which one shows. */
+.auth-foot {
+  display: grid;
+  margin-top: 18px;
+  font-size: 12.5px;
+  color: var(--ink-mute);
+  text-align: center;
+  min-height: 22px;
+}
+.auth-foot > * {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  justify-self: center;
+}
+/* `.auth-terms { display: flex }` below would otherwise win over the
+   user-agent `[hidden] { display: none }` because of specificity, so the
+   checkbox would stay visible in login mode. Force it down with a more
+   specific selector. */
+.auth-foot > [hidden] { display: none; }
+.auth-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--ink);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* Password show/hide toggle. The wrapper is positioned so the eye button
+   floats inside the right edge of the input, with enough right-padding on
+   the input itself that the masked dots never overlap the icon. */
+.pw-wrap {
+  position: relative;
+  display: block;
+}
+.pw-input {
+  /* Override the default auth-field input padding to make room for the eye. */
+  padding-right: 40px !important;
+  width: 100%;
+}
+.pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--ink-mute);
+  cursor: pointer;
+  padding: 0;
+  transition: color .12s, background .12s;
+}
+.pw-toggle:hover { color: var(--ink); background: var(--surface-alt); }
+.pw-toggle:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* Terms acceptance row on signup — sits in the same auth-foot slot as
+   "Forgot password?", visible only in signup mode. */
+.auth-terms {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  text-align: left;
+  max-width: 100%;
+}
+.auth-terms input[type="checkbox"] {
+  margin: 2px 0 0;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  accent-color: var(--ink);
+  cursor: pointer;
+}
+.auth-terms a {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.auth-terms a:hover { color: var(--green); }
+
+/* Drawer-level "did this match?" banner. Sits between the stats grid
+   and the drawer controls; only renders for resolved bills. Subtle
+   surface — we don't want to compete with the activity timeline. */
+#drawer-outcome-banner { padding: 0 22px; }
+.outcome-verify {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  margin: 12px 0 0;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.outcome-verify-text { flex: 1; color: var(--ink-soft); }
+.outcome-verify-text strong { color: var(--ink); font-weight: 600; display: block; margin-bottom: 2px; }
+.outcome-verify-actions { display: flex; gap: 8px; }
+.outcome-verify-done {
+  background: var(--green-tint);
+  border-color: rgba(23, 114, 69, 0.2);
+}
+.outcome-verify-done .outcome-verify-text strong { color: var(--green); }
+.outcome-verify-notes { font-style: italic; color: var(--ink-mute); }
+
+/* ─── Static legal pages (terms, privacy) ─────────────────────── */
+body.legal-page { background: var(--bg); }
+.legal-wrap {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 60px 28px 80px;
+  color: var(--ink);
+}
+.legal-brand.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+  color: var(--ink);
+  margin-bottom: 36px;
+}
+.legal-brand .brand-mark { width: 28px; height: 28px; }
+.legal-brand .brand-mark img { width: 100%; height: 100%; display: block; }
+.legal-brand .wordmark {
+  font-family: var(--font-display);
+  font-size: 24px;
+  letter-spacing: -0.01em;
+}
+.legal-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-mute);
+  margin-bottom: 8px;
+}
+.legal-title {
+  font-family: var(--font-display);
+  font-size: 38px;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  margin: 0 0 18px;
+  font-weight: 400;
+}
+.legal-lede {
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin: 0 0 28px;
+}
+.legal-wrap h2 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  margin: 32px 0 10px;
+}
+.legal-wrap p, .legal-wrap li {
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.legal-wrap ul { padding-left: 20px; margin: 8px 0 16px; }
+.legal-wrap li { margin-bottom: 6px; }
+.legal-wrap strong { color: var(--ink); font-weight: 600; }
+.legal-foot {
+  margin-top: 48px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.legal-foot a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line-strong); }
+.legal-foot a:hover { color: var(--green); }
+
+
+/* ─── Provider-contact card (plan-review tab) ────────────────────
+ * Distinct from the drawer Contact tab above (`.drawer-contact`).
+ * Selectors are scoped under `.contact-card` so they don't bleed into
+ * the drawer rules. */
+.contact-card {
+  margin: 28px 0;
+  padding: 18px 20px;
+}
+.contact-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.contact-title {
+  font-family: var(--font-serif, Georgia, serif);
+  font-size: 18px;
+  color: var(--ink);
+}
+
+.contact-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.contact-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.contact-row input {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 14px;
+  color: var(--ink);
+  font-family: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.contact-row input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+.contact-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.contact-notes {
+  font-size: 12.5px;
+  color: var(--ink-mute);
+  flex: 1;
+  min-width: 200px;
+}
+/* Plan-review actions row — scoped under `.contact-card` so it doesn't
+   override the drawer's `.contact-actions` rule above. */
+.contact-card .contact-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 0;
+}
+.contact-retry,
+.contact-save {
+  padding: 7px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+}
+.contact-save {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+.contact-retry:disabled,
+.contact-save:disabled { opacity: 0.6; cursor: progress; }
+.contact-sources {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+.contact-sources a {
+  color: var(--ink-mute);
+  text-decoration: underline;
+}
+.contact-sources a:hover { color: var(--ink); }
+
+@media (max-width: 640px) {
+  .contact-row { grid-template-columns: 1fr; }
+}
+
+/* ─── Empty hero (Bills / Comparison pre-first-bill) ────────────
+ * Brand-aligned: solid 1.5px border at ~32% ink, Instrument Serif
+ * headline, soft ink body, dark pill CTA. No logo here — the sidebar
+ * already carries the brand mark. */
+.empty-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+  padding: 40px 20px;
+}
+.empty-hero-card {
+  width: 100%;
+  max-width: 560px;
+  text-align: center;
+  padding: 56px 40px 48px;
+  background: var(--surface);
+  /* Solid border (not dashed) — dashed reads as a drop zone, and Bills /
+     Comparison don't accept drops. The CTA is the only way in.
+     ~32% ink + 1.5px so the card edge actually contrasts against the
+     off-white page; --line / --line-strong tokens disappeared at this
+     card size and dropped the empty state into the bg. */
+  border: 1.5px solid rgba(14, 14, 12, 0.32);
+  border-radius: 12px;
+}
+.empty-hero-title {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0 0 12px;
+}
+.empty-hero-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin: 0 auto 22px;
+  max-width: 56ch;
+}
+.empty-hero-cta {
+  /* Inherits .btn.btn-primary.btn-lg sizing; nothing custom needed.
+     Kept as a hook for future per-page tweaks. */
+}
+
+/* Approve-flow blocker (Resend / contact not configured). Sits above the
+   approve button so the user keeps the plan/findings context — better
+   than punting them to the full-page error view. */
+.approve-blocker {
+  margin: 16px 0;
+  padding: 16px 18px;
+  background: #fef9e7;
+  border: 1px solid #f3d99a;
+  border-radius: 8px;
+}
+.approve-blocker-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.approve-blocker-body {
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+/* Sidebar nav badge for routes that aren't live yet. Quieter than the
+   alert pill but visible enough to set expectations before the click. */
+.nav-tbd {
+  margin-left: auto;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: var(--ink-mute);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  text-transform: uppercase;
+}

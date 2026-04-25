@@ -1,5 +1,5 @@
 /**
- * User-editable settings persisted to `out/user-settings.json`.
+ * User-editable settings persisted to `out/users/<user_id>/user-settings.json`.
  *
  * Two independent sections:
  *   - profile: the human (name, contact, consent). Populated from the Profile tab.
@@ -9,13 +9,12 @@
  * this file only stores what the user explicitly sets through the UI.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { currentUserPaths } from "./user-paths.ts";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, "..", "..");
-const SETTINGS_DIR = join(ROOT, "out");
-const SETTINGS_PATH = join(SETTINGS_DIR, "user-settings.json");
+function settingsPath(): string {
+  return currentUserPaths().settingsPath;
+}
 
 export type AgentTone = "polite" | "firm" | "aggressive";
 
@@ -37,7 +36,6 @@ interface PersistedSettings {
   tune?: {
     tone?: AgentTone;
     channel_email?: boolean;
-    channel_sms?: boolean;
     channel_voice?: boolean;
     floor_pct?: number;
     email_digest?: boolean;
@@ -60,17 +58,19 @@ interface PersistedSettings {
 }
 
 function load(): PersistedSettings {
-  if (!existsSync(SETTINGS_PATH)) return {};
+  const path = settingsPath();
+  if (!existsSync(path)) return {};
   try {
-    return JSON.parse(readFileSync(SETTINGS_PATH, "utf-8")) as PersistedSettings;
+    return JSON.parse(readFileSync(path, "utf-8")) as PersistedSettings;
   } catch {
     return {};
   }
 }
 
 function save(s: PersistedSettings): void {
-  mkdirSync(SETTINGS_DIR, { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(s, null, 2));
+  const path = settingsPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(s, null, 2));
 }
 
 export interface ProfileConfig {
@@ -163,7 +163,7 @@ export function setProfileConfig(
 
 export interface TuneConfig {
   tone: AgentTone;
-  channels: { email: boolean; sms: boolean; voice: boolean };
+  channels: { email: boolean; voice: boolean };
   /** Target discount off the original balance, 0–100. The floor is
    * derived at run-time from this by the caller. */
   floor_pct: number;
@@ -178,7 +178,6 @@ export function getTuneConfig(): TuneConfig {
     tone: t.tone ?? "firm",
     channels: {
       email: t.channel_email !== false,
-      sms: false,
       voice: t.channel_voice !== false,
     },
     floor_pct: typeof t.floor_pct === "number" ? t.floor_pct : 50,
@@ -272,7 +271,7 @@ export function applyIntegrationsToEnv(): void {
 
 export function setTuneConfig(input: {
   tone?: AgentTone;
-  channels?: Partial<{ email: boolean; sms: boolean; voice: boolean }>;
+  channels?: Partial<{ email: boolean; voice: boolean }>;
   floor_pct?: number;
   email_digest?: boolean;
   mobile_alerts?: boolean;
@@ -283,7 +282,6 @@ export function setTuneConfig(input: {
   if (input.tone && ["polite", "firm", "aggressive"].includes(input.tone)) t.tone = input.tone;
   if (input.channels) {
     if (input.channels.email !== undefined) t.channel_email = !!input.channels.email;
-    if (input.channels.sms !== undefined) t.channel_sms = !!input.channels.sms;
     if (input.channels.voice !== undefined) t.channel_voice = !!input.channels.voice;
   }
   if (typeof input.floor_pct === "number" && isFinite(input.floor_pct)) {
