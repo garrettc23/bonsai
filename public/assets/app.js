@@ -554,9 +554,83 @@ async function init() {
   await loadHistory();
   updateNavCounts();
   renderApprovalsOnOverview();
+  loadReceipts();
 
   // Default view
   showNav("overview");
+}
+
+let receiptsCache = null;
+async function loadReceipts() {
+  try {
+    receiptsCache = await fetch("/api/receipts").then((r) => r.json());
+  } catch {
+    receiptsCache = { rows: [], total_saved: 0, count: 0 };
+  }
+  renderReceipts();
+  return receiptsCache;
+}
+
+function fmtDollars(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "$0";
+  const num = Number(n);
+  return "$" + Math.round(num).toLocaleString("en-US");
+}
+
+function renderReceipts() {
+  const block = document.getElementById("receipts-block");
+  const totalEl = document.getElementById("receipts-total");
+  const countEl = document.getElementById("receipts-count");
+  const subEl = document.getElementById("receipts-sub");
+  const rowsEl = document.getElementById("receipts-rows");
+  if (!block || !totalEl || !rowsEl) return;
+  const data = receiptsCache ?? { rows: [], total_saved: 0, count: 0 };
+  if (!data.rows || data.rows.length === 0) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  totalEl.textContent = fmtDollars(data.total_saved);
+  if (countEl) countEl.textContent = String(data.count);
+  if (subEl) {
+    subEl.innerHTML =
+      'Across <span id="receipts-count">' +
+      String(data.count) +
+      "</span> bill" +
+      (data.count === 1 ? "" : "s");
+  }
+  // Show top 5 most recent.
+  const top = data.rows.slice(0, 5);
+  rowsEl.innerHTML = top
+    .map((r) => {
+      const provider = r.provider_name || r.name;
+      const dos = r.date_of_service ? " · " + r.date_of_service : "";
+      const channel = (r.channel_used || "—").toString();
+      const channelTag =
+        '<span class="receipt-channel">' + channel + "</span>";
+      const quote = r.source_quote
+        ? '<div class="receipt-quote">“' +
+          escapeHtml(r.source_quote.length > 120 ? r.source_quote.slice(0, 117) + "…" : r.source_quote) +
+          "”</div>"
+        : "";
+      return (
+        '<div class="receipt-row">' +
+        '<div><div class="receipt-provider">' +
+        escapeHtml(provider) +
+        "</div>" +
+        '<div class="receipt-meta">' +
+        escapeHtml((r.outcome || "resolved").replace(/_/g, " ")) +
+        dos +
+        "</div></div>" +
+        '<div class="receipt-saved">' +
+        fmtDollars(r.patient_saved) +
+        "</div>" +
+        channelTag +
+        quote +
+        "</div>"
+      );
+    })
+    .join("");
 }
 
 async function loadHistory() {
@@ -565,6 +639,10 @@ async function loadHistory() {
   } catch {
     historyCache = { audits: [], letters: [] };
   }
+  // The cumulative-saved counter on the overview page is fed by the same
+  // backend artifacts (out/report-*.json), so refresh it whenever history
+  // refreshes — that's roughly "after anything important happened."
+  loadReceipts();
   return historyCache;
 }
 
@@ -783,6 +861,31 @@ function renderReviewView(report) {
   // synthesized list if the endpoint errors — the demo should never show
   // an empty opportunities panel.
   void loadOpportunities(report);
+  void refreshBccHint();
+}
+
+async function refreshBccHint() {
+  const hint = document.getElementById("review-bcc-hint");
+  if (!hint) return;
+  let email = null;
+  try {
+    const sdata = await fetch("/api/settings").then((r) => r.json());
+    email = sdata?.profile?.email ?? null;
+  } catch {
+    email = null;
+  }
+  const span = hint.querySelector("span:last-child");
+  if (email) {
+    if (span)
+      span.textContent =
+        "You'll be BCC'd at " + email + " on every email Bonsai sends.";
+    hint.hidden = false;
+  } else {
+    if (span)
+      span.textContent =
+        "Add your email in Settings → Profile to get BCC'd on every message.";
+    hint.hidden = false;
+  }
 }
 
 async function loadOpportunities(report) {
@@ -4506,9 +4609,123 @@ function renderDrawerFindings(row, report) {
   }).join("");
 }
 
+// Build a high-level "what the agent did" step list from the email thread —
+// not a transcript, but the negotiator's reasoning trail. Reads the
+// outcome state for the final step. Classifies inbound replies by keyword
+// since we don't yet persist the agent's classification (planned).
+function buildAgentSteps(email) {
+  if (!email?.messages?.length) return [];
+  const steps = [];
+  const messages = [...email.messages].sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const isOut = m.role === "outbound";
+    if (isOut && i === 0) {
+      steps.push({
+        label: "Drafted initial appeal",
+        detail: "Letter grounded in analyzer findings; cited NSA where applicable.",
+        kind: "outbound",
+      });
+      continue;
+    }
+    if (!isOut) {
+      const cls = classifyInbound(m.body ?? "");
+      steps.push({
+        label: `Reply received — classified as ${cls.label}`,
+        detail: cls.hint,
+        kind: cls.kind,
+      });
+      continue;
+    }
+    // Subsequent outbound: agent's response after seeing a reply.
+    const tactic = inferOutboundTactic(m.body ?? "");
+    steps.push({
+      label: `Drafted follow-up — ${tactic.label}`,
+      detail: tactic.hint,
+      kind: "outbound",
+    });
+  }
+  // Outcome step from saved NegotiationState.
+  const outcome = email?.state?.outcome;
+  if (outcome) {
+    if (outcome.status === "resolved") {
+      steps.push({
+        label: `Marked resolved — ${(outcome.resolution || "").replace(/_/g, " ")}`,
+        detail: outcome.notes || "",
+        kind: "resolved",
+      });
+    } else if (outcome.status === "escalated") {
+      steps.push({
+        label: `Escalated — ${outcome.reason}`,
+        detail: outcome.notes || "",
+        kind: "escalated",
+      });
+    }
+  }
+  return steps;
+}
+
+function classifyInbound(body) {
+  const t = String(body || "").toLowerCase();
+  if (/lawyer|attorney|legal action|collections agency/.test(t))
+    return { label: "legal pressure", kind: "danger", hint: "Provider escalated to legal language." };
+  if (/(approv|adjust|credit|reduce|reduced|zero out|write off|forgive|removed)/.test(t))
+    return { label: "concession", kind: "good", hint: "Provider conceded part or all of the dispute." };
+  if (/(deny|denied|decline|won't|will not|unable to|cannot adjust)/.test(t))
+    return { label: "denial", kind: "warn", hint: "Provider rejected the appeal — counter with NSA + EOB." };
+  if (/(review|looking into|investigate|we will|please allow|processing|pending)/.test(t))
+    return { label: "stall", kind: "warn", hint: "Provider asked for time without committing — keep pressure on." };
+  if (/(send.*records|provide.*documentation|need.*itemized|please send)/.test(t))
+    return { label: "request for info", kind: "warn", hint: "Provider asked for more documentation." };
+  return { label: "ambiguous", kind: "warn", hint: "Reply did not match a known pattern." };
+}
+
+function inferOutboundTactic(body) {
+  const t = String(body || "").toLowerCase();
+  if (/no surprises act|nsa|surprise billing/.test(t))
+    return { label: "cited No Surprises Act", hint: "Anchored on federal law for balance billing." };
+  if (/duplicate|billed twice|same procedure|same date of service/.test(t))
+    return { label: "called out duplicate billing", hint: "Pointed to repeated charges in the bill." };
+  if (/14 day|14-day|deadline|within 14|by \d/.test(t))
+    return { label: "set 14-day response deadline", hint: "Pressed a concrete reply window." };
+  if (/escalat|supervis|manager/.test(t))
+    return { label: "asked for a supervisor", hint: "Requested escalation in the billing dept." };
+  if (/cfpb|fcra|credit report/.test(t))
+    return { label: "cited credit-reporting protection", hint: "Anchored on FCRA / CFPB rules." };
+  return { label: "restated the dispute", hint: "Quoted the EOB and reasserted the patient responsibility." };
+}
+
+function renderAgentTimeline(email) {
+  const steps = buildAgentSteps(email);
+  if (steps.length === 0) return "";
+  const items = steps
+    .map((s, i) => {
+      const last = i === steps.length - 1;
+      return `
+        <li class="agent-step kind-${s.kind}">
+          <div class="agent-step-dot" aria-hidden="true">${i + 1}</div>
+          <div class="agent-step-body">
+            <div class="agent-step-label">${escapeHtml(s.label)}</div>
+            ${s.detail ? `<div class="agent-step-detail">${escapeHtml(s.detail)}</div>` : ""}
+          </div>
+          ${last ? "" : '<div class="agent-step-bar" aria-hidden="true"></div>'}
+        </li>`;
+    })
+    .join("");
+  return `
+    <div class="agent-timeline">
+      <div class="dmsg-section-head"><div class="eyebrow">Agent reasoning</div><div class="mono" style="font-size:11px;color:var(--ink-mute)">${steps.length} step${steps.length === 1 ? "" : "s"}</div></div>
+      <ol class="agent-steps">${items}</ol>
+    </div>`;
+}
+
 function renderDrawerMessages(row, report) {
   const parts = [];
   const email = report?.email_thread;
+  if (email) {
+    const tl = renderAgentTimeline(email);
+    if (tl) parts.push(tl);
+  }
   if (email?.messages?.length) {
     parts.push(`<div class="dmsg-section-head"><div class="eyebrow">Email thread</div><div class="mono" style="font-size:11px;color:var(--ink-mute)">${email.messages.length} msgs</div></div>`);
     email.messages.forEach((m) => {
