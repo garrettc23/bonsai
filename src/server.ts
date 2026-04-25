@@ -550,6 +550,21 @@ async function handleContactOverride(req: Request): Promise<Response> {
     user_edited: true,
     resolved_at: Date.now(),
   };
+  // Also mirror into `run.contact` — that's the field hasContactChannel
+  // reads at /api/approve. Without this, the user can override a contact
+  // here but the launch gate still 412s because it only sees the
+  // separately-saved drawer contact. Two contact fields existed for
+  // historical reasons (resolved_contact = AI suggestion, contact =
+  // user-typed in the drawer); for the plan-review card we keep them
+  // in lockstep.
+  run.contact = {
+    ...(run.contact ?? {}),
+    support_email: cleanEmail || null,
+    support_phone: cleanPhone || null,
+    bill_kind: run.contact?.bill_kind
+      ?? (run.partial_report?.analyzer?.metadata?.bill_kind as BillContactT["bill_kind"])
+      ?? "medical",
+  };
   run.contact_status = "resolved";
   delete run.contact_error;
   savePending(run);
@@ -791,6 +806,18 @@ async function handleOpportunities(req: Request): Promise<Response> {
   if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
   const run = loadPending(body.run_id);
   if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+
+  // Fast path: ship a hand-curated opportunities list for any fixture
+  // that has fixtures/<name>.opportunities.json next to its PDF. Skips a
+  // ~10s Opus call on the demo path. Real uploads still hit the live
+  // model below.
+  const cachedOppsPath = join(FIXTURES_DIR, `${run.fixture_name}.opportunities.json`);
+  if (existsSync(cachedOppsPath)) {
+    const cached = JSON.parse(readFileSync(cachedOppsPath, "utf-8")) as {
+      opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+    };
+    return Response.json({ opportunities: cached.opportunities });
+  }
 
   const r = run.partial_report;
   const meta = r.analyzer?.metadata ?? {};

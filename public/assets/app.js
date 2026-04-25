@@ -1458,7 +1458,13 @@ async function loadOpportunities(report) {
       desc: o.description,
       estimate: Number(o.dollar_estimate) || 0,
     }));
-    const total = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const rawTotal = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    // The model occasionally sums opportunity estimates above the bill's
+    // original balance — that's nonsense (you can't save more than you
+    // owe). Clamp the headline number so the user never sees it. The
+    // per-opportunity rows keep their own numbers since they're upper-
+    // bound estimates that may overlap.
+    const total = clampSaved(rawTotal, report.summary?.original_balance);
     const provider = report.analyzer?.metadata?.provider_name ?? "the provider";
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
@@ -1468,7 +1474,8 @@ async function loadOpportunities(report) {
   } catch (err) {
     console.warn("[opps] falling back to synthesized", err);
     const fallback = buildOpportunities(report);
-    const total = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const rawTotal = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const total = clampSaved(rawTotal, report.summary?.original_balance);
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this bill.`
       : "Bill reviewed — a few angles to try.";
@@ -1731,8 +1738,10 @@ async function approveAndRun() {
   // error toast. The server still enforces the same rule defensively.
   const emailInput = document.getElementById("contact-email");
   const phoneInput = document.getElementById("contact-phone");
-  const hasEmail = !!emailInput?.value?.trim();
-  const hasPhone = !!phoneInput?.value?.trim();
+  const liveEmail = emailInput?.value?.trim() || "";
+  const livePhone = phoneInput?.value?.trim() || "";
+  const hasEmail = !!liveEmail;
+  const hasPhone = !!livePhone;
   if (!hasEmail && !hasPhone) {
     const card = document.getElementById("contact-card");
     if (card) {
@@ -1741,6 +1750,26 @@ async function approveAndRun() {
     }
     if (emailInput) setTimeout(() => emailInput.focus(), 350);
     return;
+  }
+  // Auto-save the contact before approve. Without this, a user who
+  // typed phone (or email) into the contact card but didn't click Save
+  // would land on the server's missing_contact gate — the server reads
+  // the persisted `run.contact`, not the live DOM input. Auto-saving
+  // here turns "type phone, click Accept" into the one-click flow the
+  // user expects.
+  try {
+    await fetch("/api/contact/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        run_id: reviewState.run_id,
+        email: liveEmail,
+        phone: livePhone,
+      }),
+    });
+  } catch (err) {
+    console.warn("[approve] contact auto-save failed", err);
   }
   // Negotiation runs in the background. Kick it off, then hand the user
   // off to the Bills view — updates will stream in as the bg job progresses
