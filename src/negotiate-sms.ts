@@ -50,6 +50,10 @@ export interface SmsNegotiationState {
   outcome: SmsNegotiationOutcome;
   user_directives?: string;
   agent_tone?: AgentTone;
+  /** Compact summary of prior negotiation attempts on other channels.
+   * Rendered into the analyzer context so the SMS agent doesn't repeat the
+   * email's failed arguments verbatim. */
+  prior_attempts_summary?: string;
 }
 
 function buildSmsSystemPrompt(
@@ -179,8 +183,16 @@ function renderThreadForClaude(thread: { outbound: SentSms[]; inbound: InboundSm
     .join("\n\n");
 }
 
-function renderAnalyzerContext(result: AnalyzerResult, floor: number): string {
+function renderAnalyzerContext(
+  result: AnalyzerResult,
+  floor: number,
+  priorAttemptsSummary?: string,
+): string {
   const high = result.errors.filter((e) => e.confidence === "high");
+  const priorBlock =
+    priorAttemptsSummary && priorAttemptsSummary.trim()
+      ? `\n${priorAttemptsSummary.trim()}\n`
+      : "";
   return `## Dispute context (from grounded analyzer)
 
 Patient: ${result.metadata.patient_name ?? "(unknown)"}
@@ -205,7 +217,7 @@ ${high
    Why: ${e.evidence.trim()}`,
   )
   .join("\n")}
-`;
+${priorBlock}`;
 }
 
 export interface StartSmsOpts {
@@ -217,6 +229,8 @@ export interface StartSmsOpts {
   user_directives?: string;
   agent_tone?: AgentTone;
   anthropic?: Anthropic;
+  /** Compact summary of prior negotiation attempts on other channels. */
+  prior_attempts_summary?: string;
 }
 
 export interface StartSmsResult {
@@ -236,7 +250,7 @@ export async function startSmsNegotiation(opts: StartSmsOpts): Promise<StartSmsR
   const thread_id = newSmsId("sms-thread");
   const anthropic = opts.anthropic ?? new Anthropic();
 
-  const context = renderAnalyzerContext(analyzer, floor);
+  const context = renderAnalyzerContext(analyzer, floor, opts.prior_attempts_summary);
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
@@ -288,6 +302,7 @@ export async function startSmsNegotiation(opts: StartSmsOpts): Promise<StartSmsR
     outcome: { status: "in_progress" },
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    prior_attempts_summary: opts.prior_attempts_summary,
   };
   return { thread_id, sent: opener, state };
 }
@@ -313,7 +328,11 @@ export async function stepSmsNegotiation(opts: StepSmsOpts): Promise<SmsNegotiat
   );
   if (inboundSinceLast.length === 0) return state;
 
-  const context = renderAnalyzerContext(state.analyzer, state.final_acceptable_floor);
+  const context = renderAnalyzerContext(
+    state.analyzer,
+    state.final_acceptable_floor,
+    state.prior_attempts_summary,
+  );
   const rendered = renderThreadForClaude(thread);
 
   const messages: Anthropic.MessageParam[] = [

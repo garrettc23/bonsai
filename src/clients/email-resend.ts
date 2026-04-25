@@ -49,6 +49,7 @@ export class ResendEmailClient implements EmailClient {
         filename: a.filename,
         content: Buffer.from(a.content).toString("base64"),
       })),
+      ...(msg.bcc && msg.bcc.length > 0 ? { bcc: msg.bcc } : {}),
     };
 
     const res = await fetch("https://api.resend.com/emails", {
@@ -73,6 +74,7 @@ export class ResendEmailClient implements EmailClient {
       body_markdown: msg.body_markdown,
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
+      bcc: msg.bcc,
     };
     const thread = loadThread(msg.thread_id);
     thread.outbound.push(sent);

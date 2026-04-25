@@ -96,6 +96,9 @@ export interface RunNegotiationAgentOpts {
   user_directives?: string;
   /** Tone override for every negotiator's system prompt. */
   agent_tone?: AgentTone;
+  /** BCC recipients on every outbound email — typically the patient's own
+   * inbox so they stay in the loop on every message the agent sends. */
+  bcc?: string[];
   anthropic?: Anthropic;
 }
 
@@ -122,6 +125,8 @@ async function runEmailAttempt(opts: {
   original_balance: number;
   user_directives?: string;
   agent_tone?: AgentTone;
+  prior_attempts_summary?: string;
+  bcc?: string[];
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["email"] }> {
   const client = new MockEmailClient();
@@ -133,6 +138,8 @@ async function runEmailAttempt(opts: {
     final_acceptable_floor: opts.floor,
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    prior_attempts_summary: opts.prior_attempts_summary,
+    bcc: opts.bcc,
   });
   let state = initState;
   saveNegotiationState(state);
@@ -199,6 +206,7 @@ async function runSmsAttempt(opts: {
   original_balance: number;
   user_directives?: string;
   agent_tone?: AgentTone;
+  prior_attempts_summary?: string;
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["sms"] }> {
   const client = new MockSmsClient();
@@ -210,6 +218,7 @@ async function runSmsAttempt(opts: {
     final_acceptable_floor: opts.floor,
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    prior_attempts_summary: opts.prior_attempts_summary,
     anthropic: opts.anthropic,
   });
   let state = initState;
@@ -312,26 +321,15 @@ async function runVoiceAttempt(opts: {
 }
 
 /**
- * Inject prior-attempt context into the analyzer summary passed to the next
- * channel. The downstream modules render `analyzer.summary.notes` (if present)
- * in their system prompts. We piggy-back on that by setting a non-breaking
- * annotation field. It's read by all three negotiator modules via
- * renderAnalyzerContext, which uses `analyzer.summary.high_confidence_total`
- * and `analyzer.metadata` — neither channel actually reads a `.notes` field
- * today, so this is a no-op unless we also pass a prior_attempts string
- * explicitly. To avoid re-plumbing, we rely on the simulator personas being
- * stateful-enough (stall_then_concede) that a second channel naturally gets a
- * stricter opening because we also shift persona in that branch. See below.
- *
- * The cleaner fix is to thread a `prior_attempts` option into every starter.
- * For now we instead ESCALATE the simulator persona on the next channel —
- * e.g. email stalls, so SMS gets stall_then_concede too but with the rep's
- * retained context. This ends up being close enough for v1.
- */
-
-/**
  * Main agent loop. Runs email → sms → voice until the floor is hit or all
  * channels are exhausted. Picks the single best attempt and reports it.
+ *
+ * Prior-attempt context (`formatPriorAttempts`) is threaded into each later
+ * channel's analyzer context via `prior_attempts_summary`, so the SMS agent
+ * doesn't repeat the email's failed arguments verbatim and the voice agent
+ * sees both. Voice currently uses the simulator path which doesn't accept
+ * the summary yet — flagged as TODO; persona escalation continues to fill
+ * that gap.
  */
 export async function runNegotiationAgent(
   opts: RunNegotiationAgentOpts,
@@ -393,6 +391,7 @@ export async function runNegotiationAgent(
         original_balance,
         user_directives: opts.user_directives,
         agent_tone: opts.agent_tone,
+        bcc: opts.bcc,
         anthropic,
       });
       attempts.push(attempt);
@@ -415,7 +414,8 @@ export async function runNegotiationAgent(
     }
   }
 
-  // 2. SMS
+  // 2. SMS — gets prior-attempt context so it can anchor on what email
+  // already extracted and avoid re-arguing settled points.
   if (channels.sms) {
     try {
       const { attempt, view } = await runSmsAttempt({
@@ -428,6 +428,7 @@ export async function runNegotiationAgent(
         original_balance,
         user_directives: opts.user_directives,
         agent_tone: opts.agent_tone,
+        prior_attempts_summary: formatPriorAttempts(attempts),
         anthropic,
       });
       attempts.push(attempt);
@@ -494,10 +495,6 @@ export async function runNegotiationAgent(
     result.outcome = "exhausted_no_offer";
     result.headline = `All 3 channels exhausted, no concession secured. Recommend human escalation.`;
   }
-
-  // Reference for future work: the commented-out formatPriorAttempts would be
-  // threaded into each channel's starter so subsequent reps know the history.
-  void formatPriorAttempts;
 
   return result;
 }
