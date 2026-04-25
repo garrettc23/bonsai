@@ -43,6 +43,14 @@ interface PersistedSettings {
     email_digest?: boolean;
     mobile_alerts?: boolean;
   };
+  integrations?: {
+    anthropic_api_key?: string;
+    resend_api_key?: string;
+    resend_from?: string;
+    elevenlabs_api_key?: string;
+    elevenlabs_agent_id?: string;
+    elevenlabs_webhook_base?: string;
+  };
   // Legacy keys from the old Account card — read once during migration.
   account_name?: string;
   account_email?: string;
@@ -170,7 +178,7 @@ export function getTuneConfig(): TuneConfig {
     tone: t.tone ?? "firm",
     channels: {
       email: t.channel_email !== false,
-      sms: t.channel_sms !== false,
+      sms: false,
       voice: t.channel_voice !== false,
     },
     floor_pct: typeof t.floor_pct === "number" ? t.floor_pct : 50,
@@ -179,6 +187,87 @@ export function getTuneConfig(): TuneConfig {
     mobile_alerts:
       t.mobile_alerts !== undefined ? !!t.mobile_alerts : s.notify_mobile_alerts !== false,
   };
+}
+
+export interface IntegrationsConfig {
+  anthropic_api_key: string | null;
+  resend_api_key: string | null;
+  resend_from: string | null;
+  elevenlabs_api_key: string | null;
+  elevenlabs_agent_id: string | null;
+  elevenlabs_webhook_base: string | null;
+}
+
+type IntegrationKey = keyof IntegrationsConfig;
+
+const INTEGRATION_KEYS: IntegrationKey[] = [
+  "anthropic_api_key",
+  "resend_api_key",
+  "resend_from",
+  "elevenlabs_api_key",
+  "elevenlabs_agent_id",
+  "elevenlabs_webhook_base",
+];
+
+export function getIntegrationsConfig(): IntegrationsConfig {
+  const s = load();
+  const i = s.integrations ?? {};
+  return {
+    anthropic_api_key: i.anthropic_api_key?.trim() || null,
+    resend_api_key: i.resend_api_key?.trim() || null,
+    resend_from: i.resend_from?.trim() || null,
+    elevenlabs_api_key: i.elevenlabs_api_key?.trim() || null,
+    elevenlabs_agent_id: i.elevenlabs_agent_id?.trim() || null,
+    elevenlabs_webhook_base: i.elevenlabs_webhook_base?.trim() || null,
+  };
+}
+
+/**
+ * Apply integration writes. For each key, `undefined` means "no change",
+ * an empty string means "clear the stored value", and any other string is
+ * saved. Pushes the resulting effective value into process.env so running
+ * services pick it up on the next API call without a server restart.
+ */
+export function setIntegrationsConfig(
+  input: Partial<Record<IntegrationKey, string | null | undefined>>,
+): void {
+  const current = load();
+  const next: PersistedSettings = {
+    ...current,
+    integrations: { ...(current.integrations ?? {}) },
+  };
+  const ints = next.integrations!;
+  for (const k of INTEGRATION_KEYS) {
+    const v = input[k];
+    if (v === undefined) continue;
+    const trimmed = (v ?? "").trim();
+    if (trimmed) ints[k] = trimmed;
+    else delete ints[k];
+  }
+  save(next);
+  applyIntegrationsToEnv();
+}
+
+/**
+ * On server startup (and after every save) push user-settings integration
+ * values into process.env. `.env` stays the canonical source on a fresh
+ * clone; once the user sets a value through the UI it wins.
+ */
+export function applyIntegrationsToEnv(): void {
+  const i = getIntegrationsConfig();
+  const map: Array<[string | null, string]> = [
+    [i.anthropic_api_key, "ANTHROPIC_API_KEY"],
+    [i.resend_api_key, "RESEND_API_KEY"],
+    [i.resend_from, "RESEND_FROM"],
+    // Two call sites read RESEND_FROM_EMAIL — populate both so either works.
+    [i.resend_from, "RESEND_FROM_EMAIL"],
+    [i.elevenlabs_api_key, "ELEVENLABS_API_KEY"],
+    [i.elevenlabs_agent_id, "ELEVENLABS_AGENT_ID"],
+    [i.elevenlabs_webhook_base, "ELEVENLABS_WEBHOOK_BASE"],
+  ];
+  for (const [value, envKey] of map) {
+    if (value) process.env[envKey] = value;
+  }
 }
 
 export function setTuneConfig(input: {

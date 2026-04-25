@@ -601,7 +601,7 @@ async function handleOpportunities(req: Request): Promise<Response> {
     "Given an audited bill, propose 3-6 SPECIFIC strategies to lower it. Every strategy must make sense for THIS bill's category and context — no generic 'competitor quote' on a one-off dental bill, no 'charity care' on a subscription, no 'cancel threat' on a one-time procedure.",
     "",
     "Rules:",
-    "- Each strategy must be category-appropriate. Medical/dental → charity care, financial hardship, out-of-network negotiation, No-Surprises-Act. Pet → payment plan, pet-insurance reimbursement, vendor price-match if applicable. Utility/telecom → retention offer, rate-class recheck, autopay discount, competitor switch threat. Subscription/software → cancel-threat retention, annual prepay, loyalty tier. Contractor/legal → change-order audit, warranty, BBB/bar complaint leverage. One-time service bills never use 'cancel threat' or 'switch competitor'.",
+    "- Each strategy must be category-appropriate. Medical/dental → charity care, financial hardship, out-of-network negotiation, No-Surprises-Act. Pet → payment plan, pet-insurance reimbursement, vendor price-match if applicable. Utility/telecom → retention offer, rate-class recheck, autopay discount, competitor switch threat. Subscription/software → cancel-threat retention, annual prepay, loyalty tier. Contractor/legal → change-order audit, warranty, state licensing-board or bar complaint leverage. One-time service bills never use 'cancel threat' or 'switch competitor'.",
     "- Dollar estimates should be grounded: billing-error disputes = defensible amount. Negotiation of remaining balance = realistic percentage (typically 5-25%). Loophole/discount = specific policy-based amount if inferrable, else a modest %.",
     "- Titles are 2-6 words, imperative voice ('Dispute billing errors', 'Apply for charity care', 'Demand retention credit').",
     "- Descriptions are 1-2 sentences, concrete, reference the actual bill (provider name, line items) when it sharpens the point.",
@@ -1426,11 +1426,46 @@ async function handleSaveTune(req: Request): Promise<Response> {
   return Response.json({ ok: true, tune: getTuneConfig() });
 }
 
+// Anthropic keys look like `sk-ant-api03-...` (40+ chars). The onboarding
+// placeholder ending in "..." is a common false positive — treat it as unset.
+function looksLikeRealApiKey(v: string | undefined | null): boolean {
+  if (!v) return false;
+  const t = v.trim();
+  if (!t) return false;
+  if (t.endsWith("...")) return false;
+  return t.length >= 16;
+}
+function last4(v: string | undefined | null): string | null {
+  if (!v) return null;
+  const t = v.trim();
+  return t.length > 4 ? t.slice(-4) : null;
+}
+
 async function handleSettings(): Promise<Response> {
-  const has = (k: string) => Boolean(process.env[k] && process.env[k]!.length > 0);
-  const { getProfileConfig, getTuneConfig } = await import("./lib/user-settings.ts");
+  const { getProfileConfig, getTuneConfig, getIntegrationsConfig } = await import("./lib/user-settings.ts");
   const profile = getProfileConfig();
   const tune = getTuneConfig();
+  const stored = getIntegrationsConfig();
+
+  const envVal = (k: string): string | undefined => {
+    const v = process.env[k];
+    return v && v.length > 0 ? v : undefined;
+  };
+  // Effective value: the one the running agent actually uses. Stored wins
+  // because applyIntegrationsToEnv() copies it into process.env on save.
+  const eff = {
+    anthropic_api_key: stored.anthropic_api_key ?? envVal("ANTHROPIC_API_KEY") ?? null,
+    resend_api_key: stored.resend_api_key ?? envVal("RESEND_API_KEY") ?? null,
+    resend_from: stored.resend_from ?? envVal("RESEND_FROM") ?? envVal("RESEND_FROM_EMAIL") ?? null,
+    elevenlabs_api_key: stored.elevenlabs_api_key ?? envVal("ELEVENLABS_API_KEY") ?? null,
+    elevenlabs_agent_id: stored.elevenlabs_agent_id ?? envVal("ELEVENLABS_AGENT_ID") ?? null,
+    elevenlabs_webhook_base: stored.elevenlabs_webhook_base ?? envVal("ELEVENLABS_WEBHOOK_BASE") ?? null,
+  };
+
+  const anthropicConnected = looksLikeRealApiKey(eff.anthropic_api_key);
+  const resendConnected = looksLikeRealApiKey(eff.resend_api_key);
+  const elevenConnected = looksLikeRealApiKey(eff.elevenlabs_api_key);
+
   return Response.json({
     profile,
     tune,
@@ -1438,46 +1473,41 @@ async function handleSettings(): Promise<Response> {
       {
         key: "anthropic",
         label: "Anthropic Claude",
-        status: has("ANTHROPIC_API_KEY") ? "connected" : "missing",
-        detail: has("ANTHROPIC_API_KEY")
+        status: anthropicConnected ? "connected" : "missing",
+        detail: anthropicConnected
           ? "Sonnet 4.5 powering analyzer + negotiation loops."
-          : "Set ANTHROPIC_API_KEY in .env. Required.",
-        env: ["ANTHROPIC_API_KEY"],
+          : "Paste an API key from console.anthropic.com. Required for every Claude call.",
         required: true,
+        fields: [
+          { name: "anthropic_api_key", label: "API key", kind: "secret", last4: last4(eff.anthropic_api_key), from_user: !!stored.anthropic_api_key },
+        ],
       },
       {
         key: "resend",
         label: "Resend (email)",
-        status: has("RESEND_API_KEY") ? "connected" : "simulated",
-        detail: has("RESEND_API_KEY")
-          ? `Outbound from ${process.env.RESEND_FROM ?? "(RESEND_FROM unset)"}. Inbound via simulator until webhook wired.`
-          : "Email flows run against MockEmailClient — in-memory thread state, role-played replies.",
-        env: ["RESEND_API_KEY", "RESEND_FROM"],
-        required: false,
+        status: resendConnected ? "connected" : "missing",
+        detail: resendConnected
+          ? `Real outbound email from ${eff.resend_from ?? "(sender unset)"}. Inbound via simulator until a webhook is wired.`
+          : "Required to send real negotiation email. Until connected, email flows fall back to the in-memory simulator.",
+        required: true,
+        fields: [
+          { name: "resend_api_key", label: "API key", kind: "secret", last4: last4(eff.resend_api_key), from_user: !!stored.resend_api_key },
+          { name: "resend_from", label: "From address", kind: "text", value: eff.resend_from ?? "", placeholder: "Bonsai <appeals@yourdomain.com>", from_user: !!stored.resend_from },
+        ],
       },
       {
         key: "elevenlabs",
-        label: "ElevenLabs (voice)",
-        status: has("ELEVENLABS_API_KEY") ? "connected" : "simulated",
-        detail: has("ELEVENLABS_API_KEY")
-          ? `Agent ID ${process.env.ELEVENLABS_AGENT_ID ?? "(unset — create via client.createAgent())"}.`
-          : "Voice flows run the dual-Claude simulator. Real tool-handlers dispatch either way.",
-        env: ["ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID", "ELEVENLABS_WEBHOOK_BASE"],
-        required: false,
-      },
-      {
-        key: "twilio",
-        label: "Twilio (SMS)",
-        status:
-          has("TWILIO_ACCOUNT_SID") && has("TWILIO_AUTH_TOKEN") && has("TWILIO_FROM_NUMBER")
-            ? "connected"
-            : "simulated",
-        detail:
-          has("TWILIO_ACCOUNT_SID") && has("TWILIO_AUTH_TOKEN") && has("TWILIO_FROM_NUMBER")
-            ? `Outbound from ${process.env.TWILIO_FROM_NUMBER}. Inbound via Messaging webhook.`
-            : "SMS flows run against MockSmsClient — disk-backed thread, simulated billing-dept replies.",
-        env: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
-        required: false,
+        label: "ElevenLabs (call)",
+        status: elevenConnected ? "connected" : "missing",
+        detail: elevenConnected
+          ? `Agent ID ${eff.elevenlabs_agent_id ?? "(unset — create via client.createAgent())"}.`
+          : "Required to place real negotiation calls. Until connected, voice flows run the dual-Claude simulator.",
+        required: true,
+        fields: [
+          { name: "elevenlabs_api_key", label: "API key", kind: "secret", last4: last4(eff.elevenlabs_api_key), from_user: !!stored.elevenlabs_api_key },
+          { name: "elevenlabs_agent_id", label: "Agent ID", kind: "text", value: eff.elevenlabs_agent_id ?? "", placeholder: "agent_xxxxxxxxxxxx", from_user: !!stored.elevenlabs_agent_id },
+          { name: "elevenlabs_webhook_base", label: "Webhook base URL", kind: "text", value: eff.elevenlabs_webhook_base ?? "", placeholder: "https://your-tunnel.ngrok.app", from_user: !!stored.elevenlabs_webhook_base },
+        ],
       },
     ],
     fixtures: {
@@ -1486,6 +1516,37 @@ async function handleSettings(): Promise<Response> {
     },
     port: PORT,
   });
+}
+
+async function handleSaveIntegrations(req: Request): Promise<Response> {
+  const body = (await req.json()) as Record<string, unknown>;
+  const { setIntegrationsConfig, getIntegrationsConfig } = await import("./lib/user-settings.ts");
+  const allowed = [
+    "anthropic_api_key",
+    "resend_api_key",
+    "resend_from",
+    "elevenlabs_api_key",
+    "elevenlabs_agent_id",
+    "elevenlabs_webhook_base",
+  ] as const;
+  const input: Partial<Record<(typeof allowed)[number], string>> = {};
+  for (const k of allowed) {
+    const v = body[k];
+    if (typeof v === "string") input[k] = v;
+  }
+  setIntegrationsConfig(input);
+  return Response.json({ ok: true, integrations: getIntegrationsConfig() });
+}
+
+// Push any integration credentials the user has saved through the UI into
+// process.env before the server starts accepting requests — so the very
+// first Claude/Resend/ElevenLabs client built inside any request handler
+// sees them without needing a restart loop.
+try {
+  const { applyIntegrationsToEnv } = await import("./lib/user-settings.ts");
+  applyIntegrationsToEnv();
+} catch (err) {
+  console.warn("[integrations] could not apply stored credentials:", (err as Error).message);
 }
 
 const PORT = Number(process.env.PORT ?? 3333);
@@ -1520,6 +1581,7 @@ const server = Bun.serve({
       if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
       if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
       if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
+      if (req.method === "POST" && url.pathname === "/api/settings/integrations") return handleSaveIntegrations(req);
       if (req.method === "GET" && url.pathname === "/api/export") return handleExport();
       if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req);
       if (req.method === "GET" && url.pathname === "/api/offer-sources") return handleOfferSources();
