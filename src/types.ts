@@ -79,12 +79,33 @@ export const AnalysisSummary = z.object({
 export type AnalysisSummary = z.infer<typeof AnalysisSummary>;
 
 /**
+ * Bill kind — the negotiation playbook depends on this. Medical is the
+ * grounded path (analyzer findings + EOB cite); the others run in goodwill
+ * mode (retention discount, hardship, fee waiver, promo restoration) until
+ * we add per-kind error detection.
+ */
+export const BillKind = z.enum([
+  "medical",
+  "telecom",
+  "utility",
+  "subscription",
+  "insurance",
+  "financial",
+  "other",
+]);
+export type BillKind = z.infer<typeof BillKind>;
+
+/**
  * Bill-level metadata Claude extracts from the bill + EOB.
  *
  * The appeal letter generator needs these: who to address the letter to,
  * what claim to reference, what dollar amount the EOB says the patient
  * actually owes. If any field is missing Claude returns null for it — the
  * letter generator falls back to placeholders the user can fill in.
+ *
+ * `bill_kind` defaults to "medical" because today's analyzer only runs on
+ * medical bills. For non-medical bills the analyzer is skipped and the
+ * kind is set from user input on the Contact tab.
  */
 export const BillMetadata = z.object({
   patient_name: z.string().nullable().describe("Patient's full name from the bill."),
@@ -96,8 +117,36 @@ export const BillMetadata = z.object({
   eob_patient_responsibility: z.number().nullable().describe("The EOB's stated 'Your Total Responsibility' or equivalent dollar amount."),
   bill_current_balance_due: z.number().nullable().describe("The bill's 'Current Balance Due' or equivalent dollar amount."),
   account_number: z.string().nullable().describe("Patient account number on the bill, if present."),
+  bill_kind: BillKind.default("medical").describe("Category of the bill. Drives the negotiation playbook."),
 });
 export type BillMetadata = z.infer<typeof BillMetadata>;
+
+/**
+ * User-entered contact info for the billing/support department. Required
+ * before the agent can launch — the hard gate is enforced in the UI and
+ * re-checked server-side. Either email OR phone must be present; both is
+ * better. `bill_kind` lives here too as a user-overridable mirror of the
+ * value on `BillMetadata` (the analyzer's guess is a default, not a lock).
+ */
+export const BillContact = z.object({
+  support_email: z.string().email().nullable().optional(),
+  support_phone: z.string().nullable().optional()
+    .describe("Billing department phone in E.164 (+15551234567) when known. Free-form OK; we normalize at dial time."),
+  support_portal_url: z.string().url().nullable().optional(),
+  account_holder_name: z.string().nullable().optional()
+    .describe("Generalized 'patient_name' — the person whose account this is."),
+  bill_kind: BillKind.optional(),
+});
+export type BillContact = z.infer<typeof BillContact>;
+
+/**
+ * True when the contact has at least one outbound channel — the gate the
+ * UI uses to enable the Run/Resume agent button.
+ */
+export function hasContactChannel(c: BillContact | null | undefined): boolean {
+  if (!c) return false;
+  return Boolean((c.support_email && c.support_email.trim()) || (c.support_phone && c.support_phone.trim()));
+}
 
 /**
  * Final analyzer output. errors[] is in the order Claude reported them.

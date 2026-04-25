@@ -86,5 +86,6 @@ export function emptyMetadata() {
     eob_patient_responsibility: null,
     bill_current_balance_due: null,
     account_number: null,
+    bill_kind: "medical" as const,
   };
 }

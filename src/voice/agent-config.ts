@@ -17,7 +17,7 @@
  * voice latency is human-noticeable — we want the agent to speak authoritatively
  * about every line without a tool round-trip.
  */
-import type { AnalyzerResult, BillingError } from "../types.ts";
+import type { AnalyzerResult, BillingError, BillKind } from "../types.ts";
 
 export interface ElevenLabsAgentConfig {
   name: string;
@@ -93,76 +93,208 @@ export interface AgentConfigOpts {
   temperature?: number;
   voice_id?: string;
   final_acceptable_floor?: number;
+  /**
+   * Bill kind drives the tactics block and identity language. Defaults to
+   * `metadata.bill_kind` (analyzer extracts "medical") and ultimately to
+   * "medical" — the only kind whose grounded findings exist today. Non-medical
+   * kinds run in goodwill mode (no findings; tactics: retention, hardship,
+   * fee waivers, promo restoration).
+   */
+  bill_kind?: BillKind;
+  /**
+   * User-supplied account holder name from the Contact tab. Overrides
+   * `metadata.patient_name` so we can talk about a Comcast subscriber the
+   * same way we talk about a hospital patient.
+   */
+  account_holder_name?: string | null;
+}
+
+/**
+ * Per-kind tactics block. Inserted into the system prompt verbatim. Each
+ * block sits inside the generic 'Tactics' section, after the kind-agnostic
+ * "Begin by confirming you have the right account" step. The medical block
+ * preserves the original NSA / EOB negotiation flow byte-for-byte.
+ */
+function tacticsBlock(kind: BillKind, m: AnalyzerResult["metadata"]): string {
+  switch (kind) {
+    case "medical":
+      return `1. State the facts: provider is in-network, EOB patient responsibility is \$${m.eob_patient_responsibility?.toFixed(2) ?? "[X]"}, bill is \$${m.bill_current_balance_due?.toFixed(2) ?? "[X]"}.
+2. Walk through each disputed line. Ask "can you confirm this adjustment?"
+3. If they concede everything → call record_negotiated_amount with the agreed balance, then end_call with outcome=success.
+4. If they concede only some lines → call record_negotiated_amount with the partial amount and request a manager callback. Then end_call with outcome=partial.
+5. If they refuse → cite the No Surprises Act for balance billing, request a supervisor. If the supervisor also refuses → request_human_handoff.
+6. If they become hostile, threaten collections, or mention attorneys → request_human_handoff immediately.`;
+
+    case "telecom":
+      return `1. Open with: "I'm calling to review the account and see what loyalty or retention pricing is available."
+2. Anchor: state the current monthly bill amount and mention competitor rates if known. Ask explicitly for the retention department if the rep can't move on price.
+3. Goodwill levers in order: (a) restore an expired promo, (b) downgrade-and-rematch (drop a tier, re-add the discount), (c) waive overage / late fees, (d) credit for service outages or downtime.
+4. If they offer a discount → call propose_general_discount with the offered amount_off and reason, then record_negotiated_amount once they commit a new monthly amount, then end_call with outcome=success.
+5. If they refuse all options → ask for a supervisor or retention. If still refused → request_human_handoff so a human can decide whether to threaten cancellation.
+6. If they say "we'll cancel your service" or escalate aggressively → request_human_handoff immediately.`;
+
+    case "utility":
+      return `1. Open with: "I'm calling to review the account, ask about hardship programs, and confirm the billing is correct."
+2. Confirm the meter reading / usage matches the bill. Ask if there are any pending rate-adjustment credits.
+3. Goodwill levers in order: (a) hardship program enrollment, (b) budget billing / level pay enrollment to smooth high months, (c) waive late fees and reconnection fees, (d) request a payment plan with no penalty interest.
+4. If they offer a credit, fee waiver, or payment-plan reduction → call propose_general_discount with amount_off + reason, then record_negotiated_amount once committed, then end_call outcome=success.
+5. If refused → ask for a supervisor or the customer-care team that handles hardship. If still refused → request_human_handoff.
+6. If the rep mentions disconnection or collections → request_human_handoff immediately so a human can decide whether to invoke the state utility commission.`;
+
+    case "subscription":
+      return `1. Open with: "I'm calling to cancel or renegotiate this subscription depending on what's available."
+2. Ask for retention pricing or a downgrade path. Many SaaS / subscription providers have unpublished retention discounts.
+3. Goodwill levers in order: (a) retention / pause discount, (b) downgrade to a lower tier, (c) refund for unused months, (d) waive an auto-renewal that just hit.
+4. If they offer a discount or refund → call propose_general_discount with amount_off + reason, then record_negotiated_amount once committed, then end_call outcome=success.
+5. If they refuse → ask to cancel cleanly. If they make cancellation difficult → request_human_handoff so a human can decide whether to dispute via card issuer.`;
+
+    case "insurance":
+      return `1. Open with: "I'm calling to review the policy premium and ask about loyalty or multi-policy discounts."
+2. Confirm coverage hasn't changed. Ask about safe-driver / claim-free / multi-policy / paid-in-full discounts that may not be applied.
+3. Goodwill levers in order: (a) apply missing discounts, (b) re-quote with current household details, (c) raise a deductible to lower the premium (if the user pre-approves), (d) request the loss-history reason for a recent rate hike.
+4. If they offer a lower premium → call propose_general_discount with amount_off + reason, then record_negotiated_amount once committed, then end_call outcome=success.
+5. If they refuse → ask for the underwriting or retention team. If still refused → request_human_handoff.`;
+
+    case "financial":
+      return `1. Open with: "I'm calling to ask about a goodwill waiver on a fee on this account."
+2. State which fee or charge you're disputing and the date. Be specific.
+3. Goodwill levers in order: (a) one-time goodwill waiver of the fee, (b) credit for the fee plus interest, (c) closing-courtesy waiver if the user is a long-tenured customer, (d) APR reduction on the underlying balance.
+4. If they offer a waiver or credit → call propose_general_discount with amount_off + reason, then record_negotiated_amount, then end_call outcome=success.
+5. If they refuse → ask for a supervisor. If still refused → request_human_handoff so a human can decide whether to invoke a CFPB complaint.`;
+
+    case "other":
+    default:
+      return `1. Open with: "I'm calling to review this account and see what discount, waiver, or correction is available."
+2. Confirm the bill total and the most recent transaction. Ask if any credits or adjustments are pending.
+3. Goodwill levers in order: (a) goodwill discount, (b) loyalty or retention pricing, (c) fee waiver for a one-time event, (d) payment plan with no penalty interest.
+4. If they offer anything → call propose_general_discount with amount_off + reason, then record_negotiated_amount, then end_call outcome=success.
+5. If they refuse → ask for a supervisor. If still refused → request_human_handoff.`;
+  }
+}
+
+/**
+ * Identity language differs by bill kind: a hospital agent says "patient,"
+ * an ISP agent says "account holder." Returns the noun used in the prompt.
+ */
+function holderNoun(kind: BillKind): string {
+  return kind === "medical" ? "patient" : "account holder";
+}
+
+/**
+ * Hard-rules block. Floor + AI-disclosure stay constant; the disclosure
+ * line is intentionally a *required* opener — the prior 'don't reveal you're
+ * an AI' instruction was incompatible with TCPA disclosure rules and most
+ * state two-party-consent statutes. Better to disclose plainly.
+ */
+function hardRules(kind: BillKind, floor: number): string {
+  const sensitiveData = kind === "medical"
+    ? "Never give out PHI beyond what's needed to identify the account (name, account #, DOS)."
+    : "Never give out account credentials, full SSN, full card numbers, or one-time codes — only enough to identify the account.";
+  return `- Never agree to pay more than $${floor.toFixed(2)}.
+- ${sensitiveData}
+- Never promise payment timing; say the ${holderNoun(kind)} will remit on receipt of a corrected statement.
+- Disclose plainly that you are an automated assistant on the first turn — never claim to be human. If the rep asks who you are, say "I am an automated ${kind === "medical" ? "patient advocate" : "billing assistant"} calling on behalf of the ${holderNoun(kind)}."`;
 }
 
 const CALL_SYSTEM_PROMPT_TEMPLATE = (args: {
   result: AnalyzerResult;
   floor: number;
+  bill_kind: BillKind;
+  account_holder_name: string | null;
 }) => {
-  const { result, floor } = args;
+  const { result, floor, bill_kind, account_holder_name } = args;
   const m = result.metadata;
+  const noun = holderNoun(bill_kind);
+  const holder = account_holder_name ?? m.patient_name ?? `[${noun.toUpperCase()} NAME]`;
+  const provider = m.provider_name ?? (bill_kind === "medical" ? "the hospital" : "the company");
+  const advocateRole = bill_kind === "medical" ? "patient advocate" : "billing assistant";
+
   const high = result.errors.filter((e) => e.confidence === "high");
-  const bulletList = high.map((e, i) => `  ${i + 1}. ${speakable(e)}`).join("\n");
+  const groundedSection = high.length > 0
+    ? `### Disputed charges (grounded)
 
-  return `You are Bonsai, an AI patient advocate making a phone call on behalf of a patient, ${m.patient_name ?? "[PATIENT NAME]"}. You are calling ${m.provider_name ?? "the hospital"}'s billing department to dispute and resolve charges on the patient's account.
+${high.map((e, i) => `  ${i + 1}. ${speakable(e)}`).join("\n")}`
+    : `### Disputed charges
 
-## Identity and opening
+There are no grounded findings to cite for this bill. Run the negotiation in goodwill mode: anchor on the bill amount, ask for retention / discount / waiver options, and rely on the tactics block below.`;
 
-When the call connects you will hear an IVR or a live rep. If you reach an IVR:
-- Navigate to "Billing" or "Patient Accounts". Say "billing" or press the matching digit.
-- If asked for a patient ID or account number: say it slowly, digit by digit. Account number: ${m.account_number ?? "[ACCOUNT NUMBER]"}. Claim number: ${m.claim_number ?? "[CLAIM NUMBER]"}.
-
-When you reach a live rep, introduce yourself: "Hi, my name is Bonsai. I'm an automated assistant calling on behalf of ${m.patient_name ?? "[PATIENT NAME]"}, account number ${m.account_number ?? "[ACCOUNT NUMBER]"}, to dispute charges on claim ${m.claim_number ?? "[CLAIM NUMBER]"}. Is this a good time to discuss the dispute?"
-
-## Goal
-
-Reduce the patient's balance due to no more than $${floor.toFixed(2)}. The current balance is $${m.bill_current_balance_due?.toFixed(2) ?? "unknown"}. The EOB-stated patient responsibility is $${m.eob_patient_responsibility?.toFixed(2) ?? "unknown"}. The defensible disputed total is $${result.summary.high_confidence_total.toFixed(2)}.
-
-## Facts about the dispute (do not invent facts; use only these)
-
-Patient: ${m.patient_name ?? "[unknown]"}
+  const factsSection = bill_kind === "medical"
+    ? `${noun[0].toUpperCase()}${noun.slice(1)}: ${holder}
 Provider: ${m.provider_name ?? "[unknown]"}
 Insurer: ${m.insurer_name ?? "[unknown]"}
 Date of service: ${m.date_of_service ?? "[unknown]"}
 Claim #: ${m.claim_number ?? "[unknown]"}
 Account #: ${m.account_number ?? "[unknown]"}
 Bill current balance due: $${m.bill_current_balance_due?.toFixed(2) ?? "[unknown]"}
-EOB patient responsibility: $${m.eob_patient_responsibility?.toFixed(2) ?? "[unknown]"}
+EOB patient responsibility: $${m.eob_patient_responsibility?.toFixed(2) ?? "[unknown]"}`
+    : `${noun[0].toUpperCase()}${noun.slice(1)}: ${holder}
+Provider: ${m.provider_name ?? "[unknown]"}
+Account #: ${m.account_number ?? "[unknown]"}
+Current balance / monthly amount: $${m.bill_current_balance_due?.toFixed(2) ?? "[unknown]"}`;
 
-### Disputed charges
+  const ivrLine = bill_kind === "medical"
+    ? `Navigate to "Billing" or "Patient Accounts". Say "billing" or press the matching digit.`
+    : `Navigate to "Billing", "Account services", or "Customer support". Say the matching word or press the matching digit.`;
 
-${bulletList}
+  const goalLine = bill_kind === "medical"
+    ? `Reduce the patient's balance due to no more than $${floor.toFixed(2)}. The current balance is $${m.bill_current_balance_due?.toFixed(2) ?? "unknown"}. The EOB-stated patient responsibility is $${m.eob_patient_responsibility?.toFixed(2) ?? "unknown"}. The defensible disputed total is $${result.summary.high_confidence_total.toFixed(2)}.`
+    : `Reduce the account holder's balance / monthly amount to no more than $${floor.toFixed(2)}. The current amount on file is $${m.bill_current_balance_due?.toFixed(2) ?? "unknown"}. There are no grounded findings, so the strategy is to ask for retention / loyalty / hardship / fee waivers — see Tactics below.`;
+
+  return `You are Bonsai, an automated ${advocateRole} making a phone call on behalf of ${holder}. You are calling ${provider}'s ${bill_kind === "medical" ? "billing department" : "customer support / billing line"} to ${high.length > 0 ? "dispute and resolve charges on" : "negotiate a lower amount on"} the account.
+
+## Identity and opening
+
+When the call connects you will hear an IVR or a live rep. If you reach an IVR:
+- ${ivrLine}
+- If asked for an account number: say it slowly, digit by digit. Account number: ${m.account_number ?? "[ACCOUNT NUMBER]"}.
+
+When you reach a live rep, ALWAYS open with this disclosure first: "Hi, this is Bonsai, an automated assistant calling on behalf of ${holder} regarding account ${m.account_number ?? "[ACCOUNT NUMBER]"}. This call may be recorded. Is this a good time to discuss the account?"
+
+## Goal
+
+${goalLine}
+
+## Facts (do not invent facts; use only these)
+
+${factsSection}
+
+${groundedSection}
 
 ## Call style
 
-- Calm, confident, professional. You are representing a patient — speak for them, not at them.
+- Calm, confident, professional. You are representing the ${noun} — speak for them, not at them.
 - Short sentences. Pause after each fact so the rep can respond.
 - If they put you on hold, wait. Do not keep talking.
-- Never argue, never escalate tone. If they push back, restate the EOB figure.
-- Never make up a CPT code, date, or dollar figure. Use only the facts above.
-- If the rep asks a question you cannot answer (e.g., "what's the patient's DOB"), say "I don't have that on hand — I can have the patient call back with that info."
+- Never argue, never escalate tone. If they push back, restate the relevant figure.
+- Never make up an account number, date, or dollar figure. Use only the facts above.
+- If the rep asks a question you cannot answer, say "I don't have that on hand — I can have the ${noun} call back with that info."
 
 ## Tactics
 
-1. Start by stating the facts: provider is in-network, EOB patient responsibility is \$${m.eob_patient_responsibility?.toFixed(2) ?? "[X]"}, bill is \$${m.bill_current_balance_due?.toFixed(2) ?? "[X]"}.
-2. Walk through each disputed line. Ask "can you confirm this adjustment?"
-3. If they concede everything → call record_negotiated_amount with the agreed balance, then end_call with outcome=success.
-4. If they concede only some lines → call record_negotiated_amount with the partial amount and request a manager callback. Then end_call with outcome=partial.
-5. If they refuse → cite the No Surprises Act for balance billing, request a supervisor. If the supervisor also refuses → request_human_handoff.
-6. If they become hostile, threaten collections, or mention attorneys → request_human_handoff immediately.
+${tacticsBlock(bill_kind, m)}
 
 ## Hard rules
 
-- Never agree to pay more than $${floor.toFixed(2)}.
-- Never give out PHI beyond what's needed to identify the account (name, account #, DOS).
-- Never promise payment timing; say the patient will remit on receipt of a corrected statement.
-- Do not reveal you are an AI unless asked directly. If asked, say "I am an automated patient advocate calling on behalf of the patient."
+${hardRules(bill_kind, floor)}
 
 Begin the call now. When you hear silence or an IVR greeting, begin with the opening line above.`;
 };
 
-const FIRST_MESSAGE_TEMPLATE = (result: AnalyzerResult) =>
-  `Hi, I'm calling on behalf of ${result.metadata.patient_name ?? "a patient"} regarding account number ${result.metadata.account_number ?? "listed in our records"}. I'd like to speak with someone in the billing department about a dispute on claim ${result.metadata.claim_number ?? "referenced in our records"}.`;
+const FIRST_MESSAGE_TEMPLATE = (
+  result: AnalyzerResult,
+  bill_kind: BillKind,
+  account_holder_name: string | null,
+) => {
+  const holder = account_holder_name ?? result.metadata.patient_name ?? "the account holder";
+  const accountClause = result.metadata.account_number
+    ? `regarding account ${result.metadata.account_number}`
+    : "regarding the account on file";
+  const dept = bill_kind === "medical" ? "the billing department" : "customer support or billing";
+  const purpose = bill_kind === "medical" && result.metadata.claim_number
+    ? `discuss a dispute on claim ${result.metadata.claim_number}`
+    : "discuss this account";
+  return `Hi, this is Bonsai, an automated assistant calling on behalf of ${holder} ${accountClause}. This call may be recorded. I'd like to speak with someone in ${dept} to ${purpose}.`;
+};
 
 export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfig {
   const {
@@ -173,7 +305,15 @@ export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfi
     temperature = 0.3,
     voice_id,
   } = opts;
-  const floor = opts.final_acceptable_floor ?? result.metadata.eob_patient_responsibility ?? 0;
+  const bill_kind: BillKind = opts.bill_kind ?? result.metadata.bill_kind ?? "medical";
+  const account_holder_name = opts.account_holder_name ?? null;
+  // Floor fallback chain: explicit override → EOB patient responsibility (medical only)
+  // → bill balance (any kind, "do not pay more than what's billed today"). Avoids the
+  // prior $0 floor bug when EOB was missing on a non-medical bill.
+  const floor = opts.final_acceptable_floor
+    ?? result.metadata.eob_patient_responsibility
+    ?? result.metadata.bill_current_balance_due
+    ?? 0;
 
   const authHeaders: Record<string, string> = {
     Authorization: `Bearer ${webhook_secret}`,
@@ -211,6 +351,31 @@ export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfi
         request_body_schema: {
           type: "object",
           properties: {},
+        },
+      },
+    },
+    {
+      type: "webhook",
+      name: "propose_general_discount",
+      description:
+        "Goodwill negotiation tool for non-medical bills. Call when the rep offers a discount, fee waiver, retention discount, hardship credit, or promo restoration. Records the offer for the user to review. Does NOT commit a final balance — call record_negotiated_amount once the rep confirms the new total.",
+      api_schema: {
+        url: `${webhook_base_url}/propose_general_discount`,
+        method: "POST",
+        request_headers: authHeaders,
+        request_body_schema: {
+          type: "object",
+          required: ["amount_off", "reason"],
+          properties: {
+            amount_off: {
+              type: "number",
+              description: "Dollar amount the rep is offering to take off the balance (or new monthly amount). Use the dollars-off, not the new total.",
+            },
+            reason: {
+              type: "string",
+              description: "Short reason: 'retention discount', 'goodwill late-fee waiver', 'restored expired promo', 'hardship credit', etc.",
+            },
+          },
         },
       },
     },
@@ -280,11 +445,19 @@ export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfi
     },
   ];
 
-  const systemPrompt = CALL_SYSTEM_PROMPT_TEMPLATE({ result, floor });
-  const firstMessage = FIRST_MESSAGE_TEMPLATE(result);
+  const systemPrompt = CALL_SYSTEM_PROMPT_TEMPLATE({
+    result,
+    floor,
+    bill_kind,
+    account_holder_name,
+  });
+  const firstMessage = FIRST_MESSAGE_TEMPLATE(result, bill_kind, account_holder_name);
 
+  const agentNameSuffix = bill_kind === "medical"
+    ? (result.metadata.claim_number ?? "unknown claim")
+    : (result.metadata.account_number ?? `${bill_kind} account`);
   return {
-    name: `Bonsai dispute — ${result.metadata.claim_number ?? "unknown claim"}`,
+    name: `Bonsai negotiation — ${agentNameSuffix}`,
     conversation_config: {
       agent: {
         prompt: {
