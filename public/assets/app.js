@@ -139,7 +139,36 @@ function installUnsavedGuard(getValues) {
   return guard;
 }
 function clearUnsavedGuard() { unsavedGuard = null; }
+
+/**
+ * Reference to the upload dropzone's staged-files array, set by init().
+ * Used by confirmDiscardUnsaved + beforeunload to warn before the user
+ * navigates away with files queued but not yet audited.
+ */
+let stagedFilesRef = null;
+function setStagedFilesRef(getter) { stagedFilesRef = getter; }
+function hasStagedUpload() {
+  try {
+    const arr = stagedFilesRef?.();
+    return Array.isArray(arr) && arr.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function confirmDiscardUnsaved() {
+  // Two kinds of unsaved state can block in-app navigation:
+  //   1) Profile/Settings field edits (unsavedGuard)
+  //   2) Files staged in the upload dropzone but not yet submitted
+  // The latter only matters when the user is on the Overview tab.
+  if (currentNav === "overview" && hasStagedUpload()) {
+    return confirmModal({
+      title: "Discard the bill you're about to upload?",
+      body: "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.",
+      confirmText: "Discard",
+      cancelText: "Stay here",
+    });
+  }
   if (!unsavedGuard?.isDirty?.()) return true;
   if (!(currentNav === "profile" || currentNav === "settings")) return true;
   return confirmModal({
@@ -644,8 +673,10 @@ async function init() {
   $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
 
   // Browser-level unsaved-changes prompt on full page reload / tab close.
+  // Triggers for either Profile/Settings dirty state OR a staged upload
+  // that hasn't been audited yet — losing either is silently destructive.
   window.addEventListener("beforeunload", (ev) => {
-    if (unsavedGuard?.isDirty?.()) {
+    if (unsavedGuard?.isDirty?.() || hasStagedUpload()) {
       ev.preventDefault();
       ev.returnValue = "";
     }
@@ -680,6 +711,11 @@ async function init() {
   /** @type {File[]} Files queued for upload, in order. */
   let stagedFiles = [];
   let uploadSubmittedOnce = false;
+  // Expose the staged-files state to the navigation guard so the user
+  // gets a "you'll lose these files" prompt if they try to leave the
+  // Overview tab or close the tab mid-upload. Cleared in submitForReal()
+  // once stagedFiles is reset.
+  setStagedFilesRef(() => stagedFiles);
 
   // Speculative audit: we kick off /api/audit as soon as files are staged.
   // Users almost never change their mind after dropping, so starting early
@@ -1166,6 +1202,12 @@ async function runPhasedFromSample(fixture, channel) {
     title: "Reading the bill &amp; finding every overcharge",
   });
   startTimeline();
+  // Cached fixtures return in ~20ms — too fast to show what Bonsai is
+  // doing. Hold the loading view for ~1.5s so the user actually sees
+  // the timeline animate. Real uploads (which are slow on their own)
+  // skip past this minimum because the audit response takes longer.
+  const startedAt = Date.now();
+  const MIN_LOADING_MS = 1500;
   try {
     const res = await fetch("/api/audit", {
       method: "POST",
@@ -1174,6 +1216,10 @@ async function runPhasedFromSample(fixture, channel) {
     });
     if (!res.ok) throw new Error(await res.text());
     const { run_id, report } = await res.json();
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < MIN_LOADING_MS) {
+      await new Promise((r) => setTimeout(r, MIN_LOADING_MS - elapsed));
+    }
     stopTimeline();
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
@@ -1304,41 +1350,56 @@ async function pollContactStatus() {
   }
 }
 
+/**
+ * "Customer support" or "billing department"? Medical bills always route
+ * to a billing department; everything else (telecom, utility, subscription,
+ * insurance, etc.) is customer support. Falls back to "customer support"
+ * when the kind is unknown — safer default since most consumer bills have
+ * a CS line.
+ */
+function contactRoleNoun(billKind) {
+  return billKind === "medical" ? "billing department" : "customer support";
+}
+
 function applyContactStatus(data) {
   const titleEl = $("#contact-title");
   const notesEl = $("#contact-notes");
   const srcEl = $("#contact-sources");
   const emailEl = $("#contact-email");
   const phoneEl = $("#contact-phone");
+  const billKind =
+    reviewState?.partial_report?.analyzer?.metadata?.bill_kind ?? "other";
+  const role = contactRoleNoun(billKind);
 
   if (data.status === "pending") {
-    titleEl.textContent = "Looking up the billing contact…";
+    titleEl.textContent = `Looking up the ${role} contact…`;
     return;
   }
   if (data.status === "failed") {
-    titleEl.textContent = "Add a billing email";
-    notesEl.textContent = data.error ?? "Bonsai couldn't find one. Type the billing department's email below — Bonsai will use it to negotiate.";
+    titleEl.textContent = `Add a ${role} contact`;
+    notesEl.textContent =
+      data.error ??
+      `Bonsai couldn't find one. Add an email or phone for the ${role} below — either is fine, email preferred when available.`;
     return;
   }
   const c = data.contact ?? {};
-  // "Resolved with nothing useful" is functionally the same as "failed" —
-  // we hit the web search but it didn't surface a real billing contact
-  // (synthetic providers, single-location practices with no online billing
-  // page, etc.). Don't show the user empty fields with prefilled noise;
-  // ask them to fill it in. The .needs-input highlight is *not* applied
-  // here on render — only when the user tries to Accept the plan with
-  // an empty contact (see the click handler in approveAndRun).
+  // "Resolved with nothing useful" is functionally the same as "failed".
+  // Don't show empty fields with prefilled noise; ask the user to fill in.
+  // The .needs-input highlight is NOT applied on render — only when the
+  // user tries to Accept the plan with both fields empty.
   const provider = data.provider_name ?? "this provider";
   if (!c.email && !c.phone) {
-    titleEl.textContent = `Add a billing email for ${provider}`;
+    titleEl.textContent = `Add a ${role} contact for ${provider}`;
     notesEl.textContent =
-      "Bonsai couldn't find one in public sources. Type the billing department's email below — that's how Bonsai will reach them. Phone is optional.";
+      `Bonsai couldn't find one in public sources. Add an email or phone for ${provider}'s ${role} — either works, email preferred when available.`;
     if (document.activeElement !== emailEl) emailEl.value = "";
     if (document.activeElement !== phoneEl) phoneEl.value = "";
     srcEl.innerHTML = "";
     return;
   }
-  titleEl.textContent = data.provider_name ? `${data.provider_name} — billing` : "Billing contact";
+  titleEl.textContent = data.provider_name
+    ? `${data.provider_name} — ${role}`
+    : `${role.charAt(0).toUpperCase()}${role.slice(1)} contact`;
   // Don't blow away the user's typing if they're already editing.
   if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
   if (document.activeElement !== phoneEl) phoneEl.value = c.phone ?? "";
@@ -2448,7 +2509,13 @@ function attentionReason(audit) {
   if (status === "failed" || outcome === "failed") return { key: "error", label: "Agent error" };
   if (status === "cancelled" || outcome === "cancelled") return { key: "paused", label: "Paused by you" };
   if (outcome === "escalated") return { key: "escalated", label: "Provider countered — review" };
-  if (status === "negotiating" || outcome === "negotiating") return null;
+  // "Negotiating" (the bg job is mid-flight) and "in_progress" (the agent
+  // dispatched and is waiting on a real reply) are both ACTIVE states —
+  // user already approved, nothing for them to do. The "in_progress"
+  // case is what tripped users in real-email mode: status flipped to
+  // "completed" (kickoff finished) but outcome stayed "in_progress",
+  // which used to fall through to "Awaiting your approval".
+  if (status === "negotiating" || outcome === "negotiating" || outcome === "in_progress") return null;
   if (outcome === "resolved") {
     // Server flags resolved bills the user hasn't confirmed match their next
     // statement after VERIFY_OUTCOME_AFTER_DAYS. Surfacing in the attention
@@ -2458,7 +2525,11 @@ function attentionReason(audit) {
     }
     return null;
   }
-  return { key: "awaiting", label: "Awaiting your approval" };
+  // Only show "Awaiting" for bills that were truly never approved — i.e.,
+  // status === "audited" with no run kicked off yet. After approve, status
+  // becomes "negotiating" or "completed" and we never land here.
+  if (status === "audited") return { key: "awaiting", label: "Awaiting your approval" };
+  return null;
 }
 
 function relTime(ms) {
@@ -4939,7 +5010,7 @@ function buildSyntheticAttentionTimeline(row) {
       tone: "red",
     });
   }
-  return events.sort((a, b) => a.ts - b.ts);
+  return events.sort((a, b) => b.ts - a.ts);
 }
 
 /* Build a sequenced activity timeline from the full report. */
@@ -4985,7 +5056,7 @@ function buildTimelineEvents(row, report) {
       channel: "watch",
       tone: "ink",
     });
-    return events.sort((a, b) => a.ts - b.ts);
+    return events.sort((a, b) => b.ts - a.ts);
   }
 
   if (!report) return events;
@@ -5146,7 +5217,7 @@ function buildTimelineEvents(row, report) {
     });
   }
 
-  return events.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  return events.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
 
 function renderActivityTimeline(row, report) {
