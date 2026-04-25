@@ -1,0 +1,52 @@
+{
+  "analyzer": {
+    "metadata": {
+      "patient_name": "Maya R. Patel",
+      "provider_name": "Memorial Hospital",
+      "provider_billing_address": "1200 Elm Way, Springfield, IL 62701",
+      "claim_number": "MH-22941",
+      "date_of_service": "2026-02-14",
+      "insurer_name": "Blue Shield",
+      "eob_patient_responsibility": 318.00,
+      "bill_current_balance_due": 2160.00,
+      "account_number": "ACT-4419"
+    },
+    "errors": [
+      {
+        "line_quote": "Out-of-network surcharge: $1,842.00",
+        "error_type": "balance_billing",
+        "confidence": "high",
+        "dollar_impact": 1842.00,
+        "evidence": "EOB confirms in-network status. The No Surprises Act prohibits balance billing for emergency facility services regardless of network status of individual providers."
+      }
+    ],
+    "summary": {
+      "high_confidence_total": 1842.00,
+      "worth_reviewing_total": 0,
+      "bill_total_disputed": 1842.00,
+      "headline": "Found $1,842 in balance-billing charges that violate the No Surprises Act."
+    },
+    "grounding_failures": [],
+    "meta": {
+      "model": "claude-sonnet-4-5",
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "elapsed_ms": 0,
+      "tool_turns": 0
+    }
+  },
+  "appeal": {
+    "subject": "Appeal — Memorial Hospital balance billing on claim MH-22941",
+    "markdown": "Patient appeal letter (seed fixture)."
+  },
+  "strategy": { "chosen": "email", "reason": "Seed fixture: live-replayed thread." },
+  "summary": {
+    "original_balance": 2160.00,
+    "defensible_disputed": 1842.00,
+    "final_balance": 318.00,
+    "patient_saved": 1842.00,
+    "channel_used": "email",
+    "outcome": "resolved",
+    "outcome_detail": "Hospital accepted the NSA argument after the second outbound and adjusted balance to EOB responsibility."
+  }
+}
