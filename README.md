@@ -59,10 +59,10 @@ bun run serve               # web UI at http://localhost:3333
 |---|---|---|
 | Analyzer | `bun run day2 bill-001 eob-001` | Grounded, 2-tier confidence, overlap-aware totals |
 | Appeal letter | `bun run day3 bill-001 eob-001` | Deterministic, placeholder-aware, NSA + FCRA |
-| Email negotiation | `bun run day4 bill-001 stall_then_concede` | Full loop, Resend-or-Mock, 4 rep personas |
+| Email negotiation | `bun run day4 bill-001 stall_then_concede` | Full loop, Resend-or-Mock outbound, **live Resend inbound webhook** + replay fallback, BCC the patient, 4 rep personas |
 | Voice negotiation | `bun run day5 bill-001 stall_then_concede` | ElevenLabs config ready, simulator validates tools |
 | Full pipeline CLI | `bun run bonsai bill-001 eob-001 auto` | Analyzer → letter → strategy → negotiate → report |
-| Web UI | `bun run serve` | Upload or fixture, tabs: findings / letter / conversation / raw |
+| Web UI | `bun run serve` | Upload or fixture, tabs: findings / letter / conversation / raw, receipts hero on Home, agent-reasoning timeline in the bill drawer |
 
 ## Commands
 
@@ -169,12 +169,35 @@ tool code runs.
 |---|---|---|
 | Claude API | **real** | Already using `@anthropic-ai/sdk` |
 | Email send | **mock by default, Resend if env set** | Set `RESEND_API_KEY` + `RESEND_FROM` |
-| Email inbound | simulator (Claude role-plays reply) | Resend inbound webhook → `email-resend.ts` |
+| Email inbound | **real Resend webhook + replay fallback** | `POST /webhooks/resend-inbound` verifies svix, dedupes by `message_id`, steps the agent. Set `RESEND_WEBHOOK_SECRET`. Replay mode (`src/replay.ts`) covers the demo case where the tunnel is unreachable. |
 | Voice call | **full simulator** (no real dial yet) | Create ElevenLabs + Twilio accounts, wire webhook |
 | OCR on uploaded PDFs | requires matching fixture .md | Add `unpdf` or vendor LLM OCR — noted in `server.ts` |
 
 All fixtures are synthetic. No real PHI. This is a hackathon prototype and
 is not medical, legal, or financial advice.
+
+## HTTP endpoints
+
+The web server (`bun run serve`) exposes:
+
+- `POST /webhooks/resend-inbound` — Resend posts parsed inbound email here
+  signed with svix. Handler verifies the signature against
+  `RESEND_WEBHOOK_SECRET` (constant-time HMAC, 5-minute replay window),
+  correlates the message to a thread (`X-Bonsai-Thread-Id` header → `In-Reply-To`
+  → `References`), appends to `out/threads/{thread_id}.json` deduplicated by
+  `message_id`, and kicks one `stepNegotiation` so the dashboard updates without
+  polling. Returns `401` on bad signature, `202` if no thread correlation,
+  `200` (idempotent) on duplicate message ids. In production, missing
+  `RESEND_WEBHOOK_SECRET` returns `500` (fail-closed); in dev it accepts unsigned
+  payloads with a console warning.
+- `GET /api/receipts` — projects completed `out/report-*.json` files into per-bill
+  rows (`provider`, `original`, `final`, `saved`, `outcome`, `source line_quote`)
+  plus a cumulative savings total. The Home page renders a green hero counter and
+  the three most recent receipts above the dropzone.
+
+On boot the server also runs `seedReceipts()` (`src/seed-receipts.ts`), which
+copies `fixtures/seed-receipts/*.json` into `out/report-*.json` if the
+destination doesn't already exist. Idempotent; never overwrites a real run.
 
 ## Tests
 
@@ -186,6 +209,8 @@ bun test
 - `test/appeal-letter.test.ts` — placeholders, NSA clause gating, verbatim quote preservation
 - `test/choose-channel.test.ts` — routing heuristic
 - `test/types.test.ts` — BillingError + BillMetadata schema guardrails
+- `test/negotiate-email.test.ts` — tool dispatch, termination, idempotency, MAX_TURNS exhaustion, BCC threading
+- `test/webhook-resend-inbound.test.ts` — svix verify (valid + tampered + replay), 401/202/200 paths, In-Reply-To correlation, message_id dedupe
 
 ## Layout
 
@@ -193,14 +218,18 @@ bun test
 src/
   analyzer.ts            # PDF → errors + metadata via tool-use loop
   appeal-letter.ts       # deterministic markdown generator
-  negotiate-email.ts     # Claude-driven email negotiation loop
+  negotiate-email.ts     # Claude-driven email negotiation loop (mutex + MAX_TURNS escalation + BCC)
   simulate-reply.ts      # role-playing rep for email simulator
+  replay.ts              # scripted-inbound demo fallback when Resend webhook is unreachable
+  seed-receipts.ts       # cold-start: copies fixtures/seed-receipts/*.json → out/report-*.json
   orchestrator.ts        # runBonsai() — single end-to-end entry
-  server.ts              # Bun.serve HTTP + upload + fixture API
+  server.ts              # Bun.serve HTTP + upload + fixture API + receipts + webhook router
+  server/
+    webhooks.ts          # POST /webhooks/resend-inbound — svix verify, correlate, dedupe, step
   env.ts                 # explicit .env loader (bun sandbox quirk)
   types.ts               # BillingError / BillMetadata / AnalyzerResult
   clients/
-    email.ts             # EmailClient interface
+    email.ts             # EmailClient interface (now carries optional bcc)
     email-mock.ts        # in-memory thread state for simulator
     email-resend.ts      # real client + autoEmailClient() factory
   tools/
@@ -214,6 +243,7 @@ src/
     tool-handlers.ts     # real dispatch used by both webhook + simulator
   lib/
     ground-truth.ts      # line_quote verbatim validator
+    thread-store.ts      # withThreadLock() + appendInboundIdempotent() — per-thread mutex over out/threads/{id}.json
 
 scripts/
   day1-poc.ts            # prose-output POC (stage reference)
@@ -227,6 +257,10 @@ scripts/
 fixtures/
   bill-001.md / .pdf, eob-001.md / .pdf     # ER visit, 6 errors
   bill-002.md / .pdf, eob-002.md / .pdf     # outpatient arthroscopy, 7 errors
+  seed-receipts/                            # cold-start receipts for the dashboard
+    seed-memorial-1842.json                 # balance-billing save
+    seed-sierra-947.json                    # coding correction
+    seed-university-3612.json               # NSA + duplicate CPT
 
 public/                  # static web UI
   index.html
