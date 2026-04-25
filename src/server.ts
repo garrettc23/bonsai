@@ -33,6 +33,7 @@ import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
 import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { SmsPersona } from "./simulate-sms-reply.ts";
+import { BillContact, BillKind, hasContactChannel, type BillContact as BillContactT } from "./types.ts";
 import {
   runOfferHunt,
   saveOfferHunt,
@@ -159,6 +160,12 @@ interface PendingRun {
   user_directives?: string;
   /** Explicit floor override (dollars) from UI if user set one. */
   final_acceptable_floor?: number;
+  /**
+   * User-entered contact info for the billing/support department. The agent
+   * launch button is gated on hasContactChannel(contact) — at least one of
+   * support_email or support_phone must be present.
+   */
+  contact?: BillContactT;
 }
 
 const MAX_BILL_FILES = 10;
@@ -361,6 +368,10 @@ async function handleAudit(req: Request): Promise<Response> {
     qa: [],
     created_at: Date.now(),
     status: "audited",
+    // Pre-seed contact info for canonical fixtures so 'Try a sample' keeps
+    // working with the contact gate enabled. Real uploads start with no
+    // contact; the user fills it in via the Contact tab.
+    contact: defaultContactForFixture(fixtureName),
   };
   savePending(run);
 
@@ -679,6 +690,13 @@ async function handleApprove(req: Request): Promise<Response> {
   const run = loadPending(body.run_id);
   if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
 
+  if (!hasContactChannel(run.contact)) {
+    return Response.json(
+      { error: "missing_contact", message: "Add a support email or phone in the Contact tab before launching the agent." },
+      { status: 412 },
+    );
+  }
+
   if (body.plan_edits) {
     run.plan_edits = body.plan_edits;
     run.partial_report.strategy.reason =
@@ -821,6 +839,12 @@ async function handleResumeNegotiation(req: Request): Promise<Response> {
   if (run.status === "negotiating") {
     return Response.json({ error: "Already negotiating" }, { status: 400 });
   }
+  if (!hasContactChannel(run.contact)) {
+    return Response.json(
+      { error: "missing_contact", message: "Add a support email or phone in the Contact tab before resuming the agent." },
+      { status: 412 },
+    );
+  }
   // Start covers three cases:
   //   - audited (never approved)      → kick off the first negotiation round
   //   - cancelled / failed (paused)   → resume where we left off
@@ -919,6 +943,95 @@ async function handleFeedback(req: Request): Promise<Response> {
   ];
   savePending(run);
   return Response.json({ reply, feedback: run.feedback, ts });
+}
+
+/**
+ * Sanitize a free-form phone number into something callable. Strips
+ * whitespace, parens, dashes, and dots; preserves the leading + when
+ * present. Doesn't validate country codes — bad numbers fail at dial time.
+ */
+/**
+ * Return demo-ready contact info for shipped fixtures so the gate doesn't
+ * block 'Try a sample.' Returns undefined for unknown bill names — real
+ * uploads must fill in contact info via the Contact tab.
+ */
+function defaultContactForFixture(fixtureName: string): BillContactT | undefined {
+  const fixtures: Record<string, BillContactT> = {
+    "bill-001": {
+      support_email: "billing@stsynthetic.example",
+      support_phone: "+15555550101",
+      support_portal_url: null,
+      account_holder_name: null,
+      bill_kind: "medical",
+    },
+    "bill-002": {
+      support_email: "patientaccounts@orthosynthetic.example",
+      support_phone: "+15555550102",
+      support_portal_url: null,
+      account_holder_name: null,
+      bill_kind: "medical",
+    },
+  };
+  return fixtures[fixtureName];
+}
+
+function normalizePhone(input: string | null | undefined): string | null {
+  if (!input) return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\s().\-]+/g, "");
+  if (!/^\+?[0-9]{7,15}$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+async function handleGetContact(runId: string): Promise<Response> {
+  const run = loadPending(runId);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+  return Response.json({
+    run_id: run.run_id,
+    contact: run.contact ?? null,
+    can_launch: hasContactChannel(run.contact ?? null),
+  });
+}
+
+async function handleSetContact(req: Request, runId: string): Promise<Response> {
+  let body: unknown;
+  try { body = await req.json(); }
+  catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
+
+  const parsed = BillContact.safeParse(body);
+  if (!parsed.success) {
+    return Response.json(
+      { error: "Invalid contact info", issues: parsed.error.issues },
+      { status: 400 },
+    );
+  }
+  const c = parsed.data;
+  const normalizedPhone = normalizePhone(c.support_phone ?? null);
+  if (c.support_phone && !normalizedPhone) {
+    return Response.json(
+      { error: "support_phone is not a parseable phone number" },
+      { status: 400 },
+    );
+  }
+
+  const run = loadPending(runId);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+
+  run.contact = {
+    support_email: c.support_email ?? null,
+    support_phone: normalizedPhone,
+    support_portal_url: c.support_portal_url ?? null,
+    account_holder_name: c.account_holder_name ?? null,
+    bill_kind: c.bill_kind,
+  };
+  savePending(run);
+
+  return Response.json({
+    run_id: run.run_id,
+    contact: run.contact,
+    can_launch: hasContactChannel(run.contact),
+  });
 }
 
 async function handleUpload(req: Request): Promise<Response> {
@@ -1123,6 +1236,9 @@ async function handleHistory(): Promise<Response> {
         has_letter: existsSync(join(outDir, `appeal-${name}.md`)),
         status: (pending?.status ?? "completed") as "completed" | "negotiating" | "failed" | "cancelled" | "audited",
         run_id: pending?.run_id ?? null,
+        contact: pending?.contact ?? null,
+        can_launch: hasContactChannel(pending?.contact ?? null),
+        bill_kind: (pending?.contact?.bill_kind ?? meta.bill_kind ?? "medical") as string,
       };
     });
 
@@ -1155,6 +1271,9 @@ async function handleHistory(): Promise<Response> {
       has_letter: false,
       status: (run.status ?? "audited") as "completed" | "negotiating" | "failed" | "cancelled" | "audited",
       run_id: run.run_id,
+      contact: run.contact ?? null,
+      can_launch: hasContactChannel(run.contact ?? null),
+      bill_kind: (run.contact?.bill_kind ?? meta.bill_kind ?? "medical") as string,
     });
   }
 
@@ -1607,6 +1726,11 @@ const server = Bun.serve({
       if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
       const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
       if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
+      const contactMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/contact$/);
+      if (contactMatch) {
+        if (req.method === "GET") return handleGetContact(contactMatch[1]);
+        if (req.method === "POST" || req.method === "PATCH") return handleSetContact(req, contactMatch[1]);
+      }
       const billListMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)$/);
       if (req.method === "GET" && billListMatch) return handleListBill(billListMatch[1]);
       const billViewMatch = url.pathname.match(/^\/api\/bill\/([a-zA-Z0-9_-]+)\/(\d+)$/);

@@ -3801,3 +3801,91 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   .bill-viewer { inset: 12px; }
   .bill-viewer-head { padding: 14px 16px; }
 }
+
+/* ── Drawer Contact tab ──────────────────────────────────────── */
+.drawer-contact {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 20px;
+}
+.contact-help-ok,
+.contact-help-warn {
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+.contact-help-ok {
+  color: var(--green, #2a8447);
+  background: rgba(42, 132, 71, 0.06);
+  border-color: rgba(42, 132, 71, 0.25);
+}
+.contact-help-warn {
+  color: #8a5400;
+  background: rgba(184, 129, 0, 0.06);
+  border-color: rgba(184, 129, 0, 0.25);
+}
+.contact-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.contact-field .eyebrow { margin: 0 0 2px; }
+.contact-field .muted { color: var(--ink-mute, #888); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.drawer-input {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.drawer-input:focus { outline: none; border-color: var(--ink); }
+.drawer-input:disabled {
+  background: var(--surface-soft, #f7f6f3);
+  color: var(--ink-mute, #888);
+  cursor: not-allowed;
+}
+.contact-field-hint {
+  font-size: 11px;
+  color: var(--ink-mute, #888);
+  line-height: 1.4;
+}
+.contact-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+.contact-save-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--surface);
+  cursor: pointer;
+}
+.contact-save-btn:hover { opacity: 0.9; }
+.contact-save-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.contact-status {
+  font-size: 12px;
+  color: var(--ink-mute, #888);
+}
+.contact-status.ok { color: var(--green, #2a8447); }
+.contact-status.warn { color: #b53a3a; }
+
+/* Locked agent button — visible cue that the gate is in effect. */
+.drawer-agent-btn-locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.drawer-agent-btn-locked:hover { opacity: 0.55; }

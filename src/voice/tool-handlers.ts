@@ -32,6 +32,12 @@ export interface CallState {
     commitment_notes?: string;
     handoff_reason?: string;
   };
+  /**
+   * Goodwill-mode discount proposals captured during the call. Populated by
+   * `propose_general_discount` for non-medical bills. The eventual final
+   * commitment lands in `outcome.negotiated_amount` via record_negotiated_amount.
+   */
+  discount_proposals?: Array<{ ts: string; amount_off: number; reason: string }>;
 }
 
 export function newCallState(opts: {
@@ -107,6 +113,16 @@ export function handleRecordNegotiatedAmount(
   input: { amount: number; commitment_notes: string },
 ): { result: { recorded: boolean; floor_respected: boolean; at_or_below_floor: boolean } } {
   const atOrBelow = input.amount <= state.final_acceptable_floor;
+  // Idempotency: once a successful commitment has been recorded, refuse to
+  // overwrite it. Voice agents sometimes call this tool a second time after
+  // the rep restates the figure; we don't want the second call to clobber a
+  // success outcome with worse data.
+  if (state.outcome.status === "success" && state.outcome.negotiated_amount != null) {
+    const out = { result: { recorded: false, floor_respected: true, at_or_below_floor: true } };
+    appendEvent(state, "record_negotiated_amount", { ...input, ignored: true }, out);
+    saveCallState(state);
+    return out;
+  }
   state.outcome = {
     status: atOrBelow ? "success" : "partial",
     negotiated_amount: input.amount,
@@ -122,9 +138,33 @@ export function handleRequestHumanHandoff(
   state: CallState,
   input: { reason: "hostile" | "legal_threat" | "supervisor_refused" | "unclear" | "voicemail" },
 ): { result: { acknowledged: boolean } } {
-  state.outcome = { status: "handoff", handoff_reason: input.reason };
+  // Don't stomp a prior success outcome — if the agent already recorded a
+  // committed amount and then escalates, we want the success preserved with
+  // the handoff reason annotated. Same shape as the end_call lock.
+  if (state.outcome.status === "success") {
+    state.outcome.handoff_reason = input.reason;
+  } else {
+    state.outcome = { status: "handoff", handoff_reason: input.reason };
+  }
   const out = { result: { acknowledged: true } };
   appendEvent(state, "request_human_handoff", input, out);
+  saveCallState(state);
+  return out;
+}
+
+export function handleProposeGeneralDiscount(
+  state: CallState,
+  input: { amount_off: number; reason: string },
+): { result: { recorded: boolean; total_proposed: number } } {
+  const proposals = state.discount_proposals ?? (state.discount_proposals = []);
+  proposals.push({
+    ts: new Date().toISOString(),
+    amount_off: input.amount_off,
+    reason: input.reason,
+  });
+  const total = proposals.reduce((s, p) => s + p.amount_off, 0);
+  const out = { result: { recorded: true, total_proposed: total } };
+  appendEvent(state, "propose_general_discount", input, out);
   saveCallState(state);
   return out;
 }
@@ -159,6 +199,8 @@ export function dispatchToolCall(
       return handleConfirmEobAmount(state);
     case "record_negotiated_amount":
       return handleRecordNegotiatedAmount(state, input as { amount: number; commitment_notes: string });
+    case "propose_general_discount":
+      return handleProposeGeneralDiscount(state, input as { amount_off: number; reason: string });
     case "request_human_handoff":
       return handleRequestHumanHandoff(state, input as { reason: "hostile" | "legal_threat" | "supervisor_refused" | "unclear" | "voicemail" });
     case "end_call":

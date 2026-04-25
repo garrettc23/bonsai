@@ -3195,40 +3195,7 @@ async function openBillDrawer(row) {
     ? (mockPaused || mockAttention)
     : (row.status === "cancelled" || row.status === "failed");
 
-  if (agentBtn) {
-    agentBtn.hidden = false;
-    if (isActive) {
-      agentBtn.className = "drawer-agent-btn drawer-stop-btn";
-      agentBtn.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
-        <span>Stop</span>`;
-      agentBtn.onclick = isMock
-        ? () => {
-            setMockPaused(row.id, true);
-            // Wipe any active/attention lifecycle on the row so the
-            // chip on the Bills page falls through to the mockPaused
-            // branch in rowStatusChip and renders "Paused by you".
-            row.lifecycle = null;
-            row.attentionReason = null;
-            if (currentNav === "bills") renderBills();
-            updateNavCounts();
-            void openBillDrawer(row);
-          }
-        : () => stopAgent();
-    } else {
-      agentBtn.className = "drawer-agent-btn drawer-resume-btn";
-      agentBtn.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6,4 20,12 6,20"/></svg>
-        <span>Start</span>`;
-      // Resuming gives the user a choice: kick the next round off now, or
-      // wait for the regularly scheduled re-negotiation. "Resume on
-      // schedule" un-pauses the bill but doesn't re-send anything until
-      // the next scheduled tick (frequency dropdown).
-      agentBtn.onclick = isMock
-        ? () => promptResumeMode(row)
-        : () => promptResumeMode(row);
-    }
-  }
+  updateDrawerAgentButton(row, { isMock, isActive });
 
   // Tab visibility rules:
   //   • Needs attention — only when the bill has an attentionReason. The
@@ -3245,7 +3212,14 @@ async function openBillDrawer(row) {
   const feedbackTabBtn = document.querySelector('.drawer-tab[data-dtab="feedback"]');
   const isPaused = drawerReason?.key === "paused";
   if (feedbackTabBtn) feedbackTabBtn.hidden = !isPaused;
-  const initialTab = drawerReason ? "attention" : (isStopped ? "feedback" : "activity");
+  // New bills with no contact channel must start on Contact — the agent is
+  // gated on at least one of support_email / support_phone, and the Contact
+  // tab is the only place to fix that.
+  const needsContact = !!row.audit && row.audit.can_launch === false;
+  const initialTab = needsContact
+    ? "contact"
+    : drawerReason ? "attention"
+    : (isStopped ? "feedback" : "activity");
   drawerState.activeTab = initialTab;
   document.querySelectorAll(".drawer-tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.dtab === initialTab);
@@ -3259,6 +3233,72 @@ async function openBillDrawer(row) {
   // Tabs
   bindDrawerTabs();
   renderDrawerTab(initialTab);
+}
+
+/**
+ * Render the drawer's primary agent button (Start / Stop / disabled) for
+ * the given row. Re-callable on its own so saveDrawerContact() can update
+ * the gate as soon as the user fills in support contact info — no full
+ * drawer reflow required.
+ *
+ * Hard gate: real (non-mock) bills with no contact channel get a disabled
+ * "Start" button. Server-side handleApprove / handleResumeNegotiation
+ * mirror the same check; the UI is the friendly half of the same lock.
+ */
+function updateDrawerAgentButton(row, opts) {
+  const agentBtn = $("#drawer-agent-btn");
+  if (!agentBtn) return;
+  const audit = row?.audit ?? null;
+  const runId = audit?.run_id;
+  const isMock = !runId;
+  const mockPaused = isMock ? getMockPaused(row.id) : false;
+  const mockAttention = isMock && !!row.attentionReason;
+  const isActive = opts?.isActive ?? (isMock
+    ? (!mockPaused && !mockAttention)
+    : (row.lifecycle === "active"));
+  const canLaunch = isMock ? true : (audit?.can_launch !== false);
+
+  agentBtn.hidden = false;
+  if (isActive) {
+    agentBtn.className = "drawer-agent-btn drawer-stop-btn";
+    agentBtn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+      <span>Stop</span>`;
+    agentBtn.disabled = false;
+    agentBtn.title = "";
+    agentBtn.onclick = isMock
+      ? () => {
+          setMockPaused(row.id, true);
+          row.lifecycle = null;
+          row.attentionReason = null;
+          if (currentNav === "bills") renderBills();
+          updateNavCounts();
+          void openBillDrawer(row);
+        }
+      : () => stopAgent();
+  } else {
+    agentBtn.className = canLaunch
+      ? "drawer-agent-btn drawer-resume-btn"
+      : "drawer-agent-btn drawer-resume-btn drawer-agent-btn-locked";
+    agentBtn.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="6,4 20,12 6,20"/></svg>
+      <span>Start</span>`;
+    agentBtn.disabled = !canLaunch;
+    agentBtn.title = canLaunch
+      ? ""
+      : "Add a support email or phone in the Contact tab to launch the agent.";
+    agentBtn.onclick = canLaunch
+      ? () => promptResumeMode(row)
+      : (ev) => {
+          ev?.preventDefault?.();
+          // Steer the user to the only place that fixes the gate.
+          drawerState.activeTab = "contact";
+          document.querySelectorAll(".drawer-tab").forEach((b) => {
+            b.classList.toggle("active", b.dataset.dtab === "contact");
+          });
+          renderDrawerTab("contact");
+        };
+  }
 }
 
 async function loadFeedback(row) {
@@ -3706,6 +3746,157 @@ function renderDrawerTab(which) {
   } else if (which === "attention") {
     body.innerHTML = renderDrawerAttention(row);
     wireDrawerAttention(row);
+  } else if (which === "contact") {
+    body.innerHTML = renderDrawerContact(row);
+    wireDrawerContact(row);
+  }
+}
+
+// ─── Contact tab ─────────────────────────────────────────────────
+// Bonsai's agent dials/emails the support contact you provide here.
+// At least one of support_email or support_phone is required before
+// the Run/Resume agent button unlocks (the hard gate is enforced
+// server-side in handleApprove / handleResumeNegotiation as well).
+
+const BILL_KIND_OPTIONS = [
+  ["medical", "Medical / hospital"],
+  ["telecom", "Telecom (cell, internet, cable)"],
+  ["utility", "Utility (gas, electric, water)"],
+  ["subscription", "Subscription / SaaS"],
+  ["insurance", "Insurance premium"],
+  ["financial", "Financial (bank fee, credit card)"],
+  ["other", "Other"],
+];
+
+function renderDrawerContact(row) {
+  const audit = row?.audit ?? null;
+  const c = audit?.contact ?? {};
+  const billKind = c.bill_kind ?? audit?.bill_kind ?? "medical";
+  const isFixture = !audit?.run_id; // mock bills have no run; nothing to save
+  const helpLine = audit?.can_launch
+    ? `<div class="contact-help-ok">Agent ready to launch.</div>`
+    : `<div class="contact-help-warn">Add a support email or phone, then save — that unlocks the agent.</div>`;
+  const disabled = isFixture ? " disabled" : "";
+
+  const kindOptions = BILL_KIND_OPTIONS
+    .map(([v, l]) => `<option value="${v}"${v === billKind ? " selected" : ""}>${escapeHtml(l)}</option>`)
+    .join("");
+
+  return `
+    <form class="drawer-contact" id="drawer-contact-form" autocomplete="off">
+      ${helpLine}
+      <label class="contact-field">
+        <span class="eyebrow">Bill type</span>
+        <select id="contact-bill-kind" class="drawer-select"${disabled}>${kindOptions}</select>
+      </label>
+      <label class="contact-field">
+        <span class="eyebrow">Account holder</span>
+        <input type="text" id="contact-account-holder" class="drawer-input"
+               placeholder="Name on the account"
+               value="${escapeHtml(c.account_holder_name ?? "")}"${disabled}>
+      </label>
+      <label class="contact-field">
+        <span class="eyebrow">Support email</span>
+        <input type="email" id="contact-support-email" class="drawer-input"
+               placeholder="billing@example.com"
+               value="${escapeHtml(c.support_email ?? "")}"${disabled}>
+      </label>
+      <label class="contact-field">
+        <span class="eyebrow">Support phone</span>
+        <input type="tel" id="contact-support-phone" class="drawer-input"
+               placeholder="+1 415 555 0123"
+               value="${escapeHtml(c.support_phone ?? "")}"${disabled}>
+        <span class="contact-field-hint">E.164 (+1...) preferred. Free-form OK; we normalize at dial time.</span>
+      </label>
+      <label class="contact-field">
+        <span class="eyebrow">Support portal URL <span class="muted">(optional)</span></span>
+        <input type="url" id="contact-portal-url" class="drawer-input"
+               placeholder="https://billing.example.com/account"
+               value="${escapeHtml(c.support_portal_url ?? "")}"${disabled}>
+      </label>
+      <div class="contact-actions">
+        <button type="submit" class="contact-save-btn"${disabled}>Save contact</button>
+        <span class="contact-status" id="contact-status" aria-live="polite"></span>
+      </div>
+      ${isFixture ? `<div class="contact-help-warn">This is a mock/sample bill. Upload a real bill to edit contact info.</div>` : ""}
+    </form>`;
+}
+
+function wireDrawerContact(row) {
+  const form = $("#drawer-contact-form");
+  if (!form) return;
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    void saveDrawerContact(row);
+  });
+}
+
+async function saveDrawerContact(row) {
+  const status = $("#contact-status");
+  const runId = row?.audit?.run_id;
+  if (!runId) {
+    if (status) {
+      status.textContent = "Mock bill — no save endpoint.";
+      status.className = "contact-status warn";
+    }
+    return;
+  }
+  const body = {
+    bill_kind: $("#contact-bill-kind")?.value || "medical",
+    account_holder_name: $("#contact-account-holder")?.value?.trim() || null,
+    support_email: $("#contact-support-email")?.value?.trim() || null,
+    support_phone: $("#contact-support-phone")?.value?.trim() || null,
+    support_portal_url: $("#contact-portal-url")?.value?.trim() || null,
+  };
+  if (!body.support_email && !body.support_phone) {
+    if (status) {
+      status.textContent = "Add at least one of email or phone.";
+      status.className = "contact-status warn";
+    }
+    return;
+  }
+  if (status) {
+    status.textContent = "Saving…";
+    status.className = "contact-status";
+  }
+  try {
+    const res = await fetch(`/api/bill/${encodeURIComponent(runId)}/contact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const msg = data?.error === "support_phone is not a parseable phone number"
+        ? "Phone number couldn't be parsed. Try +1 415 555 0123."
+        : data?.message || data?.error || "Save failed.";
+      if (status) {
+        status.textContent = msg;
+        status.className = "contact-status warn";
+      }
+      return;
+    }
+    // Mutate the in-memory row so the rest of the drawer sees the new state
+    // immediately — bills list refresh below will reconcile from /api/history.
+    if (row.audit) {
+      row.audit.contact = data.contact;
+      row.audit.can_launch = data.can_launch;
+      row.audit.bill_kind = data.contact?.bill_kind ?? "medical";
+    }
+    if (status) {
+      status.textContent = data.can_launch ? "Saved. Agent unlocked." : "Saved.";
+      status.className = data.can_launch ? "contact-status ok" : "contact-status";
+    }
+    // Re-render the agent button so the gate updates without a manual refresh.
+    if (typeof renderDrawerStats === "function") renderDrawerStats(row, drawerState.report);
+    if (typeof updateDrawerAgentButton === "function") updateDrawerAgentButton(row);
+    if (currentNav === "bills" && typeof renderBills === "function") renderBills();
+  } catch (err) {
+    console.error("[contact] save failed", err);
+    if (status) {
+      status.textContent = "Network error. Try again.";
+      status.className = "contact-status warn";
+    }
   }
 }
 
