@@ -4,7 +4,10 @@ node_modules/
 .next/
 *.log
 dist/
-fixtures/*.pdf
+# Fixture PDFs ARE checked in so the production "Try a sample" feature
+# works without requiring Chrome inside the Docker image. They're small
+# (~240KB each), deterministic outputs of fixtures/*.md, and the demo
+# is broken without them.
 !fixtures/.gitkeep
 .DS_Store
 

@@ -4369,6 +4369,20 @@ body.legal-page { background: var(--bg); }
   color: var(--ink);
 }
 
+/* Highlight the contact card when the agent needs the user to type a
+   billing email. Adds a soft amber border + subtle background tint to
+   make the action area pop. The .contact-card.needs-input flag is set
+   by applyContactStatus when both email + phone are missing. */
+.contact-card.needs-input {
+  border-color: rgba(139, 94, 20, 0.45) !important;
+  background: var(--amber-tint, #fff7e6);
+  box-shadow: 0 0 0 3px rgba(139, 94, 20, 0.08);
+}
+.contact-card.needs-input #contact-email {
+  border-color: var(--amber);
+  background: var(--surface);
+}
+
 .contact-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

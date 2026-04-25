@@ -1586,7 +1586,12 @@ async function handleReceipts(): Promise<Response> {
     }
     const summary = report?.summary ?? {};
     const meta = report?.analyzer?.metadata ?? {};
-    const saved = Number(summary.patient_saved ?? 0);
+    const rawSaved = Number(summary.patient_saved ?? 0);
+    const original = Number(summary.original_balance ?? 0);
+    // Defensive clamp: even if a legacy report has saved > original
+    // (which can't happen physically), display it as bounded. New runs
+    // already clamp at the orchestrator; this protects pre-fix data.
+    const saved = Math.max(0, Math.min(rawSaved, original > 0 ? original : rawSaved));
     if (!Number.isFinite(saved) || saved <= 0) continue;
     // Source quote: pick the highest-impact HIGH-confidence finding's
     // line_quote — the dollar tied to the receipt should trace back to

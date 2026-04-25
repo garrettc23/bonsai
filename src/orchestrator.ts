@@ -295,7 +295,14 @@ export async function runNegotiationPhase(
     if (state.outcome.status === "resolved") {
       report.summary.outcome = "resolved";
       report.summary.final_balance = state.outcome.final_amount_owed;
-      report.summary.patient_saved = originalBalance - state.outcome.final_amount_owed;
+      // Clamp savings to [0, originalBalance]. Saving more than the bill
+      // existed for in the first place isn't possible — and a negative
+      // "saved" (final > original) means the agent inflated the bill,
+      // which we treat as zero savings rather than confusing the user.
+      report.summary.patient_saved = Math.max(
+        0,
+        Math.min(originalBalance, originalBalance - state.outcome.final_amount_owed),
+      );
       report.summary.outcome_detail = `Email negotiation resolved — ${state.outcome.resolution}. ${state.outcome.notes}`;
     } else if (state.outcome.status === "escalated") {
       report.summary.outcome = "escalated";
@@ -322,7 +329,10 @@ export async function runNegotiationPhase(
       report.summary.outcome = "resolved";
       report.summary.final_balance = state.outcome.negotiated_amount ?? null;
       if (state.outcome.negotiated_amount != null) {
-        report.summary.patient_saved = originalBalance - state.outcome.negotiated_amount;
+        report.summary.patient_saved = Math.max(
+          0,
+          Math.min(originalBalance, originalBalance - state.outcome.negotiated_amount),
+        );
       }
       report.summary.outcome_detail = `Voice call ${state.outcome.status}. ${state.outcome.commitment_notes ?? ""}`;
     } else if (state.outcome.status === "handoff" || state.outcome.status === "voicemail_left") {

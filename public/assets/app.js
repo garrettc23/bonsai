@@ -8,6 +8,55 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const FLOW_STAGES = ["Extract", "Audit", "Negotiate", "Finalize"];
 
+/**
+ * Format a US phone number progressively as the user types.
+ *   "9"           → "(9"
+ *   "94988"       → "(949) 88"
+ *   "9498879051"  → "(949) 887-9051"
+ * Strips non-digits. Leaves a leading "1" or "+1" as an unformatted
+ * prefix so international numbers don't break (we only auto-format
+ * 10-digit US numbers; anything else passes through digits-only).
+ */
+function formatPhone(value) {
+  const raw = String(value ?? "");
+  // Preserve a leading "+" so users typing "+44…" don't get reset.
+  const hasPlus = raw.trim().startsWith("+");
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 0) return hasPlus ? "+" : "";
+  // International or 11-digit US (1-aaa-bbb-cccc): leave digits alone
+  // with the + when present.
+  if (hasPlus || digits.length > 10) {
+    return (hasPlus ? "+" : "") + digits;
+  }
+  // 10-digit US — chunk into (XXX) XXX-XXXX as the user types.
+  if (digits.length <= 3) return `(${digits}`;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+}
+
+/**
+ * Wire the on-input formatter to a phone <input>. Idempotent — calling
+ * twice on the same element is a no-op. Reformats on every keystroke
+ * and preserves caret position so the user's typing isn't disrupted.
+ */
+function attachPhoneFormatter(input) {
+  if (!input || input.dataset.phoneFmt === "1") return;
+  input.dataset.phoneFmt = "1";
+  // Format the existing value once so loaded data renders pretty.
+  if (input.value) input.value = formatPhone(input.value);
+  input.addEventListener("input", () => {
+    const before = input.value;
+    const formatted = formatPhone(before);
+    if (formatted !== before) {
+      input.value = formatted;
+      // Caret to end is fine for almost all typing flows; the alternative
+      // (preserve caret across formatter inserts/deletes) is fiddly and
+      // doesn't earn much UX in this form context.
+      try { input.setSelectionRange(formatted.length, formatted.length); } catch {}
+    }
+  });
+}
+
 const ICONS = {
   scan:  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M21 7V5a2 2 0 0 0-2-2h-2"/><path d="M3 17v2a2 2 0 0 0 2 2h2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><line x1="7" y1="12" x2="17" y2="12"/></svg>',
   doc:   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
@@ -726,14 +775,20 @@ async function init() {
     const block = $("#dz-staging");
     const grid = $("#dz-staging-grid");
     const count = $("#dz-staging-count");
+    // Hide the "No bill handy? Try a sample" row once the user has
+    // staged real files — they clearly have a bill, the prompt is
+    // distracting at that point.
+    const sampleRow = document.querySelector(".dz-sample-row");
     if (!block || !grid || !count) return;
     if (stagedFiles.length === 0) {
       block.hidden = true;
       grid.innerHTML = "";
       count.textContent = "0";
+      if (sampleRow) sampleRow.hidden = false;
       return;
     }
     block.hidden = false;
+    if (sampleRow) sampleRow.hidden = true;
     count.textContent = String(stagedFiles.length);
     grid.innerHTML = "";
     stagedFiles.forEach((f, i) => {
@@ -1196,6 +1251,7 @@ function initContactCard() {
   $("#contact-title").textContent = "Looking up the billing contact…";
   $("#contact-email").value = "";
   $("#contact-phone").value = "";
+  attachPhoneFormatter($("#contact-phone"));
   $("#contact-notes").textContent = "";
   $("#contact-sources").innerHTML = "";
 
@@ -1241,8 +1297,9 @@ function applyContactStatus(data) {
     return;
   }
   if (data.status === "failed") {
-    titleEl.textContent = "Couldn't find a billing contact.";
-    notesEl.textContent = data.error ?? "Add the email and phone you want Bonsai to use below.";
+    titleEl.textContent = "Add a billing email";
+    notesEl.textContent = data.error ?? "Bonsai couldn't find one. Type the billing department's email below — Bonsai will use it to negotiate.";
+    document.getElementById("contact-card")?.classList.add("needs-input");
     return;
   }
   const c = data.contact ?? {};
@@ -1253,14 +1310,18 @@ function applyContactStatus(data) {
   // pill; just ask them to fill it in. The user can still edit if they
   // disagree, since the inputs are still present below.
   const provider = data.provider_name ?? "this provider";
+  const card = document.getElementById("contact-card");
   if (!c.email && !c.phone) {
-    titleEl.textContent = `Couldn't find a billing contact for ${provider}.`;
-    notesEl.textContent = "Add the email and phone you want Bonsai to use below — it'll be saved with this bill.";
+    titleEl.textContent = `Add a billing email for ${provider}`;
+    notesEl.textContent =
+      "Bonsai couldn't find one in public sources. Type the billing department's email below — that's how Bonsai will reach them. Phone is optional.";
     if (document.activeElement !== emailEl) emailEl.value = "";
     if (document.activeElement !== phoneEl) phoneEl.value = "";
     srcEl.innerHTML = "";
+    if (card) card.classList.add("needs-input");
     return;
   }
+  if (card) card.classList.remove("needs-input");
   titleEl.textContent = data.provider_name ? `${data.provider_name} — billing` : "Billing contact";
   // Don't blow away the user's typing if they're already editing.
   if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
@@ -1637,12 +1698,18 @@ async function approveAndRun() {
         return;
       }
       if (j?.error === "missing_contact") {
-        showApproveBlocker({
-          title: "Add a billing contact first",
-          body: j.message ?? "Add a support email or phone for the provider before launching.",
-          ctaLabel: "Open Bills drawer",
-          ctaTarget: "bills",
-        });
+        // Highlight the contact card right here on the review page —
+        // it's the same view, no need to send the user to a different
+        // tab. Scroll it into focus and pop the email input.
+        const card = document.getElementById("contact-card");
+        const emailInput = document.getElementById("contact-email");
+        if (card) {
+          card.classList.add("needs-input");
+          card.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (emailInput) {
+          setTimeout(() => emailInput.focus(), 350);
+        }
         return;
       }
       throw new Error(j?.message ?? j?.error ?? (await res.text()));
@@ -2815,6 +2882,27 @@ function flashSavedThenFade(statusEl) {
   }, 3600);
 }
 
+/**
+ * Wipe the "Saved ✓" indicator the moment any field in `formRoot` changes,
+ * so the user never sees stale confirmation when they have unsaved edits.
+ * Idempotent — the listener is bound once per form root.
+ */
+function clearSaveStatusOnEdit(formRoot, statusEl) {
+  if (!formRoot || !statusEl || formRoot.dataset.clearSaveBound === "1") return;
+  formRoot.dataset.clearSaveBound = "1";
+  const wipe = () => {
+    if (statusEl._fadeTimer) clearTimeout(statusEl._fadeTimer);
+    if (statusEl._clearTimer) clearTimeout(statusEl._clearTimer);
+    statusEl.textContent = "";
+    statusEl.className = "tg-save-status";
+  };
+  // `input` covers text fields, textareas, range; `change` covers
+  // checkboxes, radios, selects, dates. Bubbling listeners on the form
+  // root catch every descendant so we don't have to enumerate inputs.
+  formRoot.addEventListener("input", wipe);
+  formRoot.addEventListener("change", wipe);
+}
+
 // ─── Profile ──────────────────────────────────────────────────
 
 async function renderProfile() {
@@ -3009,6 +3097,11 @@ function mkProfileCard(p) {
       saveBtn.disabled = false;
     }
   });
+  // Format phone as the user types: "9498879051" → "(949) 887-9051"
+  attachPhoneFormatter(g.querySelector("#prof-phone"));
+  // Clear the "Saved ✓" pill the instant any field changes — stale
+  // confirmation is misleading when there are pending edits.
+  clearSaveStatusOnEdit(g, status);
   return { el: g, getValues };
 }
 
@@ -3116,6 +3209,10 @@ async function renderSettings() {
 
   const saveBtn = saveRow.querySelector("#tune-save-btn");
   const status = saveRow.querySelector("#tune-save-status");
+  // Clear the "Saved ✓" pill the moment any field on the Settings page
+  // changes — listening on `root` covers tune card, integrations card,
+  // and account card via event bubbling.
+  clearSaveStatusOnEdit(root, status);
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     status.textContent = "Saving…";
@@ -4233,7 +4330,7 @@ function renderDrawerContact(row) {
   const isFixture = !audit?.run_id; // mock bills have no run; nothing to save
   const helpLine = audit?.can_launch
     ? `<div class="contact-help-ok">Agent ready to launch.</div>`
-    : `<div class="contact-help-warn">Add a support email or phone, then save — that unlocks the agent.</div>`;
+    : `<div class="contact-help-warn">Add a billing email below — that's how Bonsai will reach the company. A phone number is optional. Save when you're done.</div>`;
   const disabled = isFixture ? " disabled" : "";
 
   const kindOptions = BILL_KIND_OPTIONS
@@ -4283,6 +4380,8 @@ function renderDrawerContact(row) {
 function wireDrawerContact(row) {
   const form = $("#drawer-contact-form");
   if (!form) return;
+  // Format the support phone as the user types.
+  attachPhoneFormatter(document.getElementById("contact-support-phone"));
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     void saveDrawerContact(row);
