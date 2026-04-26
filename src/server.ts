@@ -29,6 +29,7 @@ import {
 import { normalizeBillFile, thumbnailBillBytes } from "./lib/extract-bill.ts";
 import { transcribeBill } from "./lib/transcribe-bill.ts";
 import { groundTruthFromText } from "./lib/ground-truth.ts";
+import { extractPdfText, ScannedPdfError } from "./lib/pdf-extract.ts";
 import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
 import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
@@ -1667,22 +1668,38 @@ async function handleUpload(req: Request): Promise<Response> {
   const billPath = join(uploadDir(), `${uploadId}-bill.pdf`);
   writeFileSync(billPath, new Uint8Array(await billFile.arrayBuffer()));
 
-  // NOTE: real user uploads won't have a markdown ground truth; the grounding
-  // check would need to extract text from the uploaded PDF. For the hackathon
-  // demo, uploads must match a shipped fixture name (e.g. user uploads the
-  // same bill-001.pdf we ship). We surface this in the error message.
-  // A follow-up would wire in `unpdf` to extract text from the uploaded PDF.
+  // Ground truth resolution:
+  //   - If a shipped fixture markdown exists for this filename, use it (the
+  //     fixture demo path — exact, deterministic).
+  //   - Otherwise extract text directly from the uploaded PDF via `unpdf`.
+  //     Scanned / image-only PDFs throw `ScannedPdfError` and we surface a
+  //     clear message rather than silently OCR'ing (which would weaken the
+  //     verbatim line_quote contract).
   const baseName = billFile.name.replace(/\.pdf$/i, "");
   const groundTruthPath = join(FIXTURES_DIR, `${baseName}.md`);
+  let analyzeInput: AnalyzeInput | undefined;
   if (!existsSync(groundTruthPath)) {
-    return Response.json(
-      {
-        error:
-          "Uploaded bill doesn't have a matching ground-truth markdown fixture. For the demo, upload bill-001.pdf or a file named to match a shipped fixture. Live PDF text extraction is a follow-up.",
-        hint: `Expected fixtures/${baseName}.md`,
-      },
-      { status: 400 },
-    );
+    let extracted;
+    try {
+      extracted = await extractPdfText(billPath);
+    } catch (err) {
+      if (err instanceof ScannedPdfError) {
+        return Response.json(
+          { error: err.message, code: err.code },
+          { status: 400 },
+        );
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return Response.json(
+        { error: `Could not read the uploaded PDF: ${msg}` },
+        { status: 400 },
+      );
+    }
+    const billNormalized = await normalizeBillFile(billPath, billFile.name);
+    analyzeInput = {
+      bill: billNormalized,
+      billGroundTruth: groundTruthFromText(extracted.full, billPath),
+    };
   }
 
   // Resolve an EOB source: prefer the uploaded file, then the shipped fixture
@@ -1704,10 +1721,15 @@ async function handleUpload(req: Request): Promise<Response> {
     );
   }
 
+  if (analyzeInput) {
+    analyzeInput.eob = await normalizeBillFile(eobPath, basename(eobPath));
+  }
+
   const report = await runBonsai({
     billPdfPath: billPath,
     eobPdfPath: eobPath,
     billFixtureName: baseName,
+    analyzeInput,
     channel,
   });
   return Response.json(report);
