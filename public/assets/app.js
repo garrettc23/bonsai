@@ -4125,9 +4125,11 @@ async function renderSettings() {
   const tune = mkTuneCard(sdata.tune ?? {});
   root.appendChild(tune.el);
 
-  // Connected accounts — editable credentials per integration.
-  const integrations = mkIntegrationsCard(sdata.integrations ?? []);
-  root.appendChild(integrations.el);
+  // Connected accounts deliberately omitted from the rendered tree —
+  // every integration (Anthropic, Resend, ElevenLabs) is operator-owned
+  // via Railway env vars, so there's nothing for an end user to configure.
+  // mkIntegrationsCard + the /api/settings/integrations write surface are
+  // kept on disk for re-enablement if we ever want per-user BYO credentials.
 
   installUnsavedGuard(tune.getValues);
 
