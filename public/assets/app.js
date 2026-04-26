@@ -2643,68 +2643,36 @@ function renderConversation(report) {
  * filters / banner from scratch every time a poll cycle runs.
  */
 /**
- * Custom hero for the Comparison tab. Like renderHeroEmptyView, but the
- * CTA is an early-access signup that persists on the user record. After
- * signup the button text flips to "Added to early access" and stays
- * disabled — every subsequent visit (even after a reload) reflects the
- * already-signed-up state because we read currentUser.early_access_at.
+ * Spinner-flavored empty state for the Comparison tab while a background
+ * offer hunt is still in flight. Same stash-and-swap pattern as
+ * renderHeroEmptyView so restoreViewChildren can bring the chrome back
+ * once offers arrive.
  */
-function renderEarlyAccessHero(view) {
-  if (view.querySelector(":scope > .empty-hero")) return;
+function renderComparisonHuntingHero(view, elapsedSeconds) {
+  if (view.querySelector(":scope > .empty-hero.hunting")) return;
+
+  // If a different empty-hero (e.g. the idle "drop a bill" CTA) is
+  // already mounted, restore chrome first so we don't double-stash.
+  if (view.querySelector(":scope > .empty-hero")) {
+    restoreViewChildren(view);
+  }
 
   const stash = document.createElement("div");
   stash.style.display = "none";
   while (view.firstChild) stash.appendChild(view.firstChild);
 
   const hero = document.createElement("div");
-  hero.className = "empty-hero";
+  hero.className = "empty-hero hunting";
   hero.innerHTML = `
     <div class="empty-hero-card">
-      <h2 class="empty-hero-title">Comparison is in beta</h2>
-      <p class="empty-hero-body">Bonsai will persistently look at other options for your recurring costs — phone plans, internet, insurance, subscriptions — so you're always paying the lowest price possible. No more digging through plans every year.</p>
-      <button type="button" class="btn btn-primary btn-lg empty-hero-cta" id="early-access-btn"></button>
+      <h2 class="empty-hero-title">Bonsai is hunting alternatives…</h2>
+      <p class="empty-hero-body">Searching the web for cheaper providers that match your recent audit. This usually takes 30–90 seconds. <span class="hunt-elapsed">${elapsedSeconds}s elapsed</span></p>
+      <div class="hunt-status" style="justify-content:center"><span class="pulse-dot"></span> Searching…</div>
     </div>`;
 
   hero.appendChild(stash);
   hero.dataset.viewChildren = "1";
   view.appendChild(hero);
-
-  const btn = hero.querySelector("#early-access-btn");
-  if (!btn) return;
-
-  // Sync the button to the user's current join status. Joined uses the
-  // amber AI accent (the "ai" wordmark color) — the color shift IS the
-  // affordance that the button is now a leave-toggle. No micro-copy
-  // needed; clicking again removes them. Mount once + after every
-  // toggle so the state never drifts.
-  const sync = () => {
-    const joined = !!currentUser?.early_access_at;
-    btn.textContent = joined ? "Added to early access ✓" : "Sign up for early access";
-    btn.classList.toggle("is-joined", joined);
-  };
-  sync();
-
-  btn.addEventListener("click", async () => {
-    if (btn.disabled) return;
-    const wasJoined = !!currentUser?.early_access_at;
-    btn.disabled = true;
-    btn.textContent = wasJoined ? "Removing…" : "Adding…";
-    try {
-      const res = await apiFetch("/api/early-access", {
-        method: wasJoined ? "DELETE" : "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const { user } = await res.json();
-      if (user) currentUser = user;
-      sync();
-    } catch (err) {
-      console.warn("[early-access] toggle failed", err);
-      btn.textContent = "Try again";
-    } finally {
-      btn.disabled = false;
-    }
-  });
 }
 
 function renderHeroEmptyView(view, { title, body, cta }) {
@@ -3365,24 +3333,29 @@ function renderOffers() {
   });
 
   const view = $("#view-offers");
+  if (!view) return;
 
-  // Empty + still polling → show the hunting spinner. Empty + idle → empty
-  // state. Otherwise render the cards.
-  if (offersCache.length === 0 && view) {
+  // Empty + still polling → hunting spinner hero. Empty + idle → "drop a
+  // bill" empty state. Both stash chrome via the empty-hero pattern so
+  // restoreViewChildren can bring it back when offers land.
+  if (offersCache.length === 0) {
     if (offersPollTimer) {
       const elapsed = Math.floor((Date.now() - offersPollStartedAt) / 1000);
-      view.innerHTML = `
-        <div class="hunt-panel" style="margin:24px auto;max-width:560px;text-align:center">
-          <div class="hunt-status">
-            <span class="pulse-dot"></span>
-            Bonsai is hunting alternatives… (${elapsed}s)
-          </div>
-        </div>`;
-      return;
+      renderComparisonHuntingHero(view, elapsed);
+    } else {
+      renderHeroEmptyView(view, {
+        title: "No alternatives yet",
+        body:
+          "Bonsai hunts for cheaper providers across your recurring costs every time you upload a bill. Drop one on the Home tab to kick off your first audit — Comparison populates automatically once it's done.",
+        cta: "Go to Home",
+      });
     }
-    renderEarlyAccessHero(view);
     return;
   }
+
+  // Have offers — restore the original chrome (banner, filters, grid)
+  // if the previous render mounted an empty-hero in its place.
+  restoreViewChildren(view);
 
   // The savings banner only earns the page real estate when Bonsai has
   // actually found recommended cheaper alternatives.
