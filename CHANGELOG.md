@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.10.1] - 2026-04-25
+
+### Fixed
+- **Signup + every authenticated `/api/*` request was 500'ing in prod after the `/app/data` volume was mounted.** The Dockerfile dropped to `USER bun` after a build-time `chown -R bun:bun /app`, but Railway's persistent volume mounts over `/app/data` at runtime with root ownership — so the bun process couldn't open the SQLite DB or write the per-user file tree. `createUser()` threw, the route handler bubbled to the 500 fallback, and the SPA showed "Sign in failed." Removed `USER bun` from the Dockerfile so the container runs as root; container isolation is the real security boundary on Railway. A follow-up can reintroduce the bun user via an entrypoint script that chowns `/app/data` at startup.
+
 ## [0.1.10.0] - 2026-04-25
 
 ### Changed
