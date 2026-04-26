@@ -330,6 +330,11 @@ async function showNav(name) {
     renderOffers();
     markOffersSeen();
     updateNavCounts();
+    // If the user lands on Comparison with no offers cached yet, kick off a
+    // poll loop so the page picks up the background hunt that runs after
+    // each audit. Bails out automatically once results land or the user
+    // navigates away.
+    void pollOffersUntilFresh();
   } else if (name === "profile") {
     $("#view-profile").classList.remove("hidden");
     renderProfile();
@@ -1125,6 +1130,10 @@ async function init() {
 
   // Pre-load history for Bills count badge + approvals
   await loadHistory();
+  // Eagerly fetch offers so the Comparison nav badge counts are accurate
+  // before the user navigates there. This is a fast call against the local
+  // /api/offer-history endpoint — no agent invocation.
+  await loadOffers();
   updateNavCounts();
   renderAttentionList();
   loadReceipts();
@@ -1250,7 +1259,7 @@ function updateNavCounts() {
   setNavCount("#nav-bills-count", auditsInAttention + mocksInAttention);
 
   // Offers: recommended offers that weren't in the baseline at first load.
-  const newOffers = MOCK_OFFERS.filter((o) => o.recommended && !offerSeen(o.id)).length;
+  const newOffers = offersCache.filter((o) => o.recommended && !offerSeen(o.id)).length;
   setNavCount("#nav-offers-count", newOffers);
 }
 
@@ -1279,7 +1288,7 @@ function seedNavBaselineIfNeeded(audits) {
   if (localStorage.getItem("bonsai.seenOffers") === null) {
     localStorage.setItem(
       "bonsai.seenOffers",
-      JSON.stringify(MOCK_OFFERS.filter((o) => o.recommended).map((o) => o.id)),
+      JSON.stringify(offersCache.filter((o) => o.recommended).map((o) => o.id)),
     );
   }
   if (localStorage.getItem("bonsai.seenApprovals") === null) {
@@ -1310,7 +1319,7 @@ function markOffersSeen() {
   try {
     localStorage.setItem(
       "bonsai.seenOffers",
-      JSON.stringify(MOCK_OFFERS.filter((o) => o.recommended).map((o) => o.id)),
+      JSON.stringify(offersCache.filter((o) => o.recommended).map((o) => o.id)),
     );
   } catch {}
 }
@@ -2891,12 +2900,42 @@ const KIND_ICON = {
   audit: ICONS.doc,
 };
 
-// Each offer carries a backend `baseline` so "Switch for me" runs a real
-// /api/offer-hunt against the matching source directory. The cheaper numbers
-// you see on the card are what the hunt typically produces — clicking
-// triggers a live reach-out (email/voice simulation) to the directory and
-// surfaces the actual quotes.
-const MOCK_OFFERS = [];
+// Offers from the backend offer-hunt agent. Populated via /api/offer-history
+// (which flattens record_offer outputs across all persisted runs) into
+// {id, recommended, category, source, current, offered, saves, why,
+//  terms_url, baseline}. Cards re-render whenever this updates.
+let offersCache = [];
+let offersPollTimer = null;
+let offersPollStartedAt = 0;
+
+async function loadOffers() {
+  try {
+    const res = await apiFetch("/api/offer-history");
+    if (!res.ok) return;
+    const j = await res.json().catch(() => ({}));
+    offersCache = Array.isArray(j.offers) ? j.offers : [];
+  } catch {
+    /* swallow — next poll tick or nav will retry */
+  }
+}
+
+async function pollOffersUntilFresh() {
+  if (offersPollTimer) return; // already polling
+  if (offersCache.length > 0) return; // already have offers
+  offersPollStartedAt = Date.now();
+  const tick = async () => {
+    offersPollTimer = null;
+    if (currentNav !== "offers") return; // navigated away
+    if (Date.now() - offersPollStartedAt > 5 * 60 * 1000) return; // 5min cap
+    await loadOffers();
+    if (offersCache.length > 0) {
+      renderOffers();
+      return;
+    }
+    offersPollTimer = setTimeout(tick, 5000);
+  };
+  offersPollTimer = setTimeout(tick, 5000);
+}
 
 // ─── Bills ─────────────────────────────────────────────────────
 
@@ -3286,64 +3325,72 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
-  // Page-header title is the original "Cheaper alternatives, found for
-  // you" from when this tab was live. Comparison is now in beta — the
-  // hero card below ("Comparison is in beta" + early-access CTA) carries
-  // the not-yet-shipping state, so the page title can stay aspirational.
   updatePageHeader({
     eyebrow: "Comparison",
     title: "Cheaper alternatives, found for you",
     stats: null,
   });
 
-  // Comparison is in beta — we ship the hero with an early-access
-  // signup CTA. Clicking it persists on the user record so the button
-  // shows "Added to early access" on subsequent visits.
   const view = $("#view-offers");
-  if (view) {
+
+  // Empty + still polling → show the hunting spinner. Empty + idle → empty
+  // state. Otherwise render the cards.
+  if (offersCache.length === 0 && view) {
+    if (offersPollTimer) {
+      const elapsed = Math.floor((Date.now() - offersPollStartedAt) / 1000);
+      view.innerHTML = `
+        <div class="hunt-panel" style="margin:24px auto;max-width:560px;text-align:center">
+          <div class="hunt-status">
+            <span class="pulse-dot"></span>
+            Bonsai is hunting alternatives… (${elapsed}s)
+          </div>
+        </div>`;
+      return;
+    }
     renderEarlyAccessHero(view);
     return;
   }
 
   // The savings banner only earns the page real estate when Bonsai has
-  // actually found cheaper alternatives. Until there's a recommended
-  // offer with a savings number, hide the whole bar — its $0 state was
-  // the loudest thing on an otherwise empty Comparison page.
-  const recommended = MOCK_OFFERS.filter((o) => o.recommended);
-  const total = recommended.reduce((s, o) => s + (o.unit === "/mo" ? o.saves * 12 : o.saves), 0);
+  // actually found recommended cheaper alternatives.
+  const recommended = offersCache.filter((o) => o.recommended);
+  const total = recommended.reduce((s, o) => s + (o.saves || 0), 0);
   const banner = $("#offers-banner");
   if (banner) {
     banner.hidden = recommended.length === 0 || total <= 0;
   }
-  $("#banner-amount").textContent = fmt$(total);
+  const bannerAmt = $("#banner-amount");
+  if (bannerAmt) bannerAmt.textContent = fmt$(total);
 
-  // Filters — "Recommended" leads (it's the agent's curated subset and what
-  // we want users to consider first), then "All" as the escape hatch, then
-  // the per-category chips.
+  // Filters — "Recommended" first, then "All", then per-category chips.
   const filtersRoot = $("#offers-filters");
-  filtersRoot.innerHTML = "";
-  const cats = ["Recommended", "All", ...Array.from(new Set(MOCK_OFFERS.map((o) => o.category)))];
-  for (const c of cats) {
-    const chip = document.createElement("button");
-    chip.className = "filter-chip" + (c === offersFilter ? " active" : "");
-    chip.textContent = c;
-    chip.addEventListener("click", () => { offersFilter = c; renderOffers(); });
-    filtersRoot.appendChild(chip);
+  if (filtersRoot) {
+    filtersRoot.innerHTML = "";
+    const cats = ["Recommended", "All", ...Array.from(new Set(offersCache.map((o) => o.category)))];
+    for (const c of cats) {
+      const chip = document.createElement("button");
+      chip.className = "filter-chip" + (c === offersFilter ? " active" : "");
+      chip.textContent = c;
+      chip.addEventListener("click", () => { offersFilter = c; renderOffers(); });
+      filtersRoot.appendChild(chip);
+    }
   }
 
   const grid = $("#offers-grid");
-  grid.innerHTML = "";
-  let visible;
-  if (offersFilter === "All") visible = MOCK_OFFERS;
-  else if (offersFilter === "Recommended") visible = MOCK_OFFERS.filter((o) => o.recommended);
-  else visible = MOCK_OFFERS.filter((o) => o.category === offersFilter);
-  for (const o of visible) grid.appendChild(buildOfferCard(o));
+  if (grid) {
+    grid.innerHTML = "";
+    let visible;
+    if (offersFilter === "All") visible = offersCache;
+    else if (offersFilter === "Recommended") visible = offersCache.filter((o) => o.recommended);
+    else visible = offersCache.filter((o) => o.category === offersFilter);
+    for (const o of visible) grid.appendChild(buildOfferCard(o));
+  }
 
   // Accept-all: run hunts for every recommended offer that has a baseline.
   const acceptAll = $("#offers-accept-all");
   if (acceptAll && !acceptAll.dataset.wired) {
     acceptAll.addEventListener("click", async () => {
-      const targets = MOCK_OFFERS.filter((o) => o.recommended && o.baseline);
+      const targets = offersCache.filter((o) => o.recommended && o.baseline);
       if (!targets.length) return;
       acceptAll.textContent = `Dispatching agent across ${targets.length} sources…`;
       acceptAll.disabled = true;
@@ -3360,41 +3407,36 @@ function renderOffers() {
 function buildOfferCard(o) {
   const card = document.createElement("div");
   card.className = "offer-card" + (o.recommended ? " recommended" : "");
+  // Card uses only fields the backend agent actually populates: category,
+  // source, current, offered, saves, why, terms_url, baseline. Older fields
+  // (confidence/icon/eta/friction/unit) are gone — adding them back means
+  // expanding the record_offer schema first.
   card.innerHTML = `
     <div class="offer-head">
-      <div class="offer-ic">${ICONS[o.icon] ?? ICONS.sparkle}</div>
+      <div class="offer-ic">${ICONS.sparkle}</div>
       <div class="offer-head-main">
-        <div class="offer-meta">${o.category}</div>
-        <div class="offer-source">${escapeHtml(o.source)}</div>
+        <div class="offer-meta">${escapeHtml(o.category ?? "")}</div>
+        <div class="offer-source">${escapeHtml(o.source ?? "")}</div>
       </div>
-      <span class="tag tag-mono ${o.confidence === "HIGH" ? "tag-green" : "tag-amber"}">${o.confidence}</span>
     </div>
     <div class="offer-price-row">
       <div>
         <div class="col-label">Current</div>
-        <div class="offer-current">${o.current ? `<span class="offer-amt offer-amt-strike">${fmt$(o.current)}</span>` + (o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : "") : "—"}</div>
+        <div class="offer-current">${o.current ? `<span class="offer-amt offer-amt-strike">${fmt$(o.current)}</span>` : "—"}</div>
       </div>
       <div class="offer-arrow">${ICONS.arrow}</div>
       <div>
         <div class="col-label">Offer</div>
-        <div class="offer-new">${o.offered ? `<span class="offer-amt">${fmt$(o.offered)}</span>` + (o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : "") : "Free"}</div>
+        <div class="offer-new">${o.offered ? `<span class="offer-amt">${fmt$(o.offered)}</span>` : "Free"}</div>
       </div>
       <div class="offer-pad"></div>
       <div class="offer-right">
         <div class="col-label">You save</div>
-        <div class="offer-saves"><span class="offer-amt">${fmt$(o.saves)}</span>${o.unit ? `<span class="offer-unit">${escapeHtml(o.unit)}</span>` : ""}</div>
+        <div class="offer-saves"><span class="offer-amt">${fmt$(o.saves)}</span></div>
       </div>
     </div>
-    <div>
-      <div class="offer-sub-title">Why it fits</div>
-      <div class="offer-sub">${escapeHtml(o.why)}</div>
-    </div>
-    <div>
-      <div class="offer-sub-title">Switch friction</div>
-      <div class="offer-sub">${escapeHtml(o.friction)}</div>
-    </div>
-    <div class="offer-eta">${escapeHtml(o.eta)}</div>
-    <div class="offer-hunt-slot" data-hunt-slot="${o.id}"></div>
+    ${o.why ? `<div><div class="offer-sub-title">Why it fits</div><div class="offer-sub">${escapeHtml(o.why)}</div></div>` : ""}
+    <div class="offer-hunt-slot" data-hunt-slot="${escapeHtml(o.id)}"></div>
     <div class="offer-actions">
       <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
       <button class="btn btn-ghost" data-action="compare">Compare</button>
@@ -3426,22 +3468,23 @@ function openCompareModal(offer, card) {
   const scrim = $("#cmp-scrim");
   if (!modal || !scrim) return;
 
-  const unit = offer.unit ?? "";
-  const fmtWithUnit = (n) => n ? fmt$(n) + (unit ? `<span class="cmp-unit">${escapeHtml(unit)}</span>` : "") : "Free";
-  const annualizedSaves = offer.unit === "/mo" ? offer.saves * 12 : offer.saves;
+  const fmtPlain = (n) => (n ? fmt$(n) : "Free");
 
   $("#cmp-category").textContent = offer.category ?? "—";
   $("#cmp-title").textContent = `${offer.baseline?.current_provider ?? "Your current provider"} vs ${offer.source}`;
   $("#cmp-cur-provider").textContent = offer.baseline?.current_provider ?? "Your current provider";
-  $("#cmp-cur-price").innerHTML = offer.current ? fmtWithUnit(offer.current) : "—";
+  $("#cmp-cur-price").textContent = offer.current ? fmt$(offer.current) : "—";
   $("#cmp-cur-spec").textContent = offer.baseline?.specifics ?? "Same plan, same coverage — just paying more.";
   $("#cmp-off-provider").textContent = offer.source ?? "—";
-  $("#cmp-off-price").innerHTML = fmtWithUnit(offer.offered);
-  $("#cmp-off-saves").innerHTML = `Saves <strong>${fmt$(offer.saves)}</strong>${unit ? `<span class="cmp-unit">${escapeHtml(unit)}</span>` : ""}${unit === "/mo" ? ` · <strong>${fmt$(annualizedSaves)}</strong> a year` : ""}`;
-  $("#cmp-why").textContent = offer.why ?? "—";
-  $("#cmp-friction").textContent = offer.friction ?? "—";
-  $("#cmp-eta").textContent = offer.eta ?? "—";
-  $("#cmp-confidence").textContent = offer.confidence ?? "—";
+  $("#cmp-off-price").textContent = fmtPlain(offer.offered);
+  $("#cmp-off-saves").innerHTML = `Saves <strong>${fmt$(offer.saves)}</strong>`;
+  $("#cmp-why").textContent = offer.why || "—";
+  // friction/eta/confidence rows in the modal markup are no longer populated —
+  // the backend's record_offer schema doesn't carry those fields.
+  const setIfExists = (sel, text) => { const el = $(sel); if (el) el.textContent = text; };
+  setIfExists("#cmp-friction", "—");
+  setIfExists("#cmp-eta", "—");
+  setIfExists("#cmp-confidence", "—");
 
   const switchBtn = $("#cmp-switch");
   if (offer.baseline) {
@@ -3494,14 +3537,14 @@ async function runOfferHuntForCard(offer, card) {
     <div class="hunt-panel">
       <div class="hunt-status">
         <span class="pulse-dot"></span>
-        Agent reaching out to alternative sources…
+        Bonsai is searching the web for alternatives…
       </div>
     </div>`;
   try {
     const res = await apiFetch("/api/offer-hunt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseline: offer.baseline, stop_on_first_win: false }),
+      body: JSON.stringify({ baseline: offer.baseline }),
     });
     const data = await res.json();
     if (!res.ok || data.error) {
@@ -3512,6 +3555,8 @@ async function runOfferHuntForCard(offer, card) {
     }
     slot.innerHTML = renderHuntPanel(data);
     btn.textContent = data.outcome === "lower_price_found" ? "Switch confirmed" : "Hunt complete";
+    // Refresh the cache so the new run's offers populate other cards too.
+    void loadOffers();
   } catch (err) {
     slot.innerHTML = `<div class="hunt-panel error">Hunt failed: ${escapeHtml(err.message)}</div>`;
     btn.textContent = "Try again";
@@ -3524,29 +3569,33 @@ function renderHuntPanel(data) {
     ? `<span class="tag tag-mono tag-green">LOWER PRICE</span>`
     : data.outcome === "current_is_lowest"
     ? `<span class="tag tag-mono tag-amber">ALREADY LOWEST</span>`
-    : `<span class="tag tag-mono tag-red">NO QUOTES</span>`;
-  const rows = (data.quotes || []).map((q) => {
-    const price = q.quoted_price != null ? fmt$(q.quoted_price) : '<em style="color:var(--ink-mute)">declined</em>';
-    const save = q.savings_vs_baseline != null
-      ? (q.savings_vs_baseline > 0
-          ? `<span style="color:var(--green)">save ${fmt$(q.savings_vs_baseline)}</span>`
-          : `<span style="color:var(--ink-mute)">+${fmt$(Math.abs(q.savings_vs_baseline))}</span>`)
+    : `<span class="tag tag-mono tag-red">NO RESULTS</span>`;
+  const rows = (data.offers || []).map((o) => {
+    const price = fmt$(o.price_usd);
+    const save = typeof o.savings_vs_baseline === "number"
+      ? (o.savings_vs_baseline > 0
+          ? `<span style="color:var(--green)">save ${fmt$(o.savings_vs_baseline)}</span>`
+          : `<span style="color:var(--ink-mute)">+${fmt$(Math.abs(o.savings_vs_baseline))}</span>`)
       : "—";
-    const chanBadge = `<span class="tag tag-mono" style="margin-right:6px">${q.channel.toUpperCase()}</span>`;
+    const chanBadge = o.channel
+      ? `<span class="tag tag-mono" style="margin-right:6px">${escapeHtml(o.channel.toUpperCase())}</span>`
+      : "";
+    const recBadge = o.recommended
+      ? `<span class="tag tag-mono tag-green" style="margin-left:6px">RECOMMENDED</span>`
+      : "";
+    const termsLink = o.terms_url
+      ? `<a href="${escapeHtml(o.terms_url)}" target="_blank" rel="noopener noreferrer">terms</a>`
+      : "";
     return `
       <div class="hunt-row">
-        <div class="hunt-row-head">${chanBadge}<strong>${escapeHtml(q.source_name)}</strong> · ${price} · ${save}</div>
-        <div class="hunt-row-note">${escapeHtml(q.notes || "")}</div>
-        <details class="hunt-reply">
-          <summary>Reply</summary>
-          <div class="hunt-reply-body">${escapeHtml(q.raw_reply || "")}</div>
-        </details>
+        <div class="hunt-row-head">${chanBadge}<strong>${escapeHtml(o.provider)}</strong> · ${price} · ${save}${recBadge}</div>
+        <div class="hunt-row-note">${escapeHtml(o.notes || "")} ${termsLink}</div>
       </div>`;
   }).join("");
   return `
     <div class="hunt-panel">
       <div class="hunt-head">${outcomeTag} <span class="hunt-headline">${escapeHtml(data.headline || "")}</span></div>
-      <div class="hunt-rows">${rows || '<div class="hunt-row-note">No quotes returned.</div>'}</div>
+      <div class="hunt-rows">${rows || '<div class="hunt-row-note">No alternatives recorded.</div>'}</div>
     </div>`;
 }
 
@@ -5719,8 +5768,7 @@ function buildTimelineEvents(row, report) {
       channel: "scan",
       tone: row.score >= 70 ? "green" : row.score >= 50 ? "amber" : "red",
     });
-    const offer = (typeof MOCK_OFFERS !== "undefined" ? MOCK_OFFERS : [])
-      .find((o) => o.baseline?.current_provider === row.vendor);
+    const offer = offersCache.find((o) => o.baseline?.current_provider === row.vendor);
     if (offer) {
       events.push({
         ts: Date.now() - 6 * 3600 * 1000,
