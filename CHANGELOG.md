@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.32.0] - 2026-04-26
+
+### Added
+- **Click-to-edit bill name in the drawer.** The drawer header title is now contenteditable. Click → cursor appears in place; click away (or hit Enter) autosaves; Escape reverts. Backed by a new idempotent `/api/bill-rename` endpoint that sets/clears `PendingRun.display_name`. Empty rename clears the override; the original analyzer-detected provider name comes back. The Bills row + drawer title both prefer `display_name` when present; the audit's evidence chain stays untouched on the report.
+- **Currency formatter on the Switch modal's amount input.** Switched the field from `<input type=number>` to text + a small `formatCurrencyInput` helper that strips invalid characters, caps the decimal at 2 digits, inserts thousands separators, and prefixes "$". Default value renders as `$59.99` instead of raw `59.99`. Blur normalizes `$59` → `$59.00`. Submit reuses the same parser so `$1,234.56` round-trips to 1234.56.
+
+### Fixed
+- **Drawer "Current" price now reflects a completed Comparison switch.** The previous v0.1.31.0 fix updated the Bills list row vendor + balance from `completed_switches[-1]`, but the drawer's stat grid didn't recompute. Two layered fixes: (1) `findUpdatedRowAfterRefresh` recomputes vendor + balance off the fresh audit so reopening the drawer after a switch shows the new provider + amount; (2) `renderDrawerStats` directly reads the latest switch entry for the "Current" stat, falling back to `summary.final_balance` only when no switch is recorded. Original stays pinned to the audit's pre-switch balance.
+
 ## [0.1.31.0] - 2026-04-26
 
 ### Fixed
