@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.21.2] - 2026-04-26
+
+### Fixed
+- **Typecheck regression on main.** `src/orchestrator.ts:39` imported only `loadConversationMeta` from `./lib/call-store.ts`, but line 467 calls `saveConversationMeta(meta)` — `bun run typecheck` has been red since v0.1.13.0 (real ElevenLabs voice). Added `saveConversationMeta` to the import. The function exists and is exported (`src/lib/call-store.ts:76`) and is correctly imported in both `src/server/voice-dial.ts` and `src/server/voice-webhooks.ts` — orchestrator was the only callsite missing it.
+
 ## [0.1.21.1] - 2026-04-26
 
 ### Fixed
