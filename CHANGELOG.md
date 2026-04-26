@@ -4,11 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.1.4.0] - 2026-04-25
 
 ### Added
 - **Real PDF text extraction on uploaded bills.** New `src/lib/pdf-extract.ts` wraps `unpdf` (Bun-friendly, no native deps) and exposes `extractPdfText(path)`. The `POST /api/run` upload route no longer rejects PDFs that lack a matching `fixtures/<name>.md`: it pulls text directly from the uploaded PDF and feeds it through the existing `groundTruthFromText`, so the analyzer's verbatim `line_quote` validator still anchors every finding to the actual bill. Image-only / scanned PDFs raise a `ScannedPdfError` that surfaces to the client as `{ code: "SCANNED_PDF" }` with a "this looks scanned, paste rows or upload a text PDF" message — no silent OCR, the grounding contract holds. Fixture demo path is unchanged; only the previously-unreachable rejection branch flips to live extraction.
 
+## [0.1.3.0] - 2026-04-25
+
+### Fixed
+- **Outbound emails no longer leak markdown punctuation.** Emails ship to Resend as the plain `text:` field, so `**bold**`, `## headings`, `> blockquotes`, and backticks were rendering as literal characters in Gmail and Outlook. The negotiator's `send_email` tool now asks for `body_text` (was `body_markdown`), the tool description and system prompt forbid markdown formatting with explicit do/don't examples, and the humanizer's system prompt picks up a matching rule. A new `stripMarkdown()` helper runs as a belt-and-braces last line of defense in both the Resend and Mock email clients — even if Claude drifts back into markdown habits, the wire payload is clean. Snake_case identifiers like `claim_number` and `account_number` are preserved verbatim. The appeal-letter PDF attachment intentionally stays markdown (it's an attachment, not the body).
+
+### Changed
+- **`OutboundEmail.body_markdown` → `body_text`** on the email type (`src/clients/email.ts`) and every callsite (`src/negotiate-email.ts`, `src/negotiate-agent.ts`, `src/orchestrator.ts`, `scripts/day4-negotiate-email.ts`, both email clients, the webhook test fixture). Aligns with `InboundEmail.body_text` so both sides of the wire share the same field name and contract.
+
+## [Unreleased]
+
+### Added
 - **Terms of Service + Privacy Policy gate on signup.** New `users.accepted_terms_at` column. `POST /api/auth/signup` now requires `accepted_terms: true` in the body — server returns `400 terms_not_accepted` otherwise. Auth screen renders a terms-acceptance checkbox in the foot of the card (signup mode only, sharing the same grid cell as the "Forgot password?" link in login mode so card height never changes between tabs). Links route to two new branded static pages (`public/terms.html`, `public/privacy.html`); `handleStatic` auto-maps extensionless URLs to `.html` so `/terms` and `/privacy` resolve.
 - **Outcome verification loop.** New PendingRun fields `outcome_verified` (`"yes" | "no" | "partial"`), `outcome_notes`, `outcome_verified_at`. Drawer ribbon ("Did your next bill match?") renders for every resolved bill; a "Yes, matched" button submits immediately and a "No / partial" button opens a modal with notes. `attentionReason()` adds a `verify_outcome` key for resolved bills older than 21 days that the user hasn't confirmed — they surface in the Bills attention bucket alongside the existing `awaiting / escalated / paused / error` reasons. `POST /api/bills/verify-outcome` persists the verdict; `/api/history` projects the new fields and a computed `needs_outcome_check` flag.
 - **Email + password auth with per-user data isolation.** `users` and `sessions` tables in SQLite (`out/bonsai.db`) backed by Bun's argon2id hashing. HTTP-only `bonsai_session` cookie (30-day TTL), middleware that 401s every `/api/*` route without a session, and per-request `withUserContext` (AsyncLocalStorage) so `email-mock`, `negotiate-email`, `offer-agent`, `voice/*`, and `user-settings` silently route to `out/users/<id>/{pending,threads,offers,calls,uploads,user-settings.json,report-*.json}` without signature changes. Login screen replaces home for unauthenticated visitors; sidebar foot stayed clean — Log out lives in Settings → Account.

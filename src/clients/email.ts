@@ -16,7 +16,7 @@ export interface OutboundEmail {
   to: string;
   from: string;
   subject: string;
-  body_markdown: string;
+  body_text: string;
   /** Thread correlation — same value on every message in the same dispute. */
   thread_id: string;
   /** Plain-text attachment. Used to attach the structured appeal JSON. */
@@ -38,7 +38,7 @@ export interface SentEmail {
   to: string;
   from: string;
   subject: string;
-  body_markdown: string;
+  body_text: string;
   thread_id: string;
   in_reply_to?: string;
   cc?: string[];
