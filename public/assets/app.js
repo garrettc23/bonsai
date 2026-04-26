@@ -3237,13 +3237,15 @@ function renderBills() {
     // Surface that on the row so Negotiation reflects reality, not the
     // stale pre-switch values. The audit's original metadata still wins
     // for display name fallbacks and for the audit-time evidence chain.
+    // display_name (from the click-to-edit drawer title) overrides
+    // everything when the user has explicitly named the bill.
     const latestSwitch = (a.completed_switches ?? []).slice(-1)[0] ?? null;
     const switchedVendor = latestSwitch?.new_provider ?? null;
     const switchedBalance = latestSwitch?.new_amount ?? null;
     return {
       id: `audit-${a.name}`,
       kind: "audit",
-      vendor: switchedVendor ?? displayByName.get(a.name) ?? a.provider_name ?? a.name,
+      vendor: a.display_name ?? switchedVendor ?? displayByName.get(a.name) ?? a.provider_name ?? a.name,
       account: a.patient_name ? `${a.patient_name} · ${a.date_of_service ?? "—"}` : (a.date_of_service ?? "One-time bill"),
       lastCheck: relTime(a.modified),
       addedAt: a.modified ?? Date.now(),
@@ -3872,6 +3874,50 @@ function switchCancelStep(offer) {
   return `Cancel your service with ${escapeHtml(current)} <em>after</em> the new one is active so you don't end up with a coverage gap.`;
 }
 
+// Currency formatter for the Switch modal's amount input. Strips any
+// non-numeric input (except a single decimal point), inserts thousands
+// separators, and prefixes "$" so the user sees a real dollar value as
+// they type. Returns the formatted string + the parsed number so the
+// submit handler can reuse the latter without re-parsing.
+function formatCurrencyInput(raw) {
+  if (!raw) return { display: "", value: NaN };
+  // Keep digits and the FIRST decimal point only.
+  let cleaned = "";
+  let seenDot = false;
+  for (const ch of String(raw)) {
+    if (ch >= "0" && ch <= "9") cleaned += ch;
+    else if (ch === "." && !seenDot) { cleaned += "."; seenDot = true; }
+  }
+  if (!cleaned) return { display: "", value: NaN };
+  // Cap decimal portion at 2 digits — the user is entering a price.
+  const [intPart, decPart = ""] = cleaned.split(".");
+  const trimmedDec = decPart.slice(0, 2);
+  const intWithCommas = (intPart || "0").replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const display = `$${intWithCommas}${cleaned.includes(".") ? `.${trimmedDec}` : ""}`;
+  const value = Number(`${intPart || "0"}.${trimmedDec || "0"}`);
+  return { display, value };
+}
+
+function attachCurrencyFormatter(input) {
+  if (!input || input._currencyWired) return;
+  input._currencyWired = true;
+  input.addEventListener("input", () => {
+    const { display } = formatCurrencyInput(input.value);
+    if (input.value !== display) input.value = display;
+  });
+  input.addEventListener("blur", () => {
+    // On blur, normalize to two decimal places so `$59` → `$59.00`.
+    const { value } = formatCurrencyInput(input.value);
+    if (Number.isFinite(value) && value > 0) {
+      input.value = `$${value.toLocaleString("en-US", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+      })}`;
+    } else if (!input.value.trim()) {
+      input.value = "";
+    }
+  });
+}
+
 function openSwitchModal(offer) {
   const modal = $("#switch-modal");
   const scrim = $("#switch-scrim");
@@ -3952,10 +3998,15 @@ function openSwitchModal(offer) {
 
   // Default the amount input to the offer's recommended price — the user
   // can edit if their actual signup price differs (promo, discount, etc.).
+  // The currency formatter shows "$59.99" instead of raw "59.99" so the
+  // input matches the eyebrow's USD framing as the user types.
   const amountInput = $("#switch-amount-input");
   if (amountInput) {
     const def = Number(offer.offered ?? 0);
-    amountInput.value = Number.isFinite(def) && def >= 0 ? def.toFixed(2) : "";
+    amountInput.value = Number.isFinite(def) && def >= 0
+      ? `$${def.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : "";
+    attachCurrencyFormatter(amountInput);
   }
 
   scrim.hidden = false;
@@ -4005,7 +4056,9 @@ function openSwitchModal(offer) {
         return;
       }
       const raw = (amountInput?.value ?? "").trim();
-      const amount = Number(raw);
+      // Parse via the same formatter the input uses so "$1,234.56" round-
+      // trips cleanly to 1234.56.
+      const { value: amount } = formatCurrencyInput(raw);
       if (!raw || !Number.isFinite(amount) || amount < 0) {
         if (errEl) {
           errEl.textContent = "Enter a valid monthly amount in dollars.";
@@ -4908,6 +4961,9 @@ async function openBillDrawer(row) {
   // Header
   $("#drawer-title").textContent = row.vendor ?? "—";
   $("#drawer-sub").textContent = row.lastCheck ?? "";
+  // Click-to-edit title: only enabled for real audit rows (mock rows
+  // can't round-trip a rename through the server).
+  wireDrawerTitleEdit(row);
 
   // Stats (initial — will be enriched after fetch for audits)
   renderDrawerStats(row, null);
@@ -5360,6 +5416,78 @@ function showToast(message, kind = "ok") {
   }, 2400);
 }
 
+// Drawer title is click-to-edit. We use contenteditable on the existing
+// <h2> so the typography stays identical between view + edit modes —
+// users get a calm "click → cursor appears → type → click away" feel
+// instead of a separate input field that visually shifts on focus.
+// On blur we autosave by POSTing /api/bill-rename and refresh history;
+// the bills list and drawer header pick up the new value next render.
+function wireDrawerTitleEdit(row) {
+  const titleEl = $("#drawer-title");
+  if (!titleEl) return;
+  const runId = row?.audit?.run_id;
+  // Mock rows or rows without a backing run can't be renamed.
+  if (!runId || row.kind !== "audit") {
+    titleEl.contentEditable = "false";
+    titleEl.removeAttribute("title");
+    titleEl.classList.remove("editable");
+    return;
+  }
+  titleEl.contentEditable = "true";
+  titleEl.title = "Click to rename";
+  titleEl.classList.add("editable");
+  if (titleEl._renameWired) return;
+  titleEl._renameWired = true;
+
+  let beforeEdit = "";
+  titleEl.addEventListener("focus", () => {
+    beforeEdit = titleEl.textContent ?? "";
+  });
+  titleEl.addEventListener("keydown", (ev) => {
+    // Enter commits + blurs; Escape reverts + blurs.
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      titleEl.blur();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      titleEl.textContent = beforeEdit;
+      titleEl.blur();
+    }
+  });
+  titleEl.addEventListener("blur", async () => {
+    const next = (titleEl.textContent ?? "").trim();
+    if (!next) {
+      // Empty rename → revert. The user almost never wants a blank bill.
+      titleEl.textContent = beforeEdit;
+      return;
+    }
+    if (next === beforeEdit.trim()) return; // no-op
+    const r = drawerState?.row;
+    const id = r?.audit?.run_id;
+    if (!id) return;
+    try {
+      const res = await apiFetch("/api/bill-rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: id, display_name: next }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await loadHistory();
+      if (currentNav === "bills") renderBills();
+      const updated = findUpdatedRowAfterRefresh(r);
+      if (updated) {
+        drawerState.row = updated;
+        // Don't re-open the drawer (would steal focus + cause a visible
+        // refresh flash). Just keep the title field's value as-is.
+      }
+      showToast(`Renamed to “${next}”.`);
+    } catch (err) {
+      titleEl.textContent = beforeEdit;
+      showToast(`Couldn't rename: ${err?.message ?? err}`, "err");
+    }
+  });
+}
+
 // After a status flip, the bills cache is refreshed but `drawerState.row`
 // still points at the old object. Reach into the fresh audits list to grab
 // the new row for the same name so the drawer can re-render with updated
@@ -5380,9 +5508,20 @@ function findUpdatedRowAfterRefresh(row) {
   if (isNegotiating) lifecycle = "active";
   else if (isResolved) lifecycle = "resolved";
   else lifecycle = "attention";
+  // Recompute vendor + balance from the fresh audit so a Comparison
+  // switch (which adds a completed_switches entry server-side) is
+  // reflected in the drawer's title + Current stat without forcing a
+  // full bills-list re-render. Without this, the drawer would re-open
+  // showing the pre-switch provider/price.
+  const latestSwitch = (fresh.completed_switches ?? []).slice(-1)[0] ?? null;
+  const switchedVendor = latestSwitch?.new_provider ?? null;
+  const switchedBalance = latestSwitch?.new_amount ?? null;
+  const displayName = fresh.display_name ?? null;
   return {
     ...row,
     audit: fresh,
+    vendor: displayName ?? switchedVendor ?? fresh.provider_name ?? row.vendor ?? fresh.name,
+    balance: switchedBalance ?? fresh.final_balance ?? fresh.original_balance ?? row.balance ?? 0,
     lifecycle,
     status: isNegotiating ? "negotiating" : (isCancelled ? "cancelled" : (isFailed ? "failed" : "completed")),
   };
@@ -5531,7 +5670,15 @@ function bindDrawerTabs() {
 function renderDrawerStats(row, report) {
   const summary = report?.summary ?? {};
   const was = summary.original_balance ?? row.balance ?? 0;
-  const now = summary.final_balance ?? row.balance ?? 0;
+  // After the user records a Comparison switch, the latest entry's
+  // new_amount IS what they're currently paying. Prefer that over both
+  // the resolved final_balance and the original — the bill is now a
+  // different service at a different price.
+  const latestSwitch = (row.audit?.completed_switches ?? []).slice(-1)[0] ?? null;
+  const switchedAmount = latestSwitch?.new_amount;
+  const now = (Number.isFinite(switchedAmount) && switchedAmount >= 0)
+    ? switchedAmount
+    : (summary.final_balance ?? row.balance ?? 0);
   const saved = clampSaved(summary.patient_saved, was);
   const channel = summary.channel_used ?? "—";
 

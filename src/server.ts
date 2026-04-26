@@ -258,6 +258,14 @@ interface PendingRun {
   outcome_notes?: string;
   outcome_verified_at?: number;
   /**
+   * User-set bill display name. Overrides `analyzer.metadata.provider_name`
+   * for UI labels (Bills row vendor, drawer header). The audit-time
+   * provider stays untouched on the report so the evidence chain isn't
+   * mutated. Set via /api/bill-rename when the user click-to-edits the
+   * drawer title.
+   */
+  display_name?: string;
+  /**
    * User-marked Comparison switches. When the user clicks Complete on a
    * Switch instructions modal and enters their new monthly amount, we
    * append a row here so the drawer's activity log can show "Switched
@@ -1692,6 +1700,29 @@ async function handleSwitchComplete(req: Request): Promise<Response> {
 }
 
 /**
+ * Set or clear the user's display name override for a bill. Called by the
+ * drawer's click-to-edit title affordance — autosaves on blur, so a
+ * minimal idempotent handler is the right shape.
+ */
+async function handleBillRename(req: Request): Promise<Response> {
+  const body = (await req.json()) as { run_id?: string; display_name?: string };
+  if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+  const next = typeof body.display_name === "string" ? body.display_name.trim() : "";
+  if (next.length > 200) {
+    return Response.json({ error: "display_name too long" }, { status: 400 });
+  }
+  if (next) {
+    run.display_name = next;
+  } else {
+    delete run.display_name;
+  }
+  savePending(run);
+  return Response.json({ ok: true, run_id: run.run_id, display_name: run.display_name ?? null });
+}
+
+/**
  * Delete a bill entirely. Idempotent: returns 200 with deleted=false if
  * the pending record is already gone, so the client's optimistic UI
  * doesn't paint an error toast over a successful local delete. The
@@ -2211,6 +2242,7 @@ async function handleHistory(): Promise<Response> {
         outcome_verified_at: pending?.outcome_verified_at ?? null,
         needs_outcome_check: needsOutcomeCheck,
         completed_switches: pending?.completed_switches ?? [],
+        display_name: pending?.display_name ?? null,
       };
     });
 
@@ -2251,6 +2283,7 @@ async function handleHistory(): Promise<Response> {
       outcome_verified_at: run.outcome_verified_at ?? null,
       needs_outcome_check: false,
       completed_switches: run.completed_switches ?? [],
+      display_name: run.display_name ?? null,
     });
   }
 
@@ -3054,6 +3087,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/stop") return handleStopNegotiation(req);
         if (req.method === "POST" && url.pathname === "/api/resume") return handleResumeNegotiation(req);
         if (req.method === "POST" && url.pathname === "/api/switch-complete") return handleSwitchComplete(req);
+        if (req.method === "POST" && url.pathname === "/api/bill-rename") return handleBillRename(req);
         if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
         if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
