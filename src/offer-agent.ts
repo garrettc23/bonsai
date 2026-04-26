@@ -68,10 +68,22 @@ export interface OfferHuntResult {
   total_monthly_savings: number | null;
   started_at: string;
   completed_at: string;
+  /**
+   * The PendingRun that produced this hunt. When the bill behind that run
+   * is deleted, the offer file is cleaned up (and projectOfferHistory
+   * filters out any orphans missed by the cleanup). Optional so legacy
+   * offer files written before this field landed still parse — the
+   * projection treats unknown run_ids as orphans.
+   */
+  run_id?: string;
 }
 
 interface RunOfferHuntOpts {
   baseline: Baseline;
+  /** PendingRun this hunt is bound to. Stamped on the saved file so the
+   * Comparison view can be filtered by active runs and a bill delete can
+   * sweep its associated offer files. */
+  run_id?: string;
   /** @deprecated retained for caller compatibility — the agent handles its own stopping logic. */
   stop_on_first_win?: boolean;
   anthropic?: Anthropic;
@@ -122,14 +134,26 @@ interface RecordOfferInput {
  * Money", "rocket-money", and "RocketMoney" all collapse to one key.
  */
 const COMPETITOR_BLOCKLIST = new Set([
+  // Bill-negotiation services
   "goodbill",
   "trim",
   "billfixers",
-  "truebill",
-  "resolve",
+  "billcutterz",
   "billshark",
-  "cushion",
+  "billtrim",
+  "resolve",
+  // Subscription / bill tracking apps that overlap our scope
+  "truebill",
   "rocketmoney",
+  "cushion",
+  "hiatus",
+  "buddy",
+  "subby",
+  "bobby",
+  // Personal finance + bill-pay tools that pitch bill negotiation
+  "moneylion",
+  "chimebillpay",
+  "quickenbills",
 ]);
 
 function normalizeProviderName(name: string): string {
@@ -347,6 +371,7 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
     total_monthly_savings,
     started_at,
     completed_at: new Date().toISOString(),
+    run_id: opts.run_id,
   };
 }
 
@@ -359,7 +384,11 @@ export function saveOfferHunt(result: OfferHuntResult): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "")
     .slice(0, 40);
-  const fname = `${Date.now()}-${slug || "offer"}.json`;
+  // Embed run_id in the filename when present so delete-bill can sweep
+  // every file belonging to a deleted run via a glob (legacy files
+  // without run_id stay parseable; projectOfferHistory filters orphans).
+  const runFragment = result.run_id ? `-${result.run_id.replace(/[^a-zA-Z0-9_]/g, "")}` : "";
+  const fname = `${Date.now()}${runFragment}-${slug || "offer"}.json`;
   const full = join(dir, fname);
   writeFileSync(full, JSON.stringify(result, null, 2), "utf8");
   return fname;

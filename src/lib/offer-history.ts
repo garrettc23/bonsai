@@ -44,15 +44,34 @@ export function offerCardFromRecord(
   };
 }
 
+export interface ProjectOfferHistoryOpts {
+  /**
+   * Set of PendingRun ids the Comparison view should follow. When
+   * provided, offer files whose `run_id` isn't in this set are dropped —
+   * Comparison stays in sync with whatever bills currently exist on the
+   * Negotiation page. Files that pre-date `run_id` tagging are kept (their
+   * `run_id` is undefined, which we treat as "legacy, don't filter") so
+   * deploying this change doesn't blank out the UI on existing data.
+   *
+   * Pass `null` to skip the filter (every offer file projects, same as
+   * the pre-FIX-F behavior). Useful for tests + admin tools.
+   */
+  activeRunIds?: ReadonlySet<string> | null;
+}
+
 /**
  * Read every persisted offer-hunt run for the user and flatten into card
  * objects, newest-first by file mtime, then by savings descending within
  * each run. Returns an empty array if the directory doesn't exist or every
  * file is unparseable.
  */
-export function projectOfferHistory(offersDirPath: string): OfferCard[] {
+export function projectOfferHistory(
+  offersDirPath: string,
+  opts: ProjectOfferHistoryOpts = {},
+): OfferCard[] {
   if (!existsSync(offersDirPath)) return [];
   const files = readdirSync(offersDirPath).filter((f) => f.endsWith(".json"));
+  const activeRunIds = opts.activeRunIds ?? null;
 
   type RunWithMeta = { run: OfferHuntResult; modified: number; file: string };
   const runs: RunWithMeta[] = [];
@@ -61,6 +80,11 @@ export function projectOfferHistory(offersDirPath: string): OfferCard[] {
     try {
       const run = JSON.parse(readFileSync(full, "utf8")) as OfferHuntResult;
       if (!run?.baseline || !Array.isArray(run.offers)) continue;
+      // Skip orphans: when activeRunIds is provided AND this file has a
+      // run_id, drop it unless that run still exists. Files without a
+      // run_id are pre-FIX-F legacy and stay (better to show stale offers
+      // than to surprise-empty the UI on deploy).
+      if (activeRunIds && run.run_id && !activeRunIds.has(run.run_id)) continue;
       runs.push({ run, modified: statSync(full).mtimeMs, file: f });
     } catch {
       // skip unparseable files

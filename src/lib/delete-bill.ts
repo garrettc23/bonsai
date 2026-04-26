@@ -7,7 +7,8 @@
  * Server.ts wires this up with the real on-disk helpers; the test
  * provides its own helpers + paths for hermetic execution.
  */
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import type { UserPaths } from "./user-paths.ts";
 
 export interface PendingRunForDelete {
@@ -66,6 +67,28 @@ export function deleteBillByRunId<R extends PendingRunForDelete>(
     if (p.startsWith(uploadRoot)) tryUnlink(p);
   }
   if (run.eob_path && run.eob_path.startsWith(uploadRoot)) tryUnlink(run.eob_path);
+
+  // Sweep offer-hunt files belonging to this run. Two strategies layered:
+  // (1) filename match on the embedded run_id fragment for files written
+  //     after the offer-hunt cleanup landed, and (2) JSON read for older
+  //     files where the only signal is run_id inside the body. Anything
+  //     missed here gets filtered at projection time, so a stale file is
+  //     hidden from the UI even if cleanup fails.
+  const offersRoot = deps.paths.offersDir;
+  if (offersRoot && existsSync(offersRoot)) {
+    for (const f of readdirSync(offersRoot)) {
+      if (!f.endsWith(".json")) continue;
+      const full = join(offersRoot, f);
+      if (f.includes(run.run_id)) {
+        tryUnlink(full);
+        continue;
+      }
+      try {
+        const data = JSON.parse(readFileSync(full, "utf8")) as { run_id?: unknown };
+        if (data && data.run_id === run.run_id) tryUnlink(full);
+      } catch { /* skip unparseable */ }
+    }
+  }
 
   return { ok: true, run_id: run.run_id, deleted: true };
 }
