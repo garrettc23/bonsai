@@ -2664,6 +2664,10 @@ const server = Bun.serve({
         const { handleResendInbound } = await import("./server/webhooks.ts");
         return handleResendInbound(req);
       }
+      if (req.method === "POST" && url.pathname === "/webhooks/resend-inbound/echo") {
+        const { handleResendInboundEcho } = await import("./server/webhooks.ts");
+        return handleResendInboundEcho(req);
+      }
 
       // Static pages render unauthenticated; the front-end calls /api/auth/me
       // and switches to the login screen when no user is returned.

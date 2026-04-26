@@ -161,13 +161,21 @@ async function forwardInboundToUser(opts: {
 }
 
 function correlateThreadId(payload: ResendInboundPayload): string | null {
+  return correlateThreadIdWithMethod(payload).thread_id;
+}
+
+type CorrelationMethod = "header" | "in_reply_to" | "references" | null;
+
+function correlateThreadIdWithMethod(
+  payload: ResendInboundPayload,
+): { thread_id: string | null; method: CorrelationMethod } {
   const data = payload.data ?? {};
   const fromHeader = pickHeader(data.headers, "X-Bonsai-Thread-Id");
-  if (fromHeader) return fromHeader;
+  if (fromHeader) return { thread_id: fromHeader, method: "header" };
   const inReplyTo = data.in_reply_to ?? pickHeader(data.headers, "In-Reply-To");
   if (inReplyTo) {
     const tid = lookupThreadByOutboundMessageId(inReplyTo);
-    if (tid) return tid;
+    if (tid) return { thread_id: tid, method: "in_reply_to" };
   }
   const refsRaw = data.references ?? pickHeader(data.headers, "References");
   const refs = Array.isArray(refsRaw)
@@ -177,9 +185,9 @@ function correlateThreadId(payload: ResendInboundPayload): string | null {
       : [];
   for (const r of refs) {
     const tid = lookupThreadByOutboundMessageId(r);
-    if (tid) return tid;
+    if (tid) return { thread_id: tid, method: "references" };
   }
-  return null;
+  return { thread_id: null, method: null };
 }
 
 /** Every per-user threads directory plus the legacy `dataRoot/threads`
@@ -356,6 +364,76 @@ export async function handleResendInbound(req: Request): Promise<Response> {
   }
 
   return Response.json({ ok: true, correlated: true, inserted, thread_id });
+}
+
+/**
+ * Read-only debug echo for `POST /webhooks/resend-inbound/echo`. Returns
+ * what the production handler would observe — signature validity, age,
+ * thread correlation method — without persisting anything or stepping
+ * the agent. Gated by `BONSAI_WEBHOOK_DEBUG_TOKEN`: route returns 404
+ * when the env var is unset, missing, or doesn't match `?debug_token=`.
+ */
+export async function handleResendInboundEcho(req: Request): Promise<Response> {
+  const expectedToken = process.env.BONSAI_WEBHOOK_DEBUG_TOKEN;
+  if (!expectedToken) return new Response("Not found", { status: 404 });
+
+  const url = new URL(req.url);
+  const providedToken = url.searchParams.get("debug_token") ?? "";
+  if (!constantTimeStringEqual(providedToken, expectedToken)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const body = await req.text();
+  const secret = process.env.RESEND_WEBHOOK_SECRET;
+  const svixId = req.headers.get("svix-id") ?? "";
+  const svixTimestamp = req.headers.get("svix-timestamp") ?? "";
+  const svixSignature = req.headers.get("svix-signature") ?? "";
+
+  const tsSec = Number(svixTimestamp);
+  const ageSeconds = Number.isFinite(tsSec)
+    ? Math.abs(Date.now() / 1000 - tsSec)
+    : null;
+
+  const signatureValid = secret
+    ? verifySvixSignature({
+        secret,
+        svixId,
+        svixTimestamp,
+        svixSignature,
+        body,
+      })
+    : false;
+
+  let parsed: ResendInboundPayload | null = null;
+  try {
+    parsed = JSON.parse(body) as ResendInboundPayload;
+  } catch {
+    parsed = null;
+  }
+
+  const correlation = parsed
+    ? correlateThreadIdWithMethod(parsed)
+    : { thread_id: null, method: null as CorrelationMethod };
+
+  return Response.json({
+    secret_configured: Boolean(secret),
+    svix_id: svixId,
+    svix_timestamp: svixTimestamp,
+    age_seconds: ageSeconds,
+    signature_valid: signatureValid,
+    body_bytes: Buffer.byteLength(body, "utf8"),
+    thread_correlation: {
+      method: correlation.method,
+      thread_id: correlation.thread_id,
+    },
+  });
+}
+
+function constantTimeStringEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
 }
 
 async function stepInBackground(thread_id: string, threadsDir?: string): Promise<void> {
