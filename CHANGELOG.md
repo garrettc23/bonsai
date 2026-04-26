@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.13.0] - 2026-04-26
+## [0.1.14.0] - 2026-04-26
 
 ### Added
 - **Real ElevenLabs voice negotiation, end-to-end.** The orchestrator now places real outbound calls when all four `ELEVENLABS_*` env vars are set; with any missing it falls back to the existing dual-Claude simulator. The simulator path is unchanged, so day-to-day dev never spends Twilio minutes. Full setup steps live in the new "Voice setup" section of the README.
@@ -27,7 +27,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - New `test/voice-agent-cache.test.ts` verifies first call creates + writes the row, second call with identical config hits the cache without invoking `createAgent`, and a mutated config busts the cache.
 - New `test/voice-webhooks.test.ts` covers Bearer good/bad/malformed/length-mismatch/dev-mode/prod-mode, 401/404/400 paths, all six tool dispatches (parametric), the `withCallLock` mutex serializing 8 concurrent webhooks, the 404 when CallState is missing, and the `end_call` finalization path.
 - New `test/voice-spend.test.ts` exercises the spend tracker directly: same-day accumulation, separate UTC-day buckets, no-op behavior on zero/negative/NaN, and the budget env override.
-- 35 new voice tests; full suite 245 → 258 passing.
+- 35 new voice tests; full suite 269/269 passing post-merge with main.
+
+## [0.1.13.0] - 2026-04-26
+
+### Changed
+- **Comparison page now shows real cheaper alternatives instead of an empty hero.** The Comparison tab in the sidebar is no longer a "beta" placeholder — it loads offer cards from `/api/offer-history`, which flattens every persisted offer-hunt run into a single newest-first, savings-first list. When a fresh user lands on Comparison with no runs yet, the page polls every 5 seconds (capped at 5 minutes) so the offers populated by the background hunt that fires on each audit completion appear automatically. Cards drop the placeholder fields the old mock data carried (`confidence`, `friction`, `eta`, `unit`, per-category icons) — every field the UI now displays comes from a real backend value. The Compare modal is simplified accordingly. Switching providers (`Switch for me`) hits the live `/api/offer-hunt` and renders the agent's recorded offers with provider name, price, savings, channel, terms link, and a recommendation flag.
+- **Offer hunt is now a real research agent on Anthropic's Managed Agents SDK.** `src/offer-agent.ts` was a hand-rolled tool-use loop that simulated 30+ provider personas (GoodRx, Costco, Lemonade, etc.) via persona prompts with `quote_multiplier_range` hints — none of it was real outreach. The new implementation creates one persistent managed agent (cached by config-hash in a `managed_agents` SQLite table so we don't re-provision on every run) with `agent_toolset_20260401` (web search + web fetch enabled, bash/write/edit disabled) plus two custom tools: `record_offer` and `mark_exhausted`. Each hunt opens a session, streams events, dispatches custom-tool calls back as `user.custom_tool_result` events, and exits cleanly on `session.status_idle` with a terminal `stop_reason` (the bare-idle case is correctly treated as "waiting on a tool result, not done"). Reconnects mid-hunt consolidate via `events.list` + dedupe by event ID so a 30s+ hunt survives a network blip. The session is archived in a `finally` so quota leaks are contained even on errors.
+- **Audit completion eagerly kicks off an offer hunt in the background** (`handleAudit` in `src/server.ts`) so by the time the user navigates to Comparison, results are usually waiting. A new `deriveBaselineFromAudit` helper maps the audit's `analyzer.metadata.bill_kind` to an `OfferCategory` and returns `null` when no clean mapping exists — better to render no offers than to burn managed-agent quota on a baseline the agent can't act on.
+
+### Removed
+- **All offer-hunt simulator infrastructure** — `SOURCE_DIRECTORY` (lines 74–270 of the old `offer-agent.ts`), the `OfferSource` interface, `queryOneSource()`, `quote_multiplier_range`, the `OFFER_SOURCE_DIRECTORY` export, and the `/api/offer-sources` route. ~250 lines of persona-driven roleplay code is gone; the new agent does real web research via the prebuilt toolset.
+- **The `<span class="nav-tbd">beta</span>` chip** next to the Comparison nav item in `public/index.html`. Replaced with the standard `nav-count` badge the other nav items use.
+
+### Added
+- **`src/lib/managed-agent-cache.ts`** with `getOrCreateOfferAgent()` — reads the cached `agent_id`/`environment_id` from SQLite, recreates if the SHA-256 hash of the canonical agent config (model + system prompt + tools + environment) drifts. New `managed_agents` table keyed on `purpose` so future managed agents (negotiation, intake) can share the same caching layer.
+- **`src/lib/offer-history.ts`** — pure projection logic that flattens persisted `OfferHuntResult` JSONs into the offer-card shape the Comparison UI consumes. Extracted from `server.ts` so it can be unit-tested without booting `Bun.serve`.
+- **Three new test files** covering the migration end-to-end: `test/managed-agent-cache.test.ts` (3 tests, verifies caching + config-hash invalidation), `test/offer-agent-managed.test.ts` (4 tests, mocks the SDK at the events.stream boundary and asserts the full offer-hunt loop's state transitions and tool-result dispatch), `test/offer-history-projection.test.ts` (4 tests, verifies projection sort order, malformed file resilience, and stable IDs). Total suite 234 tests passing.
+
+### Tests
+- New `test/managed-agent-cache.test.ts`, `test/offer-agent-managed.test.ts`, `test/offer-history-projection.test.ts` — 11 new tests, total suite 234/234.
+
+### Dependencies
+- Bumped `@anthropic-ai/sdk` from `^0.40.0` to `^0.91.1` for the Managed Agents `client.beta.{agents,sessions,environments}.*` namespaces. The new SDK strict-types `input_schema.type` as the literal `"object"`, so `OPPS_TOOL` in `src/opps-filter.ts` is now annotated as `Anthropic.Tool` to satisfy the tighter type.
 
 ## [0.1.12.0] - 2026-04-26
 

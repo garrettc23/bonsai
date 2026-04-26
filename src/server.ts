@@ -36,13 +36,14 @@ import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
 import { BillContact, BillKind, hasContactChannel, type BillContact as BillContactT } from "./types.ts";
 import { filterByProbability, PROBABILITY_FLOOR, OPPS_TOOL } from "./opps-filter.ts";
 import {
+  deriveBaselineFromAudit,
   runOfferHunt,
   saveOfferHunt,
   offersDir,
-  OFFER_SOURCE_DIRECTORY,
   type Baseline,
   type OfferCategory,
 } from "./offer-agent.ts";
+import { projectOfferHistory } from "./lib/offer-history.ts";
 import {
   AuthError,
   clearSessionCookieHeader,
@@ -516,6 +517,19 @@ async function handleAudit(req: Request): Promise<Response> {
     kickoffContactResolution(run.run_id).catch((err) => {
       console.error(`[contact ${run.run_id}]`, err);
     });
+  }
+
+  // Eagerly hunt for cheaper alternatives so the Comparison page is populated
+  // by the time the user navigates there. Best-effort only — if the audit
+  // metadata doesn't map to a known offer category, skip rather than burn
+  // managed-agent quota on a useless run.
+  const baseline = deriveBaselineFromAudit(partial?.analyzer?.metadata ?? {});
+  if (baseline) {
+    void runOfferHunt({ baseline })
+      .then((result) => saveOfferHunt(result))
+      .catch((err) => {
+        console.error(`[bg offer-hunt ${run.run_id}]`, err);
+      });
   }
 
   return Response.json({ run_id: run.run_id, report: partial });
@@ -2178,45 +2192,8 @@ async function handleOfferHunt(req: Request): Promise<Response> {
   return Response.json({ ...result, saved_as });
 }
 
-async function handleOfferSources(): Promise<Response> {
-  // Surface the source directory so the UI can list who gets contacted.
-  const summary = Object.entries(OFFER_SOURCE_DIRECTORY).map(([category, sources]) => ({
-    category: category as OfferCategory,
-    sources: sources.map((s) => ({ id: s.id, name: s.name, channel: s.channel })),
-  }));
-  return Response.json({ categories: summary });
-}
-
 async function handleOfferHistory(): Promise<Response> {
-  const { readdirSync, readFileSync, statSync } = await import("node:fs");
-  const dir = offersDir();
-  if (!existsSync(dir)) return Response.json({ runs: [] });
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-  const runs = files
-    .map((f) => {
-      const full = join(dir, f);
-      try {
-        const j = JSON.parse(readFileSync(full, "utf8"));
-        const st = statSync(full);
-        return {
-          file: f,
-          modified: st.mtimeMs,
-          baseline_label: j.baseline?.label ?? f,
-          category: j.baseline?.category ?? "?",
-          outcome: j.outcome,
-          headline: j.headline,
-          current_price: j.baseline?.current_price ?? null,
-          best_price: j.best?.quoted_price ?? null,
-          total_monthly_savings: j.total_monthly_savings ?? null,
-          quotes_count: j.quotes?.length ?? 0,
-        };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .sort((a: any, b: any) => b.modified - a.modified);
-  return Response.json({ runs });
+  return Response.json({ offers: projectOfferHistory(offersDir()) });
 }
 
 async function handleOfferRun(file: string): Promise<Response> {
@@ -2859,7 +2836,6 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/settings/integrations") return handleSaveIntegrations(req);
         if (req.method === "GET" && url.pathname === "/api/export") return handleExport();
         if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req, user);
-        if (req.method === "GET" && url.pathname === "/api/offer-sources") return handleOfferSources();
         if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
         if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
         const offerRunMatch = url.pathname.match(/^\/api\/offer-run\/([a-zA-Z0-9._-]+)$/);

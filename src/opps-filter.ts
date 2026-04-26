@@ -1,3 +1,5 @@
+import type Anthropic from "@anthropic-ai/sdk";
+
 export const PROBABILITY_FLOOR = 0.5;
 
 export type OppLike = { probability?: number };
@@ -8,7 +10,7 @@ export function filterByProbability<T extends OppLike>(opps: T[]): T[] {
   );
 }
 
-export const OPPS_TOOL = {
+export const OPPS_TOOL: Anthropic.Tool = {
   name: "propose_opportunities",
   description: `Return 3-6 bill-specific strategies to lower this bill, each with a >=${PROBABILITY_FLOOR} probability of actually working.`,
   input_schema: {

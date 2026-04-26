@@ -107,6 +107,20 @@ export function getDb(): Database {
       utc_date TEXT PRIMARY KEY,
       total_usd REAL NOT NULL
     );
+
+    -- Cached Managed-Agents agent IDs. Keyed on purpose ("offer-hunt", future
+    -- managed agents land alongside) so we create the cloud-hosted agent +
+    -- environment once and reuse them across runs. agent_config_hash is a
+    -- SHA-256 of the canonical config — when we tweak the system prompt or
+    -- tool schema we want a fresh agent so existing in-flight sessions keep
+    -- the version they were created against.
+    CREATE TABLE IF NOT EXISTS managed_agents (
+      purpose TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      agent_config_hash TEXT NOT NULL,
+      environment_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
   // Light-touch column migrations for users — older DBs (pre-email-
   // verification, pre-terms-acceptance) already have a `users` table from
