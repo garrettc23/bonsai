@@ -2963,6 +2963,11 @@ async function loadOffers() {
 async function pollOffersUntilFresh() {
   if (offersPollTimer) return; // already polling
   if (offersCache.length > 0) return; // already have offers
+  // Don't activate the poll if the user has never uploaded a bill — the
+  // comparison agent only runs server-side on audit completion, so without
+  // any audits there's nothing in flight worth waiting on. The idle "No
+  // alternatives yet" hero already explains the next step.
+  if ((historyCache?.audits ?? []).length === 0) return;
   offersPollStartedAt = Date.now();
   offersPollTimedOut = false;
   const tick = async () => {
@@ -3479,15 +3484,12 @@ function renderOffers() {
   if (grid) {
     grid.innerHTML = "";
     if (offersCache.length === 0 && offersPollTimedOut) {
-      // 90s hunt completed without recording any offers. Tell the user
-      // they're already on the best provider rather than leaving an
-      // unexplained empty grid sitting under the chrome.
-      const msg = document.createElement("div");
-      msg.className = "offers-best-provider";
-      msg.innerHTML = `
-        <h2 class="offers-best-provider-title">You're with the best provider</h2>
-        <p class="offers-best-provider-body">Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill.</p>`;
-      grid.appendChild(msg);
+      // 30s hunt completed without recording any offers. Render a single
+      // card matching the offer-card visual language so the user gets a
+      // feel for what the page looks like when an alternative IS found —
+      // the only difference is this one says "you're already on the
+      // best" instead of pitching a switch.
+      grid.appendChild(buildBestProviderCard());
     } else {
       let visible;
       if (offersFilter === "All") visible = offersCache;
@@ -3571,6 +3573,33 @@ function buildOfferCard(o) {
       setTimeout(() => card.remove(), 180);
     });
   }
+  return card;
+}
+
+/**
+ * "You're with the best provider" card rendered when the 30s hunt cap
+ * fires without recording any offers. Mirrors the offer-card layout
+ * (head row with icon + meta + source line, then a "Why we think so"
+ * sub-section) so the user sees the same visual language they would if
+ * Bonsai HAD found an alternative — minus the price row and actions.
+ * Spans both grid columns so it doesn't sit lopsided next to an empty
+ * cell.
+ */
+function buildBestProviderCard() {
+  const card = document.createElement("div");
+  card.className = "offer-card offer-card-best";
+  card.innerHTML = `
+    <div class="offer-head">
+      <div class="offer-ic">${ICONS.check ?? ICONS.sparkle}</div>
+      <div class="offer-head-main">
+        <div class="offer-meta">Status</div>
+        <div class="offer-source">You're with the best provider</div>
+      </div>
+    </div>
+    <div>
+      <div class="offer-sub-title">Why we think so</div>
+      <div class="offer-sub">Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill.</div>
+    </div>`;
   return card;
 }
 
