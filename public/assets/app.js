@@ -1261,6 +1261,13 @@ function updateNavCounts() {
   // Offers: recommended offers that weren't in the baseline at first load.
   const newOffers = offersCache.filter((o) => o.recommended && !offerSeen(o.id)).length;
   setNavCount("#nav-offers-count", newOffers);
+
+  // Pulse the Comparison nav while a hunt may be in flight server-side.
+  // The class drives a CSS animation on .nav-item.is-hunting .nav-ic
+  // (defined in app.css) — a soft fade so the user notices without it
+  // feeling like an alert.
+  const offersBtn = document.querySelector('.nav-item[data-nav="offers"]');
+  if (offersBtn) offersBtn.classList.toggle("is-hunting", isComparisonHuntActive());
 }
 
 function setNavCount(sel, n) {
@@ -1562,6 +1569,10 @@ async function runPhasedFromSample(fixture, channel) {
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
     setWorkflowView("review");
+    // Server-side handleAudit just fired runOfferHunt for this bill —
+    // start the Comparison nav pulse so the user can see something's
+    // happening even before they navigate to that tab.
+    markComparisonHuntStarted();
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -1584,6 +1595,10 @@ async function runPhasedFromUpload(formData) {
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
     setWorkflowView("review");
+    // Server-side handleAudit just fired runOfferHunt for this bill —
+    // start the Comparison nav pulse so the user can see something's
+    // happening even before they navigate to that tab.
+    markComparisonHuntStarted();
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -1609,6 +1624,10 @@ async function runPhasedFromPrefetch(promise) {
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
     setWorkflowView("review");
+    // Server-side handleAudit just fired runOfferHunt for this bill —
+    // start the Comparison nav pulse so the user can see something's
+    // happening even before they navigate to that tab.
+    markComparisonHuntStarted();
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -2670,7 +2689,7 @@ function renderComparisonHuntingHero(view) {
   hero.innerHTML = `
     <div class="empty-hero-card">
       <h2 class="empty-hero-title">Bonsai is hunting alternatives…</h2>
-      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes under 30 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
+      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes under 10 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
       <div class="hunt-status" style="justify-content:center"><span class="pulse-dot"></span> Searching…</div>
     </div>`;
 
@@ -2902,10 +2921,16 @@ let offersPollStartedAt = 0;
 let offersPollTimedOut = false;
 let offersHuntTickerId = null;
 
-// 30s cap matches the user-facing "under 30 seconds" copy. Past that we
-// give up and surface the empty Comparison page instead of leaving the
-// spinner turning forever.
-const OFFERS_POLL_CAP_MS = 30 * 1000;
+// 10s cap matches the user-facing "under 10 seconds" copy. Past that we
+// give up and surface the empty Comparison page (or the offer-shaped
+// "best provider" card if the audit triggered a hunt).
+const OFFERS_POLL_CAP_MS = 10 * 1000;
+// While the comparison agent is plausibly hunting on the server (i.e.
+// for ~10s after each audit completes), the Comparison nav item pulses
+// so the user knows something is happening even when they're still on
+// the review screen reading audit findings. Cleared when offers arrive
+// or when the window expires.
+let comparisonHuntStartedAt = 0;
 
 async function loadOffers() {
   try {
@@ -2916,6 +2941,31 @@ async function loadOffers() {
   } catch {
     /* swallow — next poll tick or nav will retry */
   }
+  // Refresh nav state so the Comparison hunt-pulse clears the moment
+  // offers actually arrive (isComparisonHuntActive returns false once
+  // offersCache is populated).
+  updateNavCounts();
+}
+
+/**
+ * Stamp the moment an audit completes so the Comparison nav item pulses
+ * for the next 10s — server-side handleAudit fires runOfferHunt right
+ * after the audit response returns, but the client has no other signal
+ * that something's happening, so the pulse is a "we may be hunting" hint.
+ * After the window expires updateNavCounts clears the class on the next
+ * tick. Real audits with no derivable baseline still pulse for 10s, which
+ * is acceptable noise — the cost of always-pulse is one wasted setTimeout.
+ */
+function markComparisonHuntStarted() {
+  comparisonHuntStartedAt = Date.now();
+  updateNavCounts();
+  setTimeout(updateNavCounts, OFFERS_POLL_CAP_MS + 200);
+}
+
+function isComparisonHuntActive() {
+  if (offersCache.length > 0) return false;
+  if (comparisonHuntStartedAt === 0) return false;
+  return Date.now() - comparisonHuntStartedAt < OFFERS_POLL_CAP_MS;
 }
 
 async function pollOffersUntilFresh() {

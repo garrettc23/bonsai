@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.18.0] - 2026-04-26
+
+### Changed
+- **Comparison nav pulses while the hunt is in flight, so users know something's happening even before they navigate to that tab.** Previously, the comparison agent fired in the background after each audit (`handleAudit` → `runOfferHunt`) but the only visible signal was on the Comparison page itself — and most users were still on the review screen reading audit findings. Now `runPhasedFromUpload` / `runPhasedFromSample` / `runPhasedFromPrefetch` each call `markComparisonHuntStarted()` after the audit response lands, which stamps `comparisonHuntStartedAt = Date.now()`. `updateNavCounts` toggles `is-hunting` on the Comparison nav while `Date.now() - comparisonHuntStartedAt < OFFERS_POLL_CAP_MS`. CSS drives a soft 1.4s fade on the icon + label (45% opacity at the trough) so the activity reads as ambient rather than alert-y. The class clears when offers actually arrive (`loadOffers` calls `updateNavCounts` after every fetch) or when the 10s window expires (a delayed `setTimeout` re-runs `updateNavCounts`).
+- **Hunt poll cap and copy: 30s → 10s.** `OFFERS_POLL_CAP_MS` is now `10 * 1000`, and the hunting hero body reads "This usually takes under 10 seconds." Real hunts that succeed return inside that window; past it the user sees the offer-shaped "You're with the best provider" card rather than continued spinning.
+
 ## [0.1.17.0] - 2026-04-26
 
 ### Changed
