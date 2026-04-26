@@ -1614,7 +1614,7 @@ async function runPhasedFromSample(fixture, channel) {
     // Server-side handleAudit just fired runOfferHunt for this bill —
     // start the Comparison nav pulse so the user can see something's
     // happening even before they navigate to that tab.
-    markComparisonHuntStarted();
+    markComparisonHuntStarted(run_id);
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -1640,7 +1640,7 @@ async function runPhasedFromUpload(formData) {
     // Server-side handleAudit just fired runOfferHunt for this bill —
     // start the Comparison nav pulse so the user can see something's
     // happening even before they navigate to that tab.
-    markComparisonHuntStarted();
+    markComparisonHuntStarted(run_id);
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -1669,7 +1669,7 @@ async function runPhasedFromPrefetch(promise) {
     // Server-side handleAudit just fired runOfferHunt for this bill —
     // start the Comparison nav pulse so the user can see something's
     // happening even before they navigate to that tab.
-    markComparisonHuntStarted();
+    markComparisonHuntStarted(run_id);
   } catch (err) {
     stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
@@ -2376,8 +2376,13 @@ async function approveAndRun() {
       }
       throw new Error(j?.message ?? j?.error ?? (await res.text()));
     }
-    await res.json();
+    const approveJson = await res.json().catch(() => ({}));
+    const approvedRunId = approveJson?.run_id ?? reviewState?.run_id;
     reviewState = null;
+    // Server-side handleApprove just fired runOfferHunt as a backstop;
+    // mark the run as a hunt-in-flight so the Comparison nav keeps
+    // pulsing past the original audit-time pulse.
+    if (approvedRunId) markComparisonHuntStarted(approvedRunId);
     await loadHistory();
     updateNavCounts();
     await showNav("bills");
@@ -2756,7 +2761,7 @@ function renderComparisonHuntingHero(view) {
   hero.innerHTML = `
     <div class="empty-hero-card">
       <h2 class="empty-hero-title">Bonsai is hunting alternatives…</h2>
-      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes under 10 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
+      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
       <div class="hunt-status" style="justify-content:center"><span class="pulse-dot"></span> Searching…</div>
     </div>`;
 
@@ -2988,16 +2993,18 @@ let offersPollStartedAt = 0;
 let offersPollTimedOut = false;
 let offersHuntTickerId = null;
 
-// 10s cap matches the user-facing "under 10 seconds" copy. Past that we
-// give up and surface the empty Comparison page (or the offer-shaped
-// "best provider" card if the audit triggered a hunt).
-const OFFERS_POLL_CAP_MS = 10 * 1000;
-// While the comparison agent is plausibly hunting on the server (i.e.
-// for ~10s after each audit completes), the Comparison nav item pulses
-// so the user knows something is happening even when they're still on
-// the review screen reading audit findings. Cleared when offers arrive
-// or when the window expires.
-let comparisonHuntStartedAt = 0;
+// 5-minute cap: a real managed-agent web-search hunt routinely takes
+// 30-90s and occasionally up to a few minutes for harder categories.
+// We track per-run status from the server so the pulse follows the
+// actual hunt rather than a fixed window.
+const OFFERS_POLL_CAP_MS = 5 * 60 * 1000;
+// runId → { startedAt, inFlight }. Populated via markComparisonHuntStarted
+// when an audit/approve fires the hunt; entries removed when the server
+// reports status="done" or the 5-minute cap elapses. `isComparisonHuntActive`
+// is true while any entry is still in_flight, so the Comparison nav pulse
+// follows the live server-side hunt no matter where the user has navigated.
+const huntRunIds = new Map();
+let huntStatusPollTimer = null;
 
 async function loadOffers() {
   try {
@@ -3015,24 +3022,73 @@ async function loadOffers() {
 }
 
 /**
- * Stamp the moment an audit completes so the Comparison nav item pulses
- * for the next 10s — server-side handleAudit fires runOfferHunt right
- * after the audit response returns, but the client has no other signal
- * that something's happening, so the pulse is a "we may be hunting" hint.
- * After the window expires updateNavCounts clears the class on the next
- * tick. Real audits with no derivable baseline still pulse for 10s, which
- * is acceptable noise — the cost of always-pulse is one wasted setTimeout.
+ * Track that a hunt is in flight for the given run. Starts the global
+ * status poll if not already running; the poll handles status updates
+ * across all tracked runs and stops itself when none remain.
  */
-function markComparisonHuntStarted() {
-  comparisonHuntStartedAt = Date.now();
+function markComparisonHuntStarted(runId) {
+  if (!runId) return;
+  if (!huntRunIds.has(runId)) {
+    // Optimistic in_flight=true: the server hasn't been polled yet but
+    // the audit/approve response just confirmed the hunt was kicked.
+    huntRunIds.set(runId, { startedAt: Date.now(), inFlight: true });
+  }
   updateNavCounts();
-  setTimeout(updateNavCounts, OFFERS_POLL_CAP_MS + 200);
+  startHuntStatusPoll();
 }
 
 function isComparisonHuntActive() {
   if (offersCache.length > 0) return false;
-  if (comparisonHuntStartedAt === 0) return false;
-  return Date.now() - comparisonHuntStartedAt < OFFERS_POLL_CAP_MS;
+  for (const { inFlight } of huntRunIds.values()) {
+    if (inFlight) return true;
+  }
+  return false;
+}
+
+function startHuntStatusPoll() {
+  if (huntStatusPollTimer) return;
+  const tick = async () => {
+    huntStatusPollTimer = null;
+    if (huntRunIds.size === 0) return;
+    const now = Date.now();
+    const expired = [];
+    for (const [runId, state] of huntRunIds) {
+      if (now - state.startedAt > OFFERS_POLL_CAP_MS) expired.push(runId);
+    }
+    for (const runId of expired) huntRunIds.delete(runId);
+
+    let anyChanged = expired.length > 0;
+    await Promise.all(
+      Array.from(huntRunIds.keys()).map(async (runId) => {
+        try {
+          const res = await apiFetch(`/api/offer-hunt/status/${encodeURIComponent(runId)}`);
+          if (!res.ok) return;
+          const j = await res.json().catch(() => ({}));
+          const state = huntRunIds.get(runId);
+          if (!state) return;
+          if (j.in_flight) {
+            state.inFlight = true;
+          } else {
+            anyChanged = true;
+            huntRunIds.delete(runId);
+          }
+        } catch {
+          /* network blip; next tick will retry */
+        }
+      }),
+    );
+
+    if (anyChanged) {
+      await loadOffers();
+      if (currentNav === "offers") renderOffers();
+    }
+
+    updateNavCounts();
+    if (huntRunIds.size > 0) {
+      huntStatusPollTimer = setTimeout(tick, 3000);
+    }
+  };
+  huntStatusPollTimer = setTimeout(tick, 3000);
 }
 
 async function pollOffersUntilFresh() {
