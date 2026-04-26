@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Bonsai — every bill, audited &amp; negotiated</title>
+    <title>Bonsai - Negotiate everything</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -26,12 +26,12 @@
             <span class="nav-count" id="nav-approval-count" hidden>0</span>
           </button>
           <button class="nav-item" data-nav="bills">
-            <span class="nav-ic" data-icon="inbox"></span><span>Bills</span>
+            <span class="nav-ic" data-icon="inbox"></span><span>Negotiation</span>
             <span class="nav-count alert" id="nav-bills-count" hidden>0</span>
           </button>
           <button class="nav-item" data-nav="offers">
             <span class="nav-ic" data-icon="sparkle"></span><span>Comparison</span>
-            <span class="nav-tbd">TBD</span>
+            <span class="nav-tbd">beta</span>
           </button>
           <button class="nav-item" data-nav="profile">
             <span class="nav-ic" data-icon="user"></span><span>Profile</span>
@@ -71,16 +71,6 @@
               <div class="receipts-rows" id="receipts-rows"></div>
             </div>
 
-            <div class="approvals-block" id="approvals-block" hidden>
-              <div class="approvals-head">
-                <div>
-                  <div class="eyebrow eyebrow-red">Waiting on you</div>
-                  <div class="approvals-title" id="approvals-title"></div>
-                </div>
-              </div>
-              <div class="approvals-grid" id="approvals-grid"></div>
-            </div>
-
             <div class="intake-grid">
               <div class="dropzone" id="dropzone">
                 <div class="dz-icon" aria-hidden="true">
@@ -105,7 +95,7 @@
                       <input type="file" id="dz-add-input" multiple hidden />
                       <span>+ Add more files</span>
                     </label>
-                    <button type="button" id="dz-next" class="btn btn-primary">Next → audit the bill</button>
+                    <button type="button" id="dz-next" class="btn btn-primary">Audit my bill</button>
                   </div>
                 </div>
                 <div class="dz-sample-row">
@@ -115,6 +105,10 @@
                   <select id="channel" class="dz-sample-link-select" aria-label="Channel" hidden>
                     <option value="persistent" selected>persistent</option>
                   </select>
+                </div>
+                <div class="dz-other-row">
+                  <span>Not a bill?</span>
+                  <button id="open-complaint-btn" class="dz-sample-link" type="button">Negotiate a complaint or refund &nbsp;→</button>
                 </div>
               </div>
 
@@ -130,6 +124,77 @@
             </div>
           </div>
 
+          <!-- COMPLAINT : single-screen intake for non-bill negotiations
+               (refunds, flight delays, customer-service disputes). One screen:
+               left column gets the facts (company / what happened / desired),
+               right column lets the user chat with Bonsai for advice while
+               filling out, support contact card sits below. Accept &amp;
+               negotiate runs draft + contact-override + approve in one shot
+               and routes the user to Bills. -->
+          <div class="view view-complaint hidden" id="view-complaint">
+            <div class="complaint-head">
+              <div class="eyebrow">Complaint &amp; refund</div>
+              <h2 class="complaint-title">Tell Bonsai what happened.</h2>
+              <p class="complaint-sub">Fill in the facts on the left, ask Bonsai anything on the right. When you're ready, hit Accept &amp; negotiate — Bonsai will reach out to support and work it on your behalf.</p>
+            </div>
+
+            <div class="complaint-split">
+              <section class="complaint-form card">
+                <div class="complaint-field">
+                  <label for="complaint-company" class="eyebrow">Company</label>
+                  <input type="text" id="complaint-company" placeholder="e.g. American Airlines, AT&amp;T, Comcast" autocomplete="off" />
+                </div>
+                <div class="complaint-field">
+                  <label for="complaint-description" class="eyebrow">What happened?</label>
+                  <textarea id="complaint-description" rows="6" placeholder="Describe the issue — dates, charges, what they did or didn't do. The more detail Bonsai has, the stronger the complaint."></textarea>
+                </div>
+                <div class="complaint-field">
+                  <label for="complaint-desired" class="eyebrow">What do you want?</label>
+                  <input type="text" id="complaint-desired" placeholder="e.g. Full refund, voucher, fee waiver, account credit" autocomplete="off" />
+                </div>
+              </section>
+
+              <section class="complaint-chat card">
+                <div class="review-chat-head">
+                  <div>
+                    <div class="eyebrow">Chat with Bonsai</div>
+                    <div class="review-chat-sub">Not sure where to start? Ask Bonsai — "is this worth pursuing?", "what's a fair amount to ask for?", "what should I include?".</div>
+                  </div>
+                </div>
+                <div class="qa-log" id="complaint-chat-log"></div>
+                <form class="qa-form qa-form-chat" id="complaint-chat-form">
+                  <input type="text" id="complaint-chat-input" placeholder="Ask Bonsai anything…" autocomplete="off" />
+                  <button type="submit" class="qa-send" aria-label="Send">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                  </button>
+                </form>
+              </section>
+            </div>
+
+            <section class="contact-card card complaint-contact">
+              <div class="contact-head">
+                <div>
+                  <div class="eyebrow">Where Bonsai will reach out</div>
+                  <div class="contact-title">Customer support contact</div>
+                </div>
+              </div>
+              <div class="contact-body">
+                <div class="contact-row">
+                  <label>Email <input type="email" id="complaint-contact-email" placeholder="support@example.com" /></label>
+                  <label>Phone <input type="text" id="complaint-contact-phone" placeholder="(415) 555-0132" /></label>
+                </div>
+                <div class="contact-foot">
+                  <div class="contact-notes">Email is preferred — Bonsai will email first and escalate to phone if needed. One channel is enough.</div>
+                </div>
+              </div>
+            </section>
+
+            <div class="complaint-error" id="complaint-error" hidden></div>
+            <div class="complaint-actions">
+              <button id="complaint-submit" class="btn btn-primary" type="button">Accept &amp; negotiate</button>
+            </div>
+          </div>
+
           <!-- PROGRESS -->
           <div class="view view-progress hidden" id="view-progress">
             <div class="flow-stepper" id="flow-stepper"></div>
@@ -142,7 +207,7 @@
                   <div class="run-head-title" id="run-head-title">Analyzing your bill</div>
                   <div class="run-head-sub mono">
                     <span class="pulse-dot"></span>
-                    <span id="run-head-sub">live · grounded tool-use loop</span>
+                    <span id="run-head-sub">reading every line item</span>
                   </div>
                 </div>
               </div>
@@ -195,19 +260,18 @@
               <div class="contact-head">
                 <div>
                   <div class="eyebrow">Where Bonsai will reach out</div>
-                  <div class="contact-title" id="contact-title">Looking up the billing contact…</div>
+                  <div class="contact-title" id="contact-title">Looking up the contact…</div>
                 </div>
               </div>
               <div class="contact-body" id="contact-body">
                 <div class="contact-row">
-                  <label>Email <input type="email" id="contact-email" placeholder="billing@example.com" /></label>
-                  <label>Phone <input type="text" id="contact-phone" placeholder="+1-415-555-0132" /></label>
+                  <label>Email (preferred) <input type="email" id="contact-email" placeholder="billing@example.com" /></label>
+                  <label>Phone <input type="text" id="contact-phone" placeholder="(415) 555-0132" /></label>
                 </div>
                 <div class="contact-foot">
                   <div class="contact-notes" id="contact-notes"></div>
                   <div class="contact-actions">
-                    <button type="button" class="contact-retry" id="contact-retry">Re-search</button>
-                    <button type="button" class="contact-save" id="contact-save">Save</button>
+                    <span class="contact-save-status" id="contact-save-status" aria-live="polite"></span>
                   </div>
                 </div>
                 <div class="contact-sources" id="contact-sources"></div>
@@ -219,7 +283,7 @@
               <div class="review-chat-head">
                 <div>
                   <div class="eyebrow">Customize the plan</div>
-                  <div class="review-chat-sub">Accept below to start, or tell Bonsai what to change or ask anything about the bill.</div>
+                  <div class="review-chat-sub">Accept below to start lowering your bill, or chat with Bonsai first — tell it what to change, ask why a charge is on there, or have it explain a billing code (CPT, HCPCS, EOB jargon).</div>
                 </div>
               </div>
               <div class="qa-log" id="review-plan-chat-log"></div>
@@ -232,7 +296,7 @@
             </section>
 
             <div class="review-actions">
-              <button id="review-approve-btn" class="btn btn-primary">Accept &amp; start the plan</button>
+              <button id="review-approve-btn" class="btn btn-primary">Accept &amp; lower my bill</button>
             </div>
           </div>
 
@@ -305,8 +369,17 @@
             </div>
           </div>
 
-          <!-- BILLS -->
+          <!-- NEGOTIATIONS -->
           <div class="view view-bills hidden" id="view-bills">
+            <div class="approvals-block" id="approvals-block" hidden>
+              <div class="approvals-head">
+                <div>
+                  <div class="eyebrow eyebrow-red">Waiting on you</div>
+                  <div class="approvals-title" id="approvals-title"></div>
+                </div>
+              </div>
+              <div class="approvals-grid" id="approvals-grid"></div>
+            </div>
             <div class="bills-stats" id="bills-stats"></div>
             <div class="live-indicator" hidden>
               <span class="pulse-dot"></span>
@@ -342,22 +415,11 @@
                   <option value="1000-">$1,000+</option>
                 </select>
               </div>
-              <div class="filter-field">
-                <label class="eyebrow">Price score</label>
-                <select id="bills-filter-score">
-                  <option value="">Any score</option>
-                  <option value="0-24">Greatly overpaying (0–24)</option>
-                  <option value="25-49">Overpaying (25–49)</option>
-                  <option value="50-69">Above market (50–69)</option>
-                  <option value="70-84">Fair price (70–84)</option>
-                  <option value="85-100">Best price (85–100)</option>
-                </select>
-              </div>
               <button class="filter-reset" id="bills-filter-reset" type="button">Reset</button>
             </div>
             <div class="bills-table">
               <div class="bills-row bills-header">
-                <div>Bill</div>
+                <div>Provider</div>
                 <div>Amount</div>
                 <div>Category</div>
                 <div></div>

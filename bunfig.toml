@@ -1,0 +1,5 @@
+# Bun config. Currently used to preload a tiny test setup file that
+# disables the humanizer's outbound Anthropic call so unit tests stay
+# hermetic — production never sees these env defaults.
+[test]
+preload = ["./test/setup.ts"]

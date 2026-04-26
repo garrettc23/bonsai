@@ -13,7 +13,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { NormalizedBill } from "./extract-bill.ts";
 
-const MODEL = "claude-opus-4-7";
+// Transcription is a Haiku-class task: read every printed glyph, output
+// verbatim plaintext. Opus 4.7's reasoning isn't earned here — Haiku 4.5
+// runs in roughly half the wall time at a fraction of the cost. The
+// downstream analyzer that scrutinizes the transcript stays on Opus 4.7
+// where its judgment matters.
+const MODEL = "claude-haiku-4-5";
 const MAX_TOKENS = 4096;
 
 const SYSTEM_PROMPT = `You are a document transcription tool. Your job is to output a verbatim plaintext transcript of a medical bill (or EOB) exactly as it appears in the uploaded file.

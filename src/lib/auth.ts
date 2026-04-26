@@ -18,6 +18,9 @@ export interface User {
   email_verified_at: number | null;
   accepted_terms_at: number | null;
   pending_email: string | null;
+  /** Timestamp when the user signed up for the Comparison early-access
+   * waitlist. Null when they haven't joined yet. */
+  early_access_at: number | null;
 }
 
 export interface Session {
@@ -48,7 +51,8 @@ export class AuthError extends Error {
       | "invalid_email"
       | "terms_not_accepted"
       | "email_not_verified"
-      | "verification_invalid",
+      | "verification_invalid"
+      | "user_not_found",
     message: string,
   ) {
     super(message);
@@ -98,6 +102,7 @@ export async function createUser(
     email_verified_at: null,
     accepted_terms_at: now,
     pending_email: null,
+    early_access_at: null,
   };
 }
 
@@ -108,10 +113,11 @@ type UserRow = {
   email_verified_at: number | null;
   accepted_terms_at: number | null;
   pending_email: string | null;
+  early_access_at: number | null;
 };
 
 const USER_COLUMNS =
-  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email";
+  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email, early_access_at";
 
 function rowToUser(row: UserRow): User {
   return {
@@ -121,7 +127,49 @@ function rowToUser(row: UserRow): User {
     email_verified_at: row.email_verified_at,
     accepted_terms_at: row.accepted_terms_at,
     pending_email: row.pending_email,
+    early_access_at: row.early_access_at ?? null,
   };
+}
+
+/**
+ * Mark the user as joined to the Comparison early-access waitlist.
+ * Idempotent — re-calling on an already-signed-up user is a no-op
+ * that returns the existing timestamp.
+ */
+export function joinEarlyAccess(userId: string): User {
+  const db = getDb();
+  const existing = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow | null;
+  if (!existing) throw new AuthError("user_not_found", "User no longer exists.");
+  if (!existing.early_access_at) {
+    db.query(`UPDATE users SET early_access_at = ? WHERE id = ?`)
+      .run(Date.now(), userId);
+  }
+  const fresh = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow;
+  return rowToUser(fresh);
+}
+
+/**
+ * Remove the user from the Comparison early-access waitlist. Idempotent
+ * — re-calling on a user who isn't on the list is a no-op.
+ */
+export function leaveEarlyAccess(userId: string): User {
+  const db = getDb();
+  const existing = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow | null;
+  if (!existing) throw new AuthError("user_not_found", "User no longer exists.");
+  if (existing.early_access_at) {
+    db.query(`UPDATE users SET early_access_at = NULL WHERE id = ?`)
+      .run(userId);
+  }
+  const fresh = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow;
+  return rowToUser(fresh);
 }
 
 export async function verifyCredentials(email: string, password: string): Promise<User> {

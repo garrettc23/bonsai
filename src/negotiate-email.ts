@@ -22,12 +22,13 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { EmailClient, OutboundEmail, SentEmail, InboundEmail } from "./clients/email.ts";
-import type { AnalyzerResult } from "./types.ts";
+import type { AnalyzerResult, BillKind } from "./types.ts";
 import { generateAppealLetter } from "./appeal-letter.ts";
 import { loadThread, saveThread } from "./clients/email-mock.ts";
 import { newId } from "./clients/email.ts";
 import type { AgentTone } from "./lib/user-settings.ts";
 import { toneGuidance } from "./lib/feedback-parser.ts";
+import { humanize } from "./lib/humanizer.ts";
 
 const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 2048;
@@ -81,17 +82,46 @@ function buildSystemPrompt(state: Pick<NegotiationState, "user_directives" | "ag
   return parts.join("");
 }
 
-const SYSTEM_PROMPT = `You are Bonsai, a medical-billing negotiator acting on behalf of a patient. You exchange email with a hospital billing department over multiple rounds. Your single goal: reduce the patient's balance due to no more than the EOB-stated patient responsibility, plus legitimately un-disputed charges.
+const SYSTEM_PROMPT = `You are Bonsai, an email negotiator acting on behalf of a customer. You exchange email with a provider's billing, support, or retention team over multiple rounds. Your goal: lower the bill or get the outcome the customer asked for, using only facts the analyzer grounded.
+
+A separate humanizer pass rewrites every outbound email before it's sent — it handles tone, brevity, and stripping AI-isms. Don't worry about polishing the surface language yourself. Focus on substance: the right ask, the right facts, the right next move.
 
 ## Ground rules (strict)
 
-1. Only quote facts from the analyzer's findings. Every dollar figure and every line_quote in your reply must come from the analyzer result you were given in the opening user message. Do not invent CPT codes, dates, or amounts.
-2. Be formal, factual, firm, and polite. Never hostile. Never accusatory. You write like a consumer-rights attorney: short paragraphs, clean structure, legal citations when relevant (No Surprises Act; FCRA/CFPB for credit reporting).
-3. If a reply concedes to the EOB patient responsibility or lower, call mark_resolved with resolution=full_adjustment.
-4. If a reply offers a reduced amount between the EOB responsibility and the current balance, accept ONLY IF the offer is at or below the final_acceptable_floor; call mark_resolved with resolution=reduced.
-5. If a reply denies the dispute outright, cite the EOB again, restate the No Surprises Act framing, and send a follow-up. After 3 denials, escalate_human with reason=deadlock.
-6. If a reply is hostile, contains legal threats, or references collections/attorneys, escalate_human immediately.
-7. If a reply is ambiguous or asks for info you don't have (e.g. prior payments), escalate_human with reason=unclear.
+1. Only quote facts from the analyzer's findings. Every dollar figure and every line_quote in your reply must come from the analyzer result you were given in the opening user message. Do not invent claim numbers, account numbers, CPT codes, dates, or amounts.
+2. If you don't have a value (claim #, account #, date of service), OMIT it entirely. Never write "[CLAIM NUMBER]", "TBD", "Unknown", or invent one. The humanizer will drop empty placeholders, but it's safer to leave them out yourself.
+3. If the rep asks for an identifier you don't have AND the negotiation can't continue without it (e.g. they refuse to look up the account), call escalate_human with reason=unclear and include the missing field in the notes — the user will be prompted to provide it.
+4. Be factual and direct. The humanizer will dial tone — your job is to pick the right move.
+5. If a reply concedes to the customer's target or lower, call mark_resolved with resolution=full_adjustment.
+6. If a reply offers a reduced amount that's at or below the final_acceptable_floor, call mark_resolved with resolution=reduced.
+7. If a reply denies the dispute outright, push back once with the strongest grounded fact (EOB, contract terms, the original price). After 2-3 denials with no movement, escalate_human with reason=deadlock.
+8. If a reply is hostile, contains legal threats, or references collections/attorneys, escalate_human immediately.
+
+## Who to address
+
+Target the right department on the FIRST email and re-target if the rep routes you wrong:
+
+- Medical bills → billing department / patient accounts
+- Telecom, subscription, insurance → retention or customer-loyalty team. Never sales reps. If a rep introduces themselves as sales or tries to push you into a "new offer", politely ask to be transferred to the retention team or a retention officer (or "loyalty specialist", whatever they call it).
+- Utility / financial → customer support / billing / disputes team
+- Other → customer support
+
+When in doubt, address "Customer Support — Billing" rather than a specific person.
+
+## Talk-track for recurring-charge bills (telecom, subscription, insurance)
+
+For these bill kinds, the leverage is your ability to leave. The first email should hit four beats — keep them brief, the humanizer will polish:
+
+1. "I noticed this price increase / charge."
+2. "I can no longer continue at this rate; I'm comparing other providers / shopping around."
+3. "I've been a loyal customer for [duration]." (only if true and known)
+4. The ask, quantified: months of credit, return to the prior rate, or specific dollar amount off. Push for the maximum reasonable — they'll often counter.
+
+If they offer a lesser concession, push back once before accepting. If they say "no movement", politely ask to escalate to a retention officer / supervisor.
+
+## Talk-track for medical / utility / financial / one-off disputes
+
+These are factual disputes — the leverage is the audit, not departure. Lead with: the specific charge, why it's wrong (verbatim from the analyzer), the corrected amount, the deadline. Keep statute citations only if the analyzer included them; the humanizer won't add new ones.
 
 ## Tool-use order
 
@@ -102,13 +132,12 @@ You will be called once per turn. On each turn you MUST do exactly one of:
 
 Do NOT emit prose; the tool call is your entire output.
 
-## Email style
+## Email style (the humanizer handles polish — keep your draft factual)
 
-- Subject line for replies: keep the original subject, prepend "Re: " if the reply doesn't already have it.
-- Opening: reference claim number + account number + DOS.
-- Body: 3–6 short paragraphs. Lead with what you want. Cite the EOB page and amount. Cite statute when relevant. Close with a specific ask + a 14-day response deadline.
-- Closing: sign as the patient's name from the metadata.
-- Never attach a long "findings list" on replies — they already have the initial letter. Reference it with "as documented in our initial appeal dated [date]".`;
+- Subject for replies: keep the original subject; prepend "Re: " if not already there.
+- Body: 1–3 short paragraphs by default. Only go longer if the situation genuinely demands it (multi-finding medical dispute, complex back-and-forth). Cut anything not load-bearing.
+- Don't open with "I hope this email finds you well", "I am writing to formally", or other AI-isms — the humanizer will strip them, but skipping them yourself saves a hop.
+- Reference the original appeal letter ("as documented in my initial dispute") rather than re-attaching the whole findings list on follow-ups.`;
 
 const SEND_EMAIL_TOOL: Anthropic.Tool = {
   name: "send_email",
@@ -193,6 +222,31 @@ function renderThreadForClaude(thread: { outbound: SentEmail[]; inbound: Inbound
     .join("\n\n");
 }
 
+/**
+ * Build the list of grounded facts the humanizer is told to preserve
+ * verbatim. These are the values an LLM rewrite must NOT paraphrase or
+ * round — claim numbers, dollar figures, the analyzer's exact line_quotes.
+ * If a field is null we skip it; the humanizer is also told to drop empty
+ * placeholders, but providing a tight list helps it decide what to keep.
+ */
+function collectPreserveFacts(result: AnalyzerResult): string[] {
+  const out: string[] = [];
+  const m = result.metadata;
+  if (m.claim_number) out.push(`Claim number: ${m.claim_number}`);
+  if (m.account_number) out.push(`Account number: ${m.account_number}`);
+  if (m.date_of_service) out.push(`Date of service: ${m.date_of_service}`);
+  if (m.eob_patient_responsibility != null) {
+    out.push(`EOB patient responsibility: $${m.eob_patient_responsibility.toFixed(2)}`);
+  }
+  if (m.bill_current_balance_due != null) {
+    out.push(`Bill current balance due: $${m.bill_current_balance_due.toFixed(2)}`);
+  }
+  for (const e of result.errors.filter((e) => e.confidence === "high")) {
+    out.push(`Disputed line ($${e.dollar_impact.toFixed(2)}): "${e.line_quote.trim()}"`);
+  }
+  return out;
+}
+
 function renderAnalyzerContext(
   result: AnalyzerResult,
   floor: number,
@@ -248,6 +302,10 @@ export interface StartOpts {
   /** CC recipients (typically the user's email) copied on every outbound.
    * Persisted on NegotiationState so follow-ups reuse the list. */
   cc?: string[];
+  /** Optional Anthropic client. Tests inject a mock; production callers
+   * leave undefined and a fresh client is created. Forwarded to the
+   * humanizer so its outbound rewrite reuses the same mock. */
+  anthropic?: Anthropic;
 }
 
 export interface StartResult {
@@ -267,11 +325,28 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
   const thread_id = newId("thread");
   const letter = generateAppealLetter(analyzer);
 
+  // Humanizer pass — rewrites the deterministic appeal letter to apply
+  // the user's tone preference, the bill-kind playbook, and to strip any
+  // template stiffness. Grounded facts (line quotes, dollar figures) are
+  // preserved verbatim per the humanizer's system prompt. Reuses the
+  // injected Anthropic client so tests can mock it.
+  const billKind = analyzer.metadata.bill_kind;
+  const humanized = await humanize({
+    body: letter.markdown,
+    subject: letter.subject,
+    tone: opts.agent_tone,
+    bill_kind: billKind,
+    is_first_contact: true,
+    user_name: analyzer.metadata.patient_name,
+    preserve_facts: collectPreserveFacts(analyzer),
+    anthropic: opts.anthropic,
+  });
+
   const msg: OutboundEmail = {
     to: provider_email,
     from: user_email,
-    subject: letter.subject,
-    body_markdown: letter.markdown,
+    subject: humanized.subject,
+    body_markdown: humanized.body,
     thread_id,
     cc: opts.cc,
   };
@@ -362,11 +437,25 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
       if (block.name === "send_email") {
         const input = block.input as { subject: string; body_markdown: string };
         const lastInbound = inboundSinceLast[inboundSinceLast.length - 1];
+        // Humanizer pass on every follow-up. Same contract as the initial
+        // letter — preserves grounded facts, applies tone + playbook, strips
+        // AI-isms. is_first_contact: false so the humanizer doesn't open
+        // with introductions.
+        const humanized = await humanize({
+          body: input.body_markdown,
+          subject: input.subject,
+          tone: state.agent_tone,
+          bill_kind: state.analyzer.metadata.bill_kind,
+          is_first_contact: false,
+          user_name: state.analyzer.metadata.patient_name,
+          preserve_facts: collectPreserveFacts(state.analyzer),
+          anthropic,
+        });
         const out: OutboundEmail = {
           to: state.provider_email,
           from: state.user_email,
-          subject: input.subject,
-          body_markdown: input.body_markdown,
+          subject: humanized.subject,
+          body_markdown: humanized.body,
           thread_id: state.thread_id,
           in_reply_to: lastInbound?.message_id,
           cc: state.cc,

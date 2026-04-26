@@ -8,6 +8,88 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const FLOW_STAGES = ["Extract", "Audit", "Negotiate", "Finalize"];
 
+/**
+ * Clamp a "saved" amount to [0, cap]. Saving more than the user actually
+ * owes is impossible and confusing. Display $0 for negative or invalid
+ * inputs rather than a misleading negative number.
+ */
+function clampSaved(saved, cap) {
+  const s = Number(saved ?? 0);
+  if (!Number.isFinite(s) || s <= 0) return 0;
+  const c = Number(cap ?? 0);
+  if (c > 0 && s > c) return c;
+  return s;
+}
+
+/**
+ * Maximum amount the user could possibly save on this bill — i.e., the
+ * upper bound for any "we can save you $X" number. For medical bills
+ * with an EOB, this is the EOB patient responsibility (what the user
+ * actually owes after insurance), NOT the bill's full charges (which
+ * may include amounts the insurer has already covered or that the
+ * provider is over-billing). For everything else, fall back to the
+ * bill's current balance due.
+ */
+function maxSavingsCap(report) {
+  const meta = report?.analyzer?.metadata ?? {};
+  const eobOwed = Number(meta.eob_patient_responsibility ?? 0);
+  const billDue =
+    Number(report?.summary?.original_balance ?? 0) ||
+    Number(meta.bill_current_balance_due ?? 0);
+  if (eobOwed > 0 && billDue > 0) return Math.min(eobOwed, billDue);
+  if (eobOwed > 0) return eobOwed;
+  return billDue;
+}
+
+/**
+ * Format a US phone number progressively as the user types.
+ *   "9"           → "(9"
+ *   "94988"       → "(949) 88"
+ *   "9498879051"  → "(949) 887-9051"
+ * Strips non-digits. Leaves a leading "1" or "+1" as an unformatted
+ * prefix so international numbers don't break (we only auto-format
+ * 10-digit US numbers; anything else passes through digits-only).
+ */
+function formatPhone(value) {
+  const raw = String(value ?? "");
+  // Preserve a leading "+" so users typing "+44…" don't get reset.
+  const hasPlus = raw.trim().startsWith("+");
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 0) return hasPlus ? "+" : "";
+  // International or 11-digit US (1-aaa-bbb-cccc): leave digits alone
+  // with the + when present.
+  if (hasPlus || digits.length > 10) {
+    return (hasPlus ? "+" : "") + digits;
+  }
+  // 10-digit US — chunk into (XXX) XXX-XXXX as the user types.
+  if (digits.length <= 3) return `(${digits}`;
+  if (digits.length <= 6) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6, 10)}`;
+}
+
+/**
+ * Wire the on-input formatter to a phone <input>. Idempotent — calling
+ * twice on the same element is a no-op. Reformats on every keystroke
+ * and preserves caret position so the user's typing isn't disrupted.
+ */
+function attachPhoneFormatter(input) {
+  if (!input || input.dataset.phoneFmt === "1") return;
+  input.dataset.phoneFmt = "1";
+  // Format the existing value once so loaded data renders pretty.
+  if (input.value) input.value = formatPhone(input.value);
+  input.addEventListener("input", () => {
+    const before = input.value;
+    const formatted = formatPhone(before);
+    if (formatted !== before) {
+      input.value = formatted;
+      // Caret to end is fine for almost all typing flows; the alternative
+      // (preserve caret across formatter inserts/deletes) is fiddly and
+      // doesn't earn much UX in this form context.
+      try { input.setSelectionRange(formatted.length, formatted.length); } catch {}
+    }
+  });
+}
+
 const ICONS = {
   scan:  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M21 7V5a2 2 0 0 0-2-2h-2"/><path d="M3 17v2a2 2 0 0 0 2 2h2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><line x1="7" y1="12" x2="17" y2="12"/></svg>',
   doc:   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
@@ -75,7 +157,52 @@ function installUnsavedGuard(getValues) {
   return guard;
 }
 function clearUnsavedGuard() { unsavedGuard = null; }
+
+/**
+ * Reference to the upload dropzone's staged-files array, set by init().
+ * Used by confirmDiscardUnsaved + beforeunload to warn before the user
+ * navigates away with files queued but not yet audited.
+ */
+let stagedFilesRef = null;
+function setStagedFilesRef(getter) { stagedFilesRef = getter; }
+function hasStagedUpload() {
+  try {
+    const arr = stagedFilesRef?.();
+    return Array.isArray(arr) && arr.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function confirmDiscardUnsaved() {
+  // Three kinds of unsaved state can block in-app navigation:
+  //   1) Mid-flow on the Overview tab — staged upload, audit running, or
+  //      a completed audit awaiting accept (the "review" sub-view).
+  //      Leaving discards the audited bill the user just paid Claude
+  //      tokens to produce.
+  //   2) Profile/Settings field edits (unsavedGuard).
+  if (currentNav === "overview" && hasInFlightAuditWork()) {
+    const isReview = currentWorkflowView === "review";
+    const isComplaint = currentWorkflowView === "complaint";
+    let title, body, confirmText, cancelText;
+    if (isReview) {
+      title = "Leave without accepting the plan?";
+      body = "Bonsai already audited this bill. If you leave now, the audit and the negotiation plan are gone — you'll need to re-upload to get them back.";
+      confirmText = "Leave";
+      cancelText = "Stay on this plan";
+    } else if (isComplaint) {
+      title = "Discard this complaint?";
+      body = "You've started typing a complaint. Leaving will clear what you've written.";
+      confirmText = "Discard";
+      cancelText = "Keep editing";
+    } else {
+      title = "Discard the bill you're about to upload?";
+      body = "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.";
+      confirmText = "Discard";
+      cancelText = "Stay here";
+    }
+    return confirmModal({ title, body, confirmText, cancelText });
+  }
   if (!unsavedGuard?.isDirty?.()) return true;
   if (!(currentNav === "profile" || currentNav === "settings")) return true;
   return confirmModal({
@@ -99,10 +226,16 @@ function fmt$2(n) {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 }
 
+// Current workflow sub-view. Used by the navigate-away guard to know
+// whether the user is in the middle of an audit/review/results flow
+// inside the Overview tab — tab-switches and tab-closes should warn so
+// they don't lose the in-flight work.
+let currentWorkflowView = "overview";
 function setWorkflowView(view) {
-  // overview | progress | review | results | error — all sub-views inside the main content area.
+  // overview | complaint | progress | review | results | error — sub-views inside the main content area.
   // Only one of these is visible at a time when nav=overview.
-  for (const v of ["overview", "progress", "review", "results", "error"]) {
+  currentWorkflowView = view;
+  for (const v of ["overview", "complaint", "progress", "review", "results", "error"]) {
     const el = $(`#view-${v}`);
     if (!el) continue;
     if (v === view) el.classList.remove("hidden");
@@ -110,14 +243,57 @@ function setWorkflowView(view) {
   }
 }
 
+/**
+ * True when the user is mid-flow inside the Overview tab — has audited a
+ * bill but not yet accepted, OR is staring at the audit progress view,
+ * OR has staged files. Leaving any of these states drops the work.
+ */
+function hasInFlightAuditWork() {
+  if (currentWorkflowView === "progress") return true;
+  if (currentWorkflowView === "review" && reviewState != null) return true;
+  if (currentWorkflowView === "complaint" && hasComplaintInProgress()) return true;
+  if (hasStagedUpload()) return true;
+  return false;
+}
+
+function hasComplaintInProgress() {
+  // True when the user has typed anything into the complaint intake — leaving
+  // mid-typing should warn so the draft text isn't silently lost.
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const desc = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+  const email = $("#complaint-contact-email")?.value?.trim() ?? "";
+  const phone = $("#complaint-contact-phone")?.value?.trim() ?? "";
+  return Boolean(company || desc || desired || email || phone);
+}
+
 async function showNav(name) {
-  // Block navigation when leaving Profile or Settings with unsaved edits —
-  // prompts via the in-app confirm modal instead of the browser's native
-  // confirm() dialog.
-  if (name !== currentNav) {
+  // Block navigation when leaving in-flight work — prompts via the in-app
+  // confirm modal instead of the browser's native confirm() dialog.
+  // We trigger the prompt in two cases:
+  //   1) name !== currentNav (real tab switch — the obvious case)
+  //   2) name === currentNav === "overview" but the user is mid-flow on
+  //      a workflow sub-view (progress/review). Without this, clicking
+  //      "Home" while on the plan-review screen silently drops back to
+  //      the upload screen, losing the audit. (Both nav values are
+  //      "overview" so the first check passes through.)
+  const tabSwitch = name !== currentNav;
+  const homeFromMidFlow =
+    name === "overview" && currentNav === "overview" && hasInFlightAuditWork();
+  if (tabSwitch || homeFromMidFlow) {
     const ok = await confirmDiscardUnsaved();
     if (!ok) return;
-    clearUnsavedGuard();
+    if (tabSwitch) clearUnsavedGuard();
+    // Always reset workflow + reviewState when the user confirms leaving
+    // mid-flow — otherwise the next showNav would still see leftover
+    // state and re-prompt unnecessarily.
+    if (homeFromMidFlow) {
+      reviewState = null;
+      clearComplaintInputs();
+    }
+    if (tabSwitch && currentWorkflowView === "complaint") {
+      clearComplaintInputs();
+    }
   }
   currentNav = name;
   if (name !== "bills") stopBillsPoll();
@@ -126,7 +302,7 @@ async function showNav(name) {
     n.classList.toggle("active", n.dataset.nav === name);
   }
   // Hide every view; the nav-specific ones get revealed below
-  for (const v of ["overview", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
+  for (const v of ["overview", "complaint", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
     $(`#view-${v}`)?.classList.add("hidden");
   }
   if (name === "overview") {
@@ -580,8 +756,11 @@ async function init() {
   $("#drawer-delete-btn")?.addEventListener("click", () => deleteBill());
 
   // Browser-level unsaved-changes prompt on full page reload / tab close.
+  // Triggers for any in-flight audit work (staged upload, running audit,
+  // pending review accept) OR Profile/Settings dirty state — losing
+  // any of these is silently destructive.
   window.addEventListener("beforeunload", (ev) => {
-    if (unsavedGuard?.isDirty?.()) {
+    if (unsavedGuard?.isDirty?.() || hasInFlightAuditWork()) {
       ev.preventDefault();
       ev.returnValue = "";
     }
@@ -610,12 +789,32 @@ async function init() {
     await runPhasedFromSample(fixture, channel);
   });
 
+  // Complaint flow — non-bill negotiations (flight delays, refunds, etc.).
+  // Opens a dedicated workflow sub-view (not a modal) so the intake feels
+  // like the same lane as the bill audit flow.
+  $("#open-complaint-btn")?.addEventListener("click", openComplaintView);
+  $("#complaint-submit")?.addEventListener("click", submitComplaint);
+
+  // Right-column advisory chat. Stateless on the server — we re-send the
+  // full history on every turn so /api/complaint/chat can answer in
+  // context of the form fields the user has filled out so far.
+  $("#complaint-chat-form")?.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    submitComplaintChat();
+  });
+  attachPhoneFormatter($("#complaint-contact-phone"));
+
   // ─── Multi-file staging: drop/pick up to 10 files, review, then "Next" ──
   const uploadForm = $("#upload-form");
   const MAX_BILL_FILES = 10;
   /** @type {File[]} Files queued for upload, in order. */
   let stagedFiles = [];
   let uploadSubmittedOnce = false;
+  // Expose the staged-files state to the navigation guard so the user
+  // gets a "you'll lose these files" prompt if they try to leave the
+  // Overview tab or close the tab mid-upload. Cleared in submitForReal()
+  // once stagedFiles is reset.
+  setStagedFilesRef(() => stagedFiles);
 
   // Speculative audit: we kick off /api/audit as soon as files are staged.
   // Users almost never change their mind after dropping, so starting early
@@ -726,14 +925,20 @@ async function init() {
     const block = $("#dz-staging");
     const grid = $("#dz-staging-grid");
     const count = $("#dz-staging-count");
+    // Hide the "No bill handy? Try a sample" row once the user has
+    // staged real files — they clearly have a bill, the prompt is
+    // distracting at that point.
+    const sampleRow = document.querySelector(".dz-sample-row");
     if (!block || !grid || !count) return;
     if (stagedFiles.length === 0) {
       block.hidden = true;
       grid.innerHTML = "";
       count.textContent = "0";
+      if (sampleRow) sampleRow.hidden = false;
       return;
     }
     block.hidden = false;
+    if (sampleRow) sampleRow.hidden = true;
     count.textContent = String(stagedFiles.length);
     grid.innerHTML = "";
     stagedFiles.forEach((f, i) => {
@@ -849,8 +1054,24 @@ async function init() {
   $("#review-approve-btn")?.addEventListener("click", approveAndRun);
   // The review view has a single unified chat panel (plan-chat). Q&A is
   // folded into it — the routing brain figures out whether the message is
-  // a question or a plan edit.
+  // a question or a plan edit. We bind both `submit` (Enter key + button
+  // click) AND a direct click on the send button as a safety net — some
+  // browsers (and form-fill extensions) intercept submit events and our
+  // chat would silently no-op.
   $("#review-plan-chat-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitPlanMessage(); });
+  $("#review-plan-chat-form button")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    submitPlanMessage();
+  });
+  // Belt-and-suspenders: also fire on Enter in the input. Modern browsers
+  // already do this via form-submit, but if the form's submit event is
+  // ever blocked, the keypress fallback keeps the chat usable.
+  $("#review-plan-chat-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      submitPlanMessage();
+    }
+  });
   $("#review-view-bill-btn")?.addEventListener("click", () => {
     if (reviewState?.run_id) openBillViewer(reviewState.run_id);
   });
@@ -872,7 +1093,7 @@ async function init() {
   // Pre-load history for Bills count badge + approvals
   await loadHistory();
   updateNavCounts();
-  renderApprovalsOnOverview();
+  renderAttentionList();
   loadReceipts();
 
   // Default view
@@ -942,7 +1163,7 @@ function renderReceipts() {
         dos +
         "</div></div>" +
         '<div class="receipt-saved">' +
-        fmtDollars(r.patient_saved) +
+        fmtDollars(clampSaved(r.patient_saved, r.original_balance)) +
         "</div>" +
         channelTag +
         quote +
@@ -978,14 +1199,20 @@ function updateNavCounts() {
   ).length;
   setNavCount("#nav-approval-count", pendingApprovals);
 
-  // Bills: anything that needs the user's attention right now — real
-  // audits in attention state (escalated / failed / awaiting / cancelled)
-  // plus mock rows tagged with an attentionReason that haven't been
-  // dismissed.
-  const auditsInAttention = audits.filter((a) => attentionReason(a)).length;
+  // Bills badge: only count *real* attention states — escalated, paused,
+  // agent error, verify-outcome. The "awaiting your approval" state is
+  // NOT a notification — the user just audited the bill and is staring
+  // at the plan-review screen; surfacing a sidebar badge while they're
+  // mid-flow is noise. The "Awaiting" chip still appears on the bill
+  // row itself for the case where they navigate away and come back.
+  const NOTIFY_KEYS = new Set(["error", "paused", "escalated", "verify_outcome"]);
+  const auditsInAttention = audits.filter((a) => {
+    const r = attentionReason(a);
+    return r && NOTIFY_KEYS.has(r.key);
+  }).length;
   const hiddenMocks = getHiddenMocks();
   const mocksInAttention = MOCK_RECURRING_BILLS.filter(
-    (b) => !hiddenMocks.has(b.id) && b.attentionReason,
+    (b) => !hiddenMocks.has(b.id) && b.attentionReason && NOTIFY_KEYS.has(b.attentionReason.key),
   ).length;
   setNavCount("#nav-bills-count", auditsInAttention + mocksInAttention);
 
@@ -1089,6 +1316,158 @@ async function runAndRender(fn) {
 
 let reviewState = null; // { run_id, partial_report }
 
+// Complaint chat history for the right-column advisory chat. Lives only in
+// memory because no PendingRun exists yet — we send the full history on
+// every turn so /api/complaint/chat can stay stateless.
+let complaintChatHistory = [];
+
+function openComplaintView() {
+  const errEl = $("#complaint-error");
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
+  setWorkflowView("complaint");
+  updatePageHeader({
+    eyebrow: "Negotiate",
+    title: "Tell Bonsai what happened",
+  });
+  setTimeout(() => $("#complaint-company")?.focus(), 50);
+}
+
+function clearComplaintInputs() {
+  const company = $("#complaint-company");
+  const desc = $("#complaint-description");
+  const desired = $("#complaint-desired");
+  if (company) company.value = "";
+  if (desc) desc.value = "";
+  if (desired) desired.value = "";
+  const email = $("#complaint-contact-email");
+  const phone = $("#complaint-contact-phone");
+  if (email) email.value = "";
+  if (phone) phone.value = "";
+  const errEl = $("#complaint-error");
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
+  const chatLog = $("#complaint-chat-log");
+  if (chatLog) chatLog.innerHTML = "";
+  complaintChatHistory = [];
+}
+
+async function submitComplaintChat() {
+  const input = $("#complaint-chat-input");
+  const msg = input?.value?.trim() ?? "";
+  if (!msg) return;
+  const log = $("#complaint-chat-log");
+  if (!log) return;
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const description = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+
+  const qDiv = document.createElement("div");
+  qDiv.className = "qa-msg q";
+  qDiv.innerHTML = `<div class="qa-role">You</div><div class="qa-body"></div>`;
+  qDiv.querySelector(".qa-body").textContent = msg;
+  log.appendChild(qDiv);
+  input.value = "";
+  input.disabled = true;
+  const btn = $("#complaint-chat-form button");
+  if (btn) btn.disabled = true;
+  const thinking = document.createElement("div");
+  thinking.className = "qa-msg a";
+  thinking.innerHTML = `<div class="qa-role">Bonsai</div><div class="qa-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+  log.appendChild(thinking);
+  log.scrollTop = log.scrollHeight;
+
+  try {
+    const res = await fetch("/api/complaint/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        company,
+        description,
+        desired_outcome: desired,
+        history: complaintChatHistory,
+        message: msg,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { reply } = await res.json();
+    thinking.querySelector(".qa-body").textContent = reply;
+    complaintChatHistory.push({ role: "user", body: msg });
+    complaintChatHistory.push({ role: "assistant", body: reply });
+  } catch (err) {
+    thinking.querySelector(".qa-body").textContent = `Error: ${err?.message ?? err}`;
+    thinking.classList.add("error");
+  } finally {
+    input.disabled = false;
+    if (btn) btn.disabled = false;
+    input.focus();
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+// One-click flow: draft the complaint, save the user-typed contact, kick
+// off negotiation, and route the user to Bills. Mirrors the multi-step
+// bill flow but runs all three calls inline since there's no review step.
+async function submitComplaint() {
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const description = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+  const email = $("#complaint-contact-email")?.value?.trim() ?? "";
+  const phone = $("#complaint-contact-phone")?.value?.trim() ?? "";
+  const errEl = $("#complaint-error");
+  const submitBtn = $("#complaint-submit");
+  if (!company || !description) {
+    errEl.textContent = "Company name and what happened are both required.";
+    errEl.hidden = false;
+    return;
+  }
+  if (!email && !phone) {
+    errEl.textContent = "Add a customer-support email or phone so Bonsai knows where to reach out.";
+    errEl.hidden = false;
+    return;
+  }
+  errEl.hidden = true;
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Sending to Bonsai…";
+  // Single POST — server creates the run + status=negotiating immediately,
+  // then drafts the letter and sends the email in the background. The user
+  // is on Bills before any of that completes.
+  try {
+    const res = await fetch("/api/complaint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        company,
+        description,
+        desired_outcome: desired,
+        support_email: email || null,
+        support_phone: phone || null,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+
+    clearComplaintInputs();
+    // Reset workflow state so the nav guard doesn't prompt on the way out.
+    setWorkflowView("overview");
+    reviewState = null;
+    await loadHistory();
+    updateNavCounts();
+    await showNav("bills");
+  } catch (err) {
+    $("#error-body").textContent = String(err?.message ?? err);
+    setWorkflowView("error");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Accept & negotiate";
+  }
+}
+
 async function runPhasedFromSample(fixture, channel) {
   setWorkflowView("progress");
   updatePageHeader({
@@ -1096,6 +1475,12 @@ async function runPhasedFromSample(fixture, channel) {
     title: "Reading the bill &amp; finding every overcharge",
   });
   startTimeline();
+  // Cached fixtures return in ~20ms — too fast to show what Bonsai is
+  // doing. Hold the loading view for ~1.5s so the user actually sees
+  // the timeline animate. Real uploads (which are slow on their own)
+  // skip past this minimum because the audit response takes longer.
+  const startedAt = Date.now();
+  const MIN_LOADING_MS = 1500;
   try {
     const res = await fetch("/api/audit", {
       method: "POST",
@@ -1104,6 +1489,10 @@ async function runPhasedFromSample(fixture, channel) {
     });
     if (!res.ok) throw new Error(await res.text());
     const { run_id, report } = await res.json();
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < MIN_LOADING_MS) {
+      await new Promise((r) => setTimeout(r, MIN_LOADING_MS - elapsed));
+    }
     stopTimeline();
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
@@ -1196,6 +1585,7 @@ function initContactCard() {
   $("#contact-title").textContent = "Looking up the billing contact…";
   $("#contact-email").value = "";
   $("#contact-phone").value = "";
+  attachPhoneFormatter($("#contact-phone"));
   $("#contact-notes").textContent = "";
   $("#contact-sources").innerHTML = "";
 
@@ -1203,8 +1593,17 @@ function initContactCard() {
   // the live reviewState run_id at click time, not at bind time.
   if (!card.dataset.bound) {
     card.dataset.bound = "1";
-    $("#contact-save").addEventListener("click", saveContactOverride);
-    $("#contact-retry").addEventListener("click", retryContactLookup);
+    // Save button still works for users who explicitly want to confirm,
+    // but typing now auto-saves so most won't need it.
+    $("#contact-save")?.addEventListener("click", saveContactOverride);
+    const onEdit = () => {
+      // Clear the "needs input" highlight on first keystroke.
+      card.classList.remove("needs-input");
+      // Schedule a debounced save — typing IS the save.
+      scheduleContactAutosave();
+    };
+    $("#contact-email")?.addEventListener("input", onEdit);
+    $("#contact-phone")?.addEventListener("input", onEdit);
   }
   pollContactStatus();
   contactPollTimer = setInterval(pollContactStatus, 2500);
@@ -1229,39 +1628,63 @@ async function pollContactStatus() {
   }
 }
 
+/**
+ * "Customer support" or "billing department"? Medical bills always route
+ * to a billing department; everything else (telecom, utility, subscription,
+ * insurance, etc.) is customer support. Falls back to "customer support"
+ * when the kind is unknown — safer default since most consumer bills have
+ * a CS line.
+ */
+function contactRoleNoun(billKind) {
+  return billKind === "medical" ? "billing department" : "customer support";
+}
+
 function applyContactStatus(data) {
   const titleEl = $("#contact-title");
   const notesEl = $("#contact-notes");
   const srcEl = $("#contact-sources");
   const emailEl = $("#contact-email");
   const phoneEl = $("#contact-phone");
+  const card = document.getElementById("contact-card");
+  const billKind =
+    reviewState?.partial_report?.analyzer?.metadata?.bill_kind ?? "other";
+  const role = contactRoleNoun(billKind);
+
+  // Default-clear the "needs input" highlight every render. The only
+  // place we add it is the click handler in approveAndRun (when the
+  // user tries to accept with both fields empty). Any successful
+  // poll/save lands a contact, which means we can drop the highlight.
+  card?.classList.remove("needs-input");
 
   if (data.status === "pending") {
-    titleEl.textContent = "Looking up the billing contact…";
+    titleEl.textContent = `Looking up the ${role} contact…`;
     return;
   }
   if (data.status === "failed") {
-    titleEl.textContent = "Couldn't find a billing contact.";
-    notesEl.textContent = data.error ?? "Add the email and phone you want Bonsai to use below.";
+    titleEl.textContent = `Add a ${role} contact`;
+    notesEl.textContent =
+      data.error ??
+      `Bonsai couldn't find one. Add an email or phone for the ${role} below — either is fine, email preferred when available.`;
     return;
   }
   const c = data.contact ?? {};
-  // "Resolved with nothing useful" is functionally the same as "failed" —
-  // we hit the web search but it didn't surface a real billing contact
-  // (synthetic providers, single-location practices with no online billing
-  // page, etc.). Don't show the user empty fields and a low-confidence
-  // pill; just ask them to fill it in. The user can still edit if they
-  // disagree, since the inputs are still present below.
+  // "Resolved with nothing useful" is functionally the same as "failed".
+  // Don't show empty fields with prefilled noise; ask the user to fill in.
+  // The .needs-input highlight is NOT applied on render — only when the
+  // user tries to Accept the plan with both fields empty.
   const provider = data.provider_name ?? "this provider";
   if (!c.email && !c.phone) {
-    titleEl.textContent = `Couldn't find a billing contact for ${provider}.`;
-    notesEl.textContent = "Add the email and phone you want Bonsai to use below — it'll be saved with this bill.";
+    titleEl.textContent = `Add a ${role} contact for ${provider}`;
+    notesEl.textContent =
+      `Bonsai couldn't find one in public sources. Add an email or phone for ${provider}'s ${role} — either works, email preferred when available.`;
     if (document.activeElement !== emailEl) emailEl.value = "";
     if (document.activeElement !== phoneEl) phoneEl.value = "";
     srcEl.innerHTML = "";
     return;
   }
-  titleEl.textContent = data.provider_name ? `${data.provider_name} — billing` : "Billing contact";
+  titleEl.textContent = data.provider_name
+    ? `${data.provider_name} — ${role}`
+    : `${role.charAt(0).toUpperCase()}${role.slice(1)} contact`;
   // Don't blow away the user's typing if they're already editing.
   if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
   if (document.activeElement !== phoneEl) phoneEl.value = c.phone ?? "";
@@ -1282,8 +1705,14 @@ async function saveContactOverride() {
   if (!runId) return;
   const email = $("#contact-email").value.trim();
   const phone = $("#contact-phone").value.trim();
-  const btn = $("#contact-save");
-  btn.disabled = true;
+  // No-op when both fields are empty — avoids POSTing nulls on every
+  // backspace once the user clears the inputs to retype.
+  if (!email && !phone) return;
+  const status = $("#contact-save-status");
+  if (status) {
+    status.textContent = "Saving…";
+    status.className = "contact-save-status pending";
+  }
   try {
     const res = await fetch("/api/contact/override", {
       method: "POST",
@@ -1294,34 +1723,38 @@ async function saveContactOverride() {
     if (!res.ok) throw new Error(await res.text());
     const j = await res.json();
     applyContactStatus({ status: "resolved", contact: j.contact, provider_name: reviewState?.provider_name ?? null });
+    if (status) {
+      status.textContent = "Saved ✓";
+      status.className = "contact-save-status ok";
+      setTimeout(() => {
+        if (status.textContent === "Saved ✓") {
+          status.textContent = "";
+          status.className = "contact-save-status";
+        }
+      }, 2500);
+    }
   } catch (err) {
     console.warn("[contact] save failed", err);
-  } finally {
-    btn.disabled = false;
+    if (status) {
+      status.textContent = "Couldn't save — try again";
+      status.className = "contact-save-status err";
+    }
   }
 }
 
-async function retryContactLookup() {
-  const runId = reviewState?.run_id;
-  if (!runId) return;
-  const btn = $("#contact-retry");
-  btn.disabled = true;
-  try {
-    const res = await fetch("/api/contact/retry", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({ run_id: runId }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    $("#contact-title").textContent = "Looking up the billing contact…";
-    if (contactPollTimer) clearInterval(contactPollTimer);
-    contactPollTimer = setInterval(pollContactStatus, 2500);
-  } catch (err) {
-    console.warn("[contact] retry failed", err);
-  } finally {
-    btn.disabled = false;
-  }
+/**
+ * Debounced auto-save for the contact card. Fires ~700ms after the user
+ * stops typing. The user no longer needs to hit "Save" — typing IS the
+ * save action. We still keep saveContactOverride callable explicitly
+ * (e.g., on Approve auto-save) because the debounce is async-safe.
+ */
+let contactAutosaveTimer = null;
+function scheduleContactAutosave() {
+  if (contactAutosaveTimer) clearTimeout(contactAutosaveTimer);
+  contactAutosaveTimer = setTimeout(() => {
+    contactAutosaveTimer = null;
+    void saveContactOverride();
+  }, 700);
 }
 
 async function loadOpportunities(report) {
@@ -1343,7 +1776,15 @@ async function loadOpportunities(report) {
       desc: o.description,
       estimate: Number(o.dollar_estimate) || 0,
     }));
-    const total = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const rawTotal = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    // Opportunity estimates may overlap (the model proposes 5 strategies
+    // that all chip away at the same defensible amount), and "what you
+    // can save" cannot exceed "what you owe" (the EOB patient
+    // responsibility for medical bills, the bill total otherwise). Clamp
+    // the headline so the user never sees a savings figure above their
+    // actual obligation. Per-opportunity rows keep their own numbers
+    // since they're each an upper-bound estimate.
+    const total = clampSaved(rawTotal, maxSavingsCap(report));
     const provider = report.analyzer?.metadata?.provider_name ?? "the provider";
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
@@ -1353,7 +1794,8 @@ async function loadOpportunities(report) {
   } catch (err) {
     console.warn("[opps] falling back to synthesized", err);
     const fallback = buildOpportunities(report);
-    const total = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const rawTotal = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
+    const total = clampSaved(rawTotal, maxSavingsCap(report));
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this bill.`
       : "Bill reviewed — a few angles to try.";
@@ -1562,9 +2004,12 @@ function buildOpportunities(report) {
 
 
 async function submitPlanMessage() {
-  if (!reviewState) return;
+  if (!reviewState) {
+    console.warn("[plan-chat] no reviewState — chat fired before audit completed?");
+    return;
+  }
   const input = $("#review-plan-chat-input");
-  const msg = input.value.trim();
+  const msg = input?.value?.trim() ?? "";
   if (!msg) return;
   const log = $("#review-plan-chat-log");
   const qDiv = document.createElement("div");
@@ -1592,11 +2037,16 @@ async function submitPlanMessage() {
     const { reply, strategy } = await res.json();
     thinking.querySelector(".qa-body").textContent = reply;
     if (strategy && reviewState.partial_report) {
-      // Store the new strategy on the report so approve() picks it up. The
-      // receipt + opportunities panels don't depend on channel choice, so
-      // no re-render is needed here.
+      // Store the new strategy on the report so approve() picks it up.
       reviewState.partial_report.strategy = strategy;
     }
+    // Re-fetch opportunities so the "Opportunities to lower this bill"
+    // panel reflects the user's directive. /api/opportunities reads
+    // run.plan_edits (which the chat just appended to), so the next call
+    // returns a tailored list. Show the skeleton during the re-fetch
+    // so the user sees the panel is updating, not stale.
+    renderOpportunitiesSkeleton();
+    void loadOpportunities(reviewState.partial_report);
   } catch (err) {
     thinking.querySelector(".qa-body").textContent = `Error: ${err.message ?? err}`;
     thinking.classList.add("error");
@@ -1610,6 +2060,45 @@ async function submitPlanMessage() {
 
 async function approveAndRun() {
   if (!reviewState) return;
+  // Front-end contact gate — at least one of email or phone is required
+  // before we even POST /api/approve. This keeps the UX local: highlight
+  // the card + scroll + focus the email input, no round-trip and no
+  // error toast. The server still enforces the same rule defensively.
+  const emailInput = document.getElementById("contact-email");
+  const phoneInput = document.getElementById("contact-phone");
+  const liveEmail = emailInput?.value?.trim() || "";
+  const livePhone = phoneInput?.value?.trim() || "";
+  const hasEmail = !!liveEmail;
+  const hasPhone = !!livePhone;
+  if (!hasEmail && !hasPhone) {
+    const card = document.getElementById("contact-card");
+    if (card) {
+      card.classList.add("needs-input");
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (emailInput) setTimeout(() => emailInput.focus(), 350);
+    return;
+  }
+  // Auto-save the contact before approve. Without this, a user who
+  // typed phone (or email) into the contact card but didn't click Save
+  // would land on the server's missing_contact gate — the server reads
+  // the persisted `run.contact`, not the live DOM input. Auto-saving
+  // here turns "type phone, click Accept" into the one-click flow the
+  // user expects.
+  try {
+    await fetch("/api/contact/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        run_id: reviewState.run_id,
+        email: liveEmail,
+        phone: livePhone,
+      }),
+    });
+  } catch (err) {
+    console.warn("[approve] contact auto-save failed", err);
+  }
   // Negotiation runs in the background. Kick it off, then hand the user
   // off to the Bills view — updates will stream in as the bg job progresses
   // (polled via /api/history).
@@ -1637,12 +2126,18 @@ async function approveAndRun() {
         return;
       }
       if (j?.error === "missing_contact") {
-        showApproveBlocker({
-          title: "Add a billing contact first",
-          body: j.message ?? "Add a support email or phone for the provider before launching.",
-          ctaLabel: "Open Bills drawer",
-          ctaTarget: "bills",
-        });
+        // Highlight the contact card right here on the review page —
+        // it's the same view, no need to send the user to a different
+        // tab. Scroll it into focus and pop the email input.
+        const card = document.getElementById("contact-card");
+        const emailInput = document.getElementById("contact-email");
+        if (card) {
+          card.classList.add("needs-input");
+          card.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+        if (emailInput) {
+          setTimeout(() => emailInput.focus(), 350);
+        }
         return;
       }
       throw new Error(j?.message ?? j?.error ?? (await res.text()));
@@ -1651,7 +2146,7 @@ async function approveAndRun() {
     reviewState = null;
     await loadHistory();
     updateNavCounts();
-    showNav("bills");
+    await showNav("bills");
   } catch (err) {
     $("#error-body").textContent = String(err?.message ?? err);
     setWorkflowView("error");
@@ -1694,8 +2189,8 @@ function resetPageHeader() {
     });
   } else if (currentNav === "bills") {
     updatePageHeader({
-      eyebrow: "Bills",
-      title: "Every bill monitored",
+      eyebrow: "Negotiation",
+      title: "Every negotiation in one place",
       stats: null,
     });
   } else if (currentNav === "offers") {
@@ -1732,11 +2227,14 @@ function updatePageHeader({ eyebrow, title, stats }) {
 
 function render(report) {
   const s = report.summary;
-  const savedPositive = typeof s.patient_saved === "number" && s.patient_saved > 0;
+  // Clamp at the render boundary too — covers legacy reports written
+  // before the orchestrator-side clamp landed.
+  const clampedSaved = clampSaved(s.patient_saved, s.original_balance);
+  const savedPositive = clampedSaved > 0;
   const heroTitle = $("#hero-title");
   const heroAmount = document.createElement("span");
   heroAmount.className = "hero-amount";
-  heroAmount.textContent = savedPositive ? fmt$2(s.patient_saved) : (s.patient_saved != null ? fmt$2(s.patient_saved) : "—");
+  heroAmount.textContent = savedPositive ? fmt$2(clampedSaved) : (s.patient_saved != null ? fmt$2(clampedSaved) : "—");
   heroTitle.classList.toggle("hero-title-muted", !savedPositive);
   heroTitle.innerHTML = "";
   if (savedPositive) heroTitle.append("Saved ");
@@ -1753,7 +2251,7 @@ function render(report) {
   $("#hero-sub").textContent = buildHeroSub(s);
   $("#stat-was").textContent = fmt$2(s.original_balance);
   $("#stat-now").textContent = fmt$2(s.final_balance);
-  $("#stat-saved").textContent = savedPositive ? fmt$2(s.patient_saved) : "—";
+  $("#stat-saved").textContent = savedPositive ? fmt$2(clampedSaved) : "—";
   $("#stat-channel").textContent = s.channel_used ? s.channel_used.toUpperCase() : "—";
 
   updatePageHeader({
@@ -1996,6 +2494,71 @@ function renderConversation(report) {
  * verbatim when an audit lands. That avoids re-creating the table /
  * filters / banner from scratch every time a poll cycle runs.
  */
+/**
+ * Custom hero for the Comparison tab. Like renderHeroEmptyView, but the
+ * CTA is an early-access signup that persists on the user record. After
+ * signup the button text flips to "Added to early access" and stays
+ * disabled — every subsequent visit (even after a reload) reflects the
+ * already-signed-up state because we read currentUser.early_access_at.
+ */
+function renderEarlyAccessHero(view) {
+  if (view.querySelector(":scope > .empty-hero")) return;
+
+  const stash = document.createElement("div");
+  stash.style.display = "none";
+  while (view.firstChild) stash.appendChild(view.firstChild);
+
+  const hero = document.createElement("div");
+  hero.className = "empty-hero";
+  hero.innerHTML = `
+    <div class="empty-hero-card">
+      <h2 class="empty-hero-title">Comparison is in beta</h2>
+      <p class="empty-hero-body">Bonsai will persistently look at other options for your recurring costs — phone plans, internet, insurance, subscriptions — so you're always paying the lowest price possible. No more digging through plans every year.</p>
+      <button type="button" class="btn btn-primary btn-lg empty-hero-cta" id="early-access-btn"></button>
+    </div>`;
+
+  hero.appendChild(stash);
+  hero.dataset.viewChildren = "1";
+  view.appendChild(hero);
+
+  const btn = hero.querySelector("#early-access-btn");
+  if (!btn) return;
+
+  // Sync the button to the user's current join status. Joined uses the
+  // amber AI accent (the "ai" wordmark color) — the color shift IS the
+  // affordance that the button is now a leave-toggle. No micro-copy
+  // needed; clicking again removes them. Mount once + after every
+  // toggle so the state never drifts.
+  const sync = () => {
+    const joined = !!currentUser?.early_access_at;
+    btn.textContent = joined ? "Added to early access ✓" : "Sign up for early access";
+    btn.classList.toggle("is-joined", joined);
+  };
+  sync();
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const wasJoined = !!currentUser?.early_access_at;
+    btn.disabled = true;
+    btn.textContent = wasJoined ? "Removing…" : "Adding…";
+    try {
+      const res = await fetch("/api/early-access", {
+        method: wasJoined ? "DELETE" : "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const { user } = await res.json();
+      if (user) currentUser = user;
+      sync();
+    } catch (err) {
+      console.warn("[early-access] toggle failed", err);
+      btn.textContent = "Try again";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function renderHeroEmptyView(view, { title, body, cta }) {
   // If we already painted the empty state for this view, just bail —
   // re-render would lose attached event listeners on the CTA.
@@ -2031,41 +2594,147 @@ function restoreViewChildren(view) {
   hero.remove();
 }
 
-// ─── Approvals (Overview) ───────────────────────────────────────
+// ─── Attention carousel (Negotiation tab) ─────────────────────────
+// Every bill that needs the user's sign-off (or any other action — error,
+// paused, verify-outcome, awaiting-approval) surfaces here above the
+// stats. One card visible at a time; arrows page through the rest. The
+// primary + secondary action buttons inline on the card mirror the
+// drawer's Attention tab, so users can resolve without opening it.
 
-function renderApprovalsOnOverview() {
+const ATTENTION_CARD_BODY = {
+  escalated: (a) => `Provider countered. Defensible amount: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve the counter or push back for a lower price.`,
+  awaiting: () => `Audit complete. Review the plan and accept to start negotiating.`,
+  error: (a) => a.error ? `Bonsai's agent hit an error: ${escapeHtml(a.error)}. Retry to keep going.` : `Bonsai's agent hit an error mid-negotiation. Retry to keep going.`,
+  paused: () => `Paused by you. Resume to keep negotiating.`,
+  verify_outcome: () => `Negotiation resolved. Confirm whether your next bill matched what Bonsai got.`,
+};
+
+let attentionCarouselIndex = 0;
+
+function makeRowFromAudit(a, reason) {
+  // Re-build the lightweight row shape openBillDrawer / handleAttentionAction
+  // / resumeAgent expect, so an inline carousel button can drive the same
+  // server actions as the drawer.
+  const score = scoreFromAudit(a);
+  return {
+    id: `audit-${a.name}`,
+    kind: "audit",
+    vendor: a.provider_name ?? a.name,
+    account: a.patient_name ? `${a.patient_name} · ${a.date_of_service ?? "—"}` : (a.date_of_service ?? "One-time bill"),
+    lastCheck: relTime(a.modified),
+    addedAt: a.modified ?? Date.now(),
+    balance: a.final_balance ?? a.original_balance ?? 0,
+    rate: "",
+    category: inferCategory(a),
+    score,
+    scoreLabel: scoreLabelFor(score),
+    auto: true,
+    audit: a,
+    status: a.status,
+    lifecycle: "attention",
+    attentionReason: reason,
+  };
+}
+
+function renderAttentionList() {
   const root = $("#approvals-grid");
   const block = $("#approvals-block");
   const title = $("#approvals-title");
   if (!root || !block) return;
   const audits = historyCache?.audits ?? [];
-  const escalated = audits.filter((a) => a.outcome === "escalated");
-  if (!escalated.length) {
+  const attention = audits
+    .map((a) => ({ a, reason: attentionReason(a) }))
+    .filter((x) => x.reason != null);
+  if (!attention.length) {
     block.hidden = true;
     return;
   }
+  // Clamp the carousel index so resolved items at the end don't strand us
+  // on a blank slot — and so a fresh attention item lands on a valid card.
+  if (attentionCarouselIndex >= attention.length) attentionCarouselIndex = 0;
+  if (attentionCarouselIndex < 0) attentionCarouselIndex = attention.length - 1;
+
   block.hidden = false;
-  title.textContent = escalated.length === 1
+  title.textContent = attention.length === 1
     ? "One negotiation needs your sign-off."
-    : `${escalated.length} negotiations need your sign-off.`;
-  root.innerHTML = "";
-  for (const a of escalated) {
-    const card = document.createElement("div");
-    card.className = "approval-card";
-    card.innerHTML = `
-      <div class="approval-card-head">
-        <div class="approval-card-icon">${ICONS.hospital}</div>
-        <div class="approval-card-meta">${(a.channel_used ?? "email").toUpperCase()} · ${a.date_of_service ?? "—"}</div>
-        <div class="approval-card-save">${fmt$(a.patient_saved ?? 0)}</div>
+    : `${attention.length} negotiations need your sign-off.`;
+
+  const cur = attention[attentionCarouselIndex];
+  const { a, reason } = cur;
+  const row = makeRowFromAudit(a, reason);
+  const content = ATTENTION_CONTENT[reason.key] ?? null;
+  const bodyFn = ATTENTION_CARD_BODY[reason.key] ?? (() => reason.label);
+
+  const primaryBtn = content?.primary
+    ? `<button type="button" class="btn btn-primary" data-attn-action="${escapeHtml(content.primary.id)}">${escapeHtml(content.primary.label)}</button>`
+    : "";
+  const secondaryBtn = content?.secondary
+    ? `<button type="button" class="btn btn-ghost" data-attn-action="${escapeHtml(content.secondary.id)}">${escapeHtml(content.secondary.label)}</button>`
+    : "";
+  const openBtn = `<button type="button" class="btn btn-ghost btn-tight" data-attn-open>Open details</button>`;
+
+  const showArrows = attention.length > 1;
+  const pager = showArrows
+    ? `<div class="attention-pager">
+         <div class="attention-dots">
+           ${attention.map((_, i) => `<span class="attention-dot${i === attentionCarouselIndex ? " is-active" : ""}"></span>`).join("")}
+         </div>
+         <div class="attention-counter mono">${attentionCarouselIndex + 1} of ${attention.length}</div>
+       </div>`
+    : "";
+
+  root.innerHTML = `
+    <div class="attention-carousel">
+      ${showArrows ? `<button type="button" class="attention-arrow" data-attn-nav="prev" aria-label="Previous">‹</button>` : ""}
+      <div class="approval-card approval-card-${reason.key}">
+        <div class="approval-card-head">
+          <div class="approval-card-icon">${ICONS.hospital}</div>
+          <div class="approval-card-meta">${(a.channel_used ?? "email").toUpperCase()} · ${a.date_of_service ?? relTime(a.modified)}</div>
+          <div class="approval-card-save">${fmt$(a.patient_saved ?? 0)}</div>
+        </div>
+        <div class="approval-card-title">${escapeHtml(a.provider_name ?? a.name)}</div>
+        <div class="approval-card-reason">${escapeHtml(reason.label)}</div>
+        <div class="approval-card-body">${bodyFn(a)}</div>
+        <div class="approval-card-actions">
+          ${openBtn}
+          ${secondaryBtn}
+          ${primaryBtn}
+        </div>
       </div>
-      <div class="approval-card-title">${escapeHtml(a.provider_name ?? a.name)}</div>
-      <div class="approval-card-body">Provider countered. Defensible amount: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve the counter or push back for a lower price.</div>
-      <div class="approval-card-actions">
-        <button class="btn btn-ghost" data-act="reject">Push back</button>
-        <button class="btn btn-primary" data-act="approve">Approve</button>
-      </div>`;
-    root.appendChild(card);
-  }
+      ${showArrows ? `<button type="button" class="attention-arrow" data-attn-nav="next" aria-label="Next">›</button>` : ""}
+    </div>
+    ${pager}
+  `;
+
+  // Carousel navigation
+  root.querySelectorAll("[data-attn-nav]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const dir = btn.dataset.attnNav;
+      attentionCarouselIndex =
+        dir === "prev"
+          ? (attentionCarouselIndex - 1 + attention.length) % attention.length
+          : (attentionCarouselIndex + 1) % attention.length;
+      renderAttentionList();
+    });
+  });
+
+  // Inline resolve actions — wire to the same handler the drawer uses.
+  // resumeAgent / stopAgent read drawerState.row, so seed it before firing.
+  // `silent: true` suppresses the post-action drawer auto-open so the user
+  // who clicked here gets the action and stays on the list.
+  root.querySelectorAll("[data-attn-action]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      drawerState.row = row;
+      handleAttentionAction(btn.dataset.attnAction, row, { silent: true });
+    });
+  });
+
+  root.querySelector("[data-attn-open]")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    void openBillDrawer(row);
+  });
 }
 
 // ─── Mock recurring bills + offers + settings ──────────────────
@@ -2126,8 +2795,8 @@ function scheduleBillsPoll() {
 
 function renderBills() {
   updatePageHeader({
-    eyebrow: "Bills",
-    title: "Every bill monitored",
+    eyebrow: "Negotiation",
+    title: "Every negotiation in one place",
     stats: null,
   });
 
@@ -2139,10 +2808,10 @@ function renderBills() {
   if (view) {
     if (audits.length === 0) {
       renderHeroEmptyView(view, {
-        title: "No bills uploaded yet",
+        title: "No negotiations yet",
         body:
-          "Drop a bill on the home tab. Bonsai audits it, finds the overcharges, and starts negotiating with the provider — every step lands here as it happens.",
-        cta: "Upload a bill",
+          "Drop a bill or kick off a complaint from the home tab. Bonsai negotiates with the provider — every step, counter, and outcome lands here as it happens.",
+        cta: "Start a negotiation",
       });
       scheduleBillsPoll();
       return;
@@ -2166,7 +2835,11 @@ function renderBills() {
     if (isNegotiating) lifecycle = "active";
     else if (isResolved) lifecycle = "resolved";
     else if (isFailed || isEscalated || isCancelled) lifecycle = "attention";
-    else lifecycle = "attention"; // audited but no negotiation dispatched yet
+    // Audited-but-not-yet-approved is no longer "attention" — it shouldn't
+    // pop a sidebar badge while the user is mid-flow on the review screen.
+    // Treats it as "watching" instead; the row's own chip ("Awaiting your
+    // approval") still surfaces the state on the Bills page.
+    else lifecycle = null;
     return {
       id: `audit-${a.name}`,
       kind: "audit",
@@ -2193,7 +2866,15 @@ function renderBills() {
   // how many need attention, and total saved lifetime.
   const activeCount = auditRows.filter((r) => r.lifecycle === "active").length;
   const attentionCount = auditRows.filter((r) => r.lifecycle === "attention").length;
-  const totalSaved = audits.reduce((s, a) => s + (a.patient_saved ?? 0), 0);
+  const totalSaved = audits.reduce(
+    (s, a) => s + clampSaved(a.patient_saved, a.original_balance),
+    0,
+  );
+
+  // Attention cards render above the metrics. Re-render every time the
+  // bills list refreshes so a counter that just landed (or got resolved)
+  // shows up without a tab switch.
+  renderAttentionList();
 
   $("#bills-stats").innerHTML = `
     <div>
@@ -2365,7 +3046,13 @@ function attentionReason(audit) {
   if (status === "failed" || outcome === "failed") return { key: "error", label: "Agent error" };
   if (status === "cancelled" || outcome === "cancelled") return { key: "paused", label: "Paused by you" };
   if (outcome === "escalated") return { key: "escalated", label: "Provider countered — review" };
-  if (status === "negotiating" || outcome === "negotiating") return null;
+  // "Negotiating" (the bg job is mid-flight) and "in_progress" (the agent
+  // dispatched and is waiting on a real reply) are both ACTIVE states —
+  // user already approved, nothing for them to do. The "in_progress"
+  // case is what tripped users in real-email mode: status flipped to
+  // "completed" (kickoff finished) but outcome stayed "in_progress",
+  // which used to fall through to "Awaiting your approval".
+  if (status === "negotiating" || outcome === "negotiating" || outcome === "in_progress") return null;
   if (outcome === "resolved") {
     // Server flags resolved bills the user hasn't confirmed match their next
     // statement after VERIFY_OUTCOME_AFTER_DAYS. Surfacing in the attention
@@ -2375,7 +3062,11 @@ function attentionReason(audit) {
     }
     return null;
   }
-  return { key: "awaiting", label: "Awaiting your approval" };
+  // Only show "Awaiting" for bills that were truly never approved — i.e.,
+  // status === "audited" with no run kicked off yet. After approve, status
+  // becomes "negotiating" or "completed" and we never land here.
+  if (status === "audited") return { key: "awaiting", label: "Awaiting your approval" };
+  return null;
 }
 
 function relTime(ms) {
@@ -2461,23 +3152,22 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
+  // Page-header title is the original "Cheaper alternatives, found for
+  // you" from when this tab was live. Comparison is now in beta — the
+  // hero card below ("Comparison is in beta" + early-access CTA) carries
+  // the not-yet-shipping state, so the page title can stay aspirational.
   updatePageHeader({
     eyebrow: "Comparison",
-    title: "Coming soon",
+    title: "Cheaper alternatives, found for you",
     stats: null,
   });
 
-  // Comparison is on the roadmap but not yet live. Render a permanent
-  // "coming soon" hero regardless of audit state — better than shipping
-  // an offer-hunt feature that's secretly simulator-driven.
+  // Comparison is in beta — we ship the hero with an early-access
+  // signup CTA. Clicking it persists on the user record so the button
+  // shows "Added to early access" on subsequent visits.
   const view = $("#view-offers");
   if (view) {
-    renderHeroEmptyView(view, {
-      title: "Comparison is on the way",
-      body:
-        "We'll surface side-by-side prices from competing providers — pharmacies, plans, carriers, marketplaces — anchored to the bills you've audited. Not live yet.",
-      cta: "Got it",
-    });
+    renderEarlyAccessHero(view);
     return;
   }
 
@@ -2815,6 +3505,27 @@ function flashSavedThenFade(statusEl) {
   }, 3600);
 }
 
+/**
+ * Wipe the "Saved ✓" indicator the moment any field in `formRoot` changes,
+ * so the user never sees stale confirmation when they have unsaved edits.
+ * Idempotent — the listener is bound once per form root.
+ */
+function clearSaveStatusOnEdit(formRoot, statusEl) {
+  if (!formRoot || !statusEl || formRoot.dataset.clearSaveBound === "1") return;
+  formRoot.dataset.clearSaveBound = "1";
+  const wipe = () => {
+    if (statusEl._fadeTimer) clearTimeout(statusEl._fadeTimer);
+    if (statusEl._clearTimer) clearTimeout(statusEl._clearTimer);
+    statusEl.textContent = "";
+    statusEl.className = "tg-save-status";
+  };
+  // `input` covers text fields, textareas, range; `change` covers
+  // checkboxes, radios, selects, dates. Bubbling listeners on the form
+  // root catch every descendant so we don't have to enumerate inputs.
+  formRoot.addEventListener("input", wipe);
+  formRoot.addEventListener("change", wipe);
+}
+
 // ─── Profile ──────────────────────────────────────────────────
 
 async function renderProfile() {
@@ -3009,6 +3720,11 @@ function mkProfileCard(p) {
       saveBtn.disabled = false;
     }
   });
+  // Format phone as the user types: "9498879051" → "(949) 887-9051"
+  attachPhoneFormatter(g.querySelector("#prof-phone"));
+  // Clear the "Saved ✓" pill the instant any field changes — stale
+  // confirmation is misleading when there are pending edits.
+  clearSaveStatusOnEdit(g, status);
   return { el: g, getValues };
 }
 
@@ -3116,6 +3832,10 @@ async function renderSettings() {
 
   const saveBtn = saveRow.querySelector("#tune-save-btn");
   const status = saveRow.querySelector("#tune-save-status");
+  // Clear the "Saved ✓" pill the moment any field on the Settings page
+  // changes — listening on `root` covers tune card, integrations card,
+  // and account card via event bubbling.
+  clearSaveStatusOnEdit(root, status);
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     status.textContent = "Saving…";
@@ -3876,7 +4596,8 @@ function confirmModal({ title, body, confirmText = "Confirm", cancelText = "Canc
   });
 }
 
-async function resumeAgent() {
+async function resumeAgent(opts) {
+  const silent = opts?.silent === true;
   const row = drawerState?.row;
   const runId = row?.audit?.run_id;
   if (!runId) return;
@@ -3890,8 +4611,12 @@ async function resumeAgent() {
     await loadHistory();
     updateNavCounts();
     if (currentNav === "bills") renderBills();
-    // Stay in the drawer so the user can see the state flip back to
-    // Negotiating with the Stop button ready.
+    // When invoked from the carousel, the user never opened the drawer —
+    // re-opening it after the action would feel like an unwanted modal.
+    // Skip the drawer hand-off and just leave them on the list. The
+    // attention card will fall away on the next render since the
+    // negotiation has flipped back to active.
+    if (silent) return;
     const updatedRow = findUpdatedRowAfterRefresh(row);
     if (updatedRow) {
       drawerState.row = updatedRow;
@@ -4106,7 +4831,7 @@ function renderDrawerStats(row, report) {
   const summary = report?.summary ?? {};
   const was = summary.original_balance ?? row.balance ?? 0;
   const now = summary.final_balance ?? row.balance ?? 0;
-  const saved = summary.patient_saved ?? 0;
+  const saved = clampSaved(summary.patient_saved, was);
   const channel = summary.channel_used ?? "—";
 
   // Traffic-light status. Active = yellow, resolved = green, attention = red.
@@ -4233,7 +4958,7 @@ function renderDrawerContact(row) {
   const isFixture = !audit?.run_id; // mock bills have no run; nothing to save
   const helpLine = audit?.can_launch
     ? `<div class="contact-help-ok">Agent ready to launch.</div>`
-    : `<div class="contact-help-warn">Add a support email or phone, then save — that unlocks the agent.</div>`;
+    : `<div class="contact-help-warn">Add a billing email below — that's how Bonsai will reach the company. A phone number is optional. Save when you're done.</div>`;
   const disabled = isFixture ? " disabled" : "";
 
   const kindOptions = BILL_KIND_OPTIONS
@@ -4283,6 +5008,8 @@ function renderDrawerContact(row) {
 function wireDrawerContact(row) {
   const form = $("#drawer-contact-form");
   if (!form) return;
+  // Format the support phone as the user types.
+  attachPhoneFormatter(document.getElementById("contact-support-phone"));
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     void saveDrawerContact(row);
@@ -4371,7 +5098,7 @@ const ATTENTION_CONTENT = {
       "Use Feedback if you want to steer tone, channels, or talking points.",
       "Click Approve & start when you're ready.",
     ],
-    primary: { id: "start", label: "Approve & start" },
+    primary: { id: "start", label: "Approve & lower my bill" },
   },
   escalated: {
     tone: "urgent",
@@ -4542,13 +5269,14 @@ async function promptResumeMode(row) {
   }
 }
 
-function handleAttentionAction(action, row) {
+function handleAttentionAction(action, row, opts) {
+  const silent = opts?.silent === true;
   const runId = row?.audit?.run_id;
   // verify_outcome lives outside the start/resume machinery — it just
   // POSTs the user's verdict and re-renders. "Yes" submits immediately;
   // "No or partial" pops a small modal so we can capture notes.
   if (action === "outcome_yes") {
-    void submitOutcomeVerification(row, "yes");
+    void submitOutcomeVerification(row, "yes", undefined, { silent });
     return;
   }
   if (action === "outcome_no_match") {
@@ -4565,7 +5293,11 @@ function handleAttentionAction(action, row) {
       // through to resume so the agent's next round can confirm. The user
       // can also leave a Feedback note ("accept their counter, no further
       // negotiation") to make it explicit.
-      void resumeAgent();
+      void resumeAgent({ silent });
+      // Close the drawer once the user's approved — keeping it open after
+      // they hit the primary action feels like the action didn't take.
+      // From the carousel the drawer isn't open; closeBillDrawer is a no-op.
+      if (!silent) closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -4573,12 +5305,13 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "resolved";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    void openBillDrawer(row);
+    if (!silent) closeBillDrawer();
     return;
   }
   if (action === "start" || action === "resume" || action === "retry" || action === "keep_negotiating") {
     if (runId) {
-      void resumeAgent();
+      void resumeAgent({ silent });
+      if (!silent) closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -4586,14 +5319,15 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "active";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    void openBillDrawer(row);
+    if (!silent) closeBillDrawer();
   }
 }
 
 // POST the user's outcome verdict to the server. After it lands, refresh
 // the bills list so the row drops out of the attention bucket and the
 // drawer re-renders with the verified state.
-async function submitOutcomeVerification(row, verified, notes) {
+async function submitOutcomeVerification(row, verified, notes, opts) {
+  const silent = opts?.silent === true;
   const runId = row?.audit?.run_id;
   if (!runId) return;
   try {
@@ -4618,6 +5352,9 @@ async function submitOutcomeVerification(row, verified, notes) {
     row.attentionReason = null;
     if (currentNav === "bills") renderBills();
     updateNavCounts();
+    // From the carousel the drawer was never open — re-opening it after
+    // the user hits "Yes, it matched" feels like the action backfired.
+    if (silent) return;
     // Re-open so the drawer reflects the new state (e.g. status pill).
     void openBillDrawer(row);
   } catch (err) {
@@ -4820,7 +5557,7 @@ function buildSyntheticAttentionTimeline(row) {
       tone: "red",
     });
   }
-  return events.sort((a, b) => a.ts - b.ts);
+  return events.sort((a, b) => b.ts - a.ts);
 }
 
 /* Build a sequenced activity timeline from the full report. */
@@ -4866,7 +5603,7 @@ function buildTimelineEvents(row, report) {
       channel: "watch",
       tone: "ink",
     });
-    return events.sort((a, b) => a.ts - b.ts);
+    return events.sort((a, b) => b.ts - a.ts);
   }
 
   if (!report) return events;
@@ -5027,7 +5764,7 @@ function buildTimelineEvents(row, report) {
     });
   }
 
-  return events.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  return events.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
 
 function renderActivityTimeline(row, report) {

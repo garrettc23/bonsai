@@ -226,6 +226,17 @@ interface PendingRun {
   outcome_verified?: "yes" | "no" | "partial";
   outcome_notes?: string;
   outcome_verified_at?: number;
+  /**
+   * Complaint flow only. Pre-drafted opportunity tactics produced by the
+   * complaint composer at intake time, so /api/opportunities can return
+   * them without a second Opus call.
+   */
+  complaint_opportunities?: Array<{
+    title: string;
+    description: string;
+    dollar_estimate: number;
+    icon: string;
+  }>;
 }
 
 /** Days after a resolved negotiation before we nudge the user to verify. */
@@ -397,15 +408,26 @@ async function handleAudit(req: Request): Promise<Response> {
     channel = (typeof ch === "string" && ch ? ch : "persistent") as Channel;
   }
 
-  const partial = await runAuditPhase({
-    billPdfPath: billPath,
-    eobPdfPath: eobPath,
-    billFixtureName: fixtureName,
-    analyzeInput,
-    channel,
-    email_persona,
-    voice_persona,
-  });
+  // Fast path: if a pre-computed audit report ships next to the fixture
+  // (fixtures/<name>.report.json), skip the analyzer call entirely and
+  // return the cached audit. "Try a sample" then completes in ~50ms
+  // instead of ~30-45s, which is what users expect from a "demo" button.
+  // Real uploads (no fixture name match) always run the live analyzer.
+  const cachedReportPath = join(FIXTURES_DIR, `${fixtureName}.report.json`);
+  let partial;
+  if (existsSync(cachedReportPath)) {
+    partial = JSON.parse(readFileSync(cachedReportPath, "utf-8"));
+  } else {
+    partial = await runAuditPhase({
+      billPdfPath: billPath,
+      eobPdfPath: eobPath,
+      billFixtureName: fixtureName,
+      analyzeInput,
+      channel,
+      email_persona,
+      voice_persona,
+    });
+  }
 
   const billPaths = multipartMeta?.bill_paths ?? [billPath];
   const billNames = multipartMeta?.bill_names ?? [`${fixtureName}.pdf`];
@@ -434,15 +456,353 @@ async function handleAudit(req: Request): Promise<Response> {
     contact: defaultContactForFixture(fixtureName),
     contact_status: "pending",
   };
+  // Fast path again: when we served a cached audit report for a fixture,
+  // also pre-resolve the provider contact synchronously so the plan-
+  // review page doesn't show "Looking up…" for 5-10s on a "Try a sample"
+  // demo. Real uploads still hit the web-search resolver in background.
+  if (existsSync(cachedReportPath) && run.contact) {
+    run.contact_status = "resolved";
+    run.resolved_contact = {
+      email: run.contact.support_email ?? null,
+      phone: run.contact.support_phone ?? null,
+      source_urls: [],
+      confidence: "high",
+      notes: "Pre-seeded for the sample fixture.",
+      resolved_at: Date.now(),
+    };
+  }
   savePending(run);
 
-  // Kick off the provider-contact lookup in the background. The plan-review
+  // Kick off the provider-contact lookup in the background only when we
+  // didn't already resolve from the fixture pre-seed. The plan-review
   // tab polls /api/contact/:run_id and shows it as soon as it lands.
-  kickoffContactResolution(run.run_id).catch((err) => {
-    console.error(`[contact ${run.run_id}]`, err);
-  });
+  if (run.contact_status !== "resolved") {
+    kickoffContactResolution(run.run_id).catch((err) => {
+      console.error(`[contact ${run.run_id}]`, err);
+    });
+  }
 
   return Response.json({ run_id: run.run_id, report: partial });
+}
+
+/**
+ * Negotiate something that isn't a bill — flight-delay refunds, defective
+ * orders, service complaints, etc. Takes a free-form description, drafts a
+ * complaint letter via Opus, and lands the user in the same plan-review
+ * flow the bill audit produces. The PendingRun is "complaint-shaped":
+ * empty errors[], non-bill metadata, complaint-style appeal letter.
+ */
+/**
+ * One-shot complaint intake. Creates the run with status="negotiating"
+ * immediately and returns the run_id so the client can navigate straight
+ * to Bills. The slow Opus draft happens in the background; once it lands,
+ * we save the appeal letter onto the run and call kickoffNegotiation,
+ * which is what actually sends the email.
+ */
+async function handleComplaint(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    company?: string;
+    description?: string;
+    desired_outcome?: string;
+    support_email?: string | null;
+    support_phone?: string | null;
+  } | null;
+  const company = body?.company?.trim();
+  const description = body?.description?.trim();
+  if (!company || !description) {
+    return Response.json(
+      { error: "Missing company or description" },
+      { status: 400 },
+    );
+  }
+  const desired = body?.desired_outcome?.trim() ?? "";
+  const supportEmail = (typeof body?.support_email === "string" ? body!.support_email.trim() : "") || "";
+  const supportPhone = (typeof body?.support_phone === "string" ? body!.support_phone.trim() : "") || "";
+  if (!supportEmail && !supportPhone) {
+    return Response.json(
+      { error: "missing_contact", message: "Add a support email or phone before submitting." },
+      { status: 400 },
+    );
+  }
+
+  // Operator-side gate, same one /api/approve runs. We refuse to create
+  // the run at all if real email isn't configured — better than letting
+  // a complaint sit in Bills with no way to actually send it.
+  const resendKey = process.env.RESEND_API_KEY ?? null;
+  const resendFrom = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL ?? null;
+  if (!resendKey || !resendFrom) {
+    return Response.json(
+      {
+        error: "email_not_configured",
+        message:
+          "Bonsai isn't set up to send real email yet. The operator needs to verify a Resend sending domain and set RESEND_API_KEY + RESEND_FROM.",
+      },
+      { status: 503 },
+    );
+  }
+
+  // Build a stub BonsaiReport. The appeal letter is empty for now — the
+  // background worker fills it in once Opus is done drafting.
+  const fixtureName = `complaint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const partial: BonsaiReport = {
+    analyzer: {
+      metadata: {
+        provider_name: company,
+        provider_billing_address: "",
+        patient_name: "",
+        claim_number: "",
+        date_of_service: "",
+        insurer_name: "",
+        eob_patient_responsibility: 0,
+        bill_current_balance_due: 0,
+        account_number: "",
+        bill_kind: "other",
+      },
+      errors: [],
+      summary: {
+        high_confidence_total: 0,
+        worth_reviewing_total: 0,
+        bill_total_disputed: 0,
+        headline: `Complaint to ${company}`,
+      },
+      grounding_failures: [],
+      meta: {
+        model: "claude-opus-4-7",
+        input_tokens: 0,
+        output_tokens: 0,
+        elapsed_ms: 0,
+        tool_turns: 0,
+      },
+    },
+    appeal: {
+      markdown: "",
+      subject: `Complaint regarding ${company}`,
+      defensible_total: 0,
+      used_placeholders: [],
+    },
+    strategy: {
+      chosen: "persistent",
+      reason: "Complaint mode: email the company, escalate to phone if they stonewall.",
+    },
+    summary: {
+      original_balance: 0,
+      defensible_disputed: 0,
+      final_balance: null,
+      patient_saved: null,
+      channel_used: "persistent",
+      outcome: "in_progress",
+      outcome_detail: "Drafting the complaint letter.",
+    },
+  };
+
+  const run: PendingRun = {
+    run_id: newRunId(),
+    fixture_name: fixtureName,
+    bill_path: "",
+    bill_paths: [],
+    bill_names: [],
+    channel: "persistent",
+    partial_report: partial,
+    qa: [],
+    created_at: Date.now(),
+    // Skip the audited→negotiating dance: complaint flow has no review
+    // step, so we go straight to negotiating once the user submits.
+    status: "negotiating",
+    approved_at: Date.now(),
+    contact: {
+      support_email: supportEmail || null,
+      support_phone: supportPhone || null,
+      support_portal_url: null,
+      account_holder_name: null,
+      bill_kind: "other",
+    },
+    contact_status: "resolved",
+    resolved_contact: {
+      email: supportEmail || null,
+      phone: supportPhone || null,
+      source_urls: [],
+      confidence: "high",
+      notes: "User-provided.",
+      user_edited: true,
+      resolved_at: Date.now(),
+    },
+  };
+  savePending(run);
+
+  // Hand off to the background worker. It drafts via Opus, saves the letter
+  // onto the run, then calls kickoffNegotiation which actually sends the
+  // email. The user is already on Bills by the time any of this completes.
+  void draftComplaintAndKickoff(run.run_id, { company, description, desired }).catch((err) => {
+    console.error(`[complaint draft ${run.run_id}]`, err);
+    const latest = loadPending(run.run_id);
+    if (latest) {
+      latest.status = "failed";
+      latest.error = (err as Error).message;
+      savePending(latest);
+    }
+  });
+
+  return Response.json({ run_id: run.run_id });
+}
+
+/**
+ * Background worker for the complaint flow. Drafts the letter via Opus,
+ * persists it onto the run, then kicks off the actual outbound negotiation.
+ * Run on its own so /api/complaint can return the run_id immediately.
+ */
+async function draftComplaintAndKickoff(
+  runId: string,
+  inputs: { company: string; description: string; desired: string },
+): Promise<void> {
+  const system = [
+    "You are Bonsai, drafting a formal complaint letter on the user's behalf to a company.",
+    "The user describes the issue and what they want; you produce a tight, persuasive complaint letter that:",
+    "  - Opens with a clear ask (refund, replacement, credit, response within 14 days, etc.).",
+    "  - States the facts concisely. Reference any specifics the user gave (dates, amounts, order numbers).",
+    "  - Cites relevant consumer-protection levers when applicable: DOT 14 CFR Part 250 for flights, FTC Mail/Internet Order rule for online orders, Magnuson-Moss for warranties, state attorney-general / BBB / consumer-affairs as escalation.",
+    "  - Closes with a deadline + escalation path.",
+    "Tone: firm, professional, never threatening. 200-350 words. No prose outside the tool call.",
+    "",
+    "Also propose 3-5 strategy opportunities — specific tactics the user could pursue. Each gets a short title + 1-2 sentence description + an upper-bound dollar estimate (or 0 if money isn't the point).",
+  ].join("\n");
+
+  const userMsg = [
+    `Company: ${inputs.company}`,
+    `Issue: ${inputs.description}`,
+    inputs.desired ? `Desired outcome: ${inputs.desired}` : "",
+  ].filter(Boolean).join("\n");
+
+  const COMPLAINT_TOOL: Anthropic.Tool = {
+    name: "draft_complaint",
+    description: "Return the drafted complaint letter + tactical opportunities.",
+    input_schema: {
+      type: "object",
+      required: ["subject", "letter_markdown", "headline", "opportunities"],
+      properties: {
+        subject: { type: "string", description: "Short, professional subject line." },
+        letter_markdown: { type: "string", description: "The complaint letter body, markdown OK." },
+        headline: { type: "string", description: "1-line summary of what the user is asking for." },
+        opportunities: {
+          type: "array",
+          minItems: 3,
+          maxItems: 5,
+          items: {
+            type: "object",
+            required: ["title", "description", "dollar_estimate", "icon"],
+            properties: {
+              title: { type: "string" },
+              description: { type: "string" },
+              dollar_estimate: { type: "number", minimum: 0 },
+              icon: {
+                type: "string",
+                enum: ["shield", "scan", "pulse", "doc", "phone", "mail", "sparkle", "check"],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const anthropic = new Anthropic();
+  const resp = await anthropic.messages.create({
+    model: "claude-opus-4-7",
+    max_tokens: 1500,
+    system,
+    tools: [COMPLAINT_TOOL],
+    tool_choice: { type: "tool", name: "draft_complaint" },
+    messages: [{ role: "user", content: userMsg }],
+  });
+  const tool = resp.content.find(
+    (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "draft_complaint",
+  );
+  if (!tool) throw new Error("Model did not draft the complaint");
+  const drafted = tool.input as {
+    subject: string;
+    letter_markdown: string;
+    headline: string;
+    opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+  };
+
+  const run = loadPending(runId);
+  if (!run) return; // user must have deleted it
+  run.partial_report.appeal.markdown = drafted.letter_markdown;
+  run.partial_report.appeal.subject = drafted.subject;
+  run.partial_report.analyzer.summary.headline = drafted.headline;
+  run.partial_report.summary.outcome_detail = "Negotiation in progress.";
+  run.complaint_opportunities = drafted.opportunities;
+  savePending(run);
+
+  await kickoffNegotiation(runId);
+}
+
+/**
+ * Pre-draft chat for the complaint intake screen. The user is filling out
+ * the form (company / what happened / desired) and wants to ask Bonsai a
+ * question — "is this worth pursuing?", "what's a reasonable ask?", etc.
+ *
+ * No PendingRun exists yet at this point (the run is created when the user
+ * clicks Accept &amp; negotiate), so we keep the conversation client-side
+ * and re-send the full history on every turn. Stateless on the server.
+ */
+async function handleComplaintChat(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    company?: string;
+    description?: string;
+    desired_outcome?: string;
+    history?: Array<{ role: "user" | "assistant"; body: string }>;
+    message?: string;
+  } | null;
+  const message = body?.message?.trim();
+  if (!message) {
+    return Response.json({ error: "Missing message" }, { status: 400 });
+  }
+  const company = body?.company?.trim() ?? "";
+  const description = body?.description?.trim() ?? "";
+  const desired = body?.desired_outcome?.trim() ?? "";
+  const history = Array.isArray(body?.history) ? body!.history : [];
+
+  const system = [
+    "You are Bonsai, an advisor helping the user fill out a complaint or refund request before we contact the company on their behalf.",
+    "The user is mid-form. They may ask whether their case is strong, what to say, what to ask for, or how Bonsai will handle it.",
+    "Tone: warm, plain-language, encouraging. 1-3 sentences. No prefaces, no 'great question'.",
+    "DO NOT cite regulations, statutes, or legal codes (no 'DOT 14 CFR', 'Magnuson-Moss', 'FTC Mail Order Rule'). Keep it everyday-language. If the user is unsure whether they have a case, give a confidence-building answer in human terms.",
+    "Don't draft the full letter — the user hasn't hit Accept yet. Just answer what they asked.",
+    "",
+    "CURRENT FORM STATE:",
+    `Company: ${company || "(blank)"}`,
+    `Issue: ${description || "(blank)"}`,
+    `Desired outcome: ${desired || "(blank)"}`,
+  ].join("\n");
+
+  const messages: Anthropic.Messages.MessageParam[] = [];
+  for (const m of history) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    if (typeof m.body !== "string" || !m.body.trim()) continue;
+    messages.push({ role: m.role, content: m.body });
+  }
+  messages.push({ role: "user", content: message });
+
+  try {
+    const anthropic = new Anthropic();
+    const resp = await anthropic.messages.create({
+      model: "claude-opus-4-7",
+      max_tokens: 400,
+      system,
+      messages,
+    });
+    const reply = resp.content
+      .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (!reply) {
+      return Response.json({ error: "Model returned no text" }, { status: 502 });
+    }
+    return Response.json({ reply });
+  } catch (err) {
+    return Response.json({ error: (err as Error).message }, { status: 500 });
+  }
 }
 
 /**
@@ -520,6 +880,21 @@ async function handleContactOverride(req: Request): Promise<Response> {
     notes: "Manually entered by the user.",
     user_edited: true,
     resolved_at: Date.now(),
+  };
+  // Also mirror into `run.contact` — that's the field hasContactChannel
+  // reads at /api/approve. Without this, the user can override a contact
+  // here but the launch gate still 412s because it only sees the
+  // separately-saved drawer contact. Two contact fields existed for
+  // historical reasons (resolved_contact = AI suggestion, contact =
+  // user-typed in the drawer); for the plan-review card we keep them
+  // in lockstep.
+  run.contact = {
+    ...(run.contact ?? {}),
+    support_email: cleanEmail || null,
+    support_phone: cleanPhone || null,
+    bill_kind: run.contact?.bill_kind
+      ?? (run.partial_report?.analyzer?.metadata?.bill_kind as BillContactT["bill_kind"])
+      ?? "medical",
   };
   run.contact_status = "resolved";
   delete run.contact_error;
@@ -762,6 +1137,25 @@ async function handleOpportunities(req: Request): Promise<Response> {
   if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
   const run = loadPending(body.run_id);
   if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+
+  // Complaint flow: opportunities were drafted at intake time and stashed
+  // on the run. Just return them — no second Opus call.
+  if (run.complaint_opportunities && !run.plan_edits?.trim()) {
+    return Response.json({ opportunities: run.complaint_opportunities });
+  }
+  // Fast path: ship a hand-curated opportunities list for any fixture
+  // that has fixtures/<name>.opportunities.json next to its PDF. Skips a
+  // ~10s Opus call on the demo path. Bypassed when the user has chatted
+  // with the plan (run.plan_edits set) — we want their directive to
+  // actually steer the opportunities list, not get ignored. Real uploads
+  // always hit the live model below.
+  const cachedOppsPath = join(FIXTURES_DIR, `${run.fixture_name}.opportunities.json`);
+  if (existsSync(cachedOppsPath) && !run.plan_edits?.trim()) {
+    const cached = JSON.parse(readFileSync(cachedOppsPath, "utf-8")) as {
+      opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+    };
+    return Response.json({ opportunities: cached.opportunities });
+  }
 
   const r = run.partial_report;
   const meta = r.analyzer?.metadata ?? {};
@@ -1586,7 +1980,12 @@ async function handleReceipts(): Promise<Response> {
     }
     const summary = report?.summary ?? {};
     const meta = report?.analyzer?.metadata ?? {};
-    const saved = Number(summary.patient_saved ?? 0);
+    const rawSaved = Number(summary.patient_saved ?? 0);
+    const original = Number(summary.original_balance ?? 0);
+    // Defensive clamp: even if a legacy report has saved > original
+    // (which can't happen physically), display it as bounded. New runs
+    // already clamp at the orchestrator; this protects pre-fix data.
+    const saved = Math.max(0, Math.min(rawSaved, original > 0 ? original : rawSaved));
     if (!Number.isFinite(saved) || saved <= 0) continue;
     // Source quote: pick the highest-impact HIGH-confidence finding's
     // line_quote — the dollar tied to the receipt should trace back to
@@ -1976,12 +2375,26 @@ function userPublic(user: User): {
   id: string;
   email: string;
   accepted_terms_at: number | null;
+  early_access_at: number | null;
 } {
   return {
     id: user.id,
     email: user.email,
     accepted_terms_at: user.accepted_terms_at,
+    early_access_at: user.early_access_at,
   };
+}
+
+async function handleJoinEarlyAccess(user: User): Promise<Response> {
+  const { joinEarlyAccess } = await import("./lib/auth.ts");
+  const updated = joinEarlyAccess(user.id);
+  return Response.json({ user: userPublic(updated) });
+}
+
+async function handleLeaveEarlyAccess(user: User): Promise<Response> {
+  const { leaveEarlyAccess } = await import("./lib/auth.ts");
+  const updated = leaveEarlyAccess(user.id);
+  return Response.json({ user: userPublic(updated) });
 }
 
 async function handleSignup(req: Request): Promise<Response> {
@@ -2271,6 +2684,8 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
         if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);
         if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
+        if (req.method === "POST" && url.pathname === "/api/complaint") return handleComplaint(req);
+        if (req.method === "POST" && url.pathname === "/api/complaint/chat") return handleComplaintChat(req);
         if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
         if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
         if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);
@@ -2280,6 +2695,8 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
         if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
+        if (req.method === "POST" && url.pathname === "/api/early-access") return handleJoinEarlyAccess(user);
+        if (req.method === "DELETE" && url.pathname === "/api/early-access") return handleLeaveEarlyAccess(user);
         const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
         if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
         const contactStatusMatch = url.pathname.match(/^\/api\/contact\/([a-zA-Z0-9_-]+)$/);
