@@ -3232,14 +3232,22 @@ function renderBills() {
     // Treats it as "watching" instead; the row's own chip ("Awaiting your
     // approval") still surfaces the state on the Bills page.
     else lifecycle = null;
+    // After the user records a Comparison switch as Complete, the bill is
+    // effectively a different service: new provider, new monthly price.
+    // Surface that on the row so Negotiation reflects reality, not the
+    // stale pre-switch values. The audit's original metadata still wins
+    // for display name fallbacks and for the audit-time evidence chain.
+    const latestSwitch = (a.completed_switches ?? []).slice(-1)[0] ?? null;
+    const switchedVendor = latestSwitch?.new_provider ?? null;
+    const switchedBalance = latestSwitch?.new_amount ?? null;
     return {
       id: `audit-${a.name}`,
       kind: "audit",
-      vendor: displayByName.get(a.name) ?? a.provider_name ?? a.name,
+      vendor: switchedVendor ?? displayByName.get(a.name) ?? a.provider_name ?? a.name,
       account: a.patient_name ? `${a.patient_name} · ${a.date_of_service ?? "—"}` : (a.date_of_service ?? "One-time bill"),
       lastCheck: relTime(a.modified),
       addedAt: a.modified ?? Date.now(),
-      balance: a.final_balance ?? a.original_balance ?? 0,
+      balance: switchedBalance ?? a.final_balance ?? a.original_balance ?? 0,
       rate: "",
       category: inferCategory(a),
       score,
@@ -3895,16 +3903,59 @@ function openSwitchModal(offer) {
       : "Real savings depend on your usage and any switch fees from your current provider.";
   }
 
-  // One-button flow: the user clicks "Switch completed" once they've
-  // signed up with the recommended provider. We log the switch using the
-  // recommended monthly price (offer.offered) — they already saw it on
-  // the card, no point asking them to re-type it.
+  // The user picks which bill this switch is for from a dropdown of all
+  // their attached bills, then enters the new monthly amount they're
+  // paying. Comparison is a top-level nav; the previous flow assumed the
+  // bill drawer was open, which broke "Switch completed" in the most
+  // common entry path.
   const recommendedName = offer.source ?? "the recommended provider";
   const currentName = offer.baseline?.current_provider ?? "your current provider";
   const errEl = $("#switch-amount-error");
   if (errEl) {
     errEl.hidden = true;
     errEl.textContent = "";
+  }
+
+  // Populate the bill picker. Default-select the most likely match: a
+  // bill in history whose provider matches `offer.baseline.current_provider`,
+  // falling back to the currently-open drawer row, then to the first bill.
+  const select = $("#switch-bill-select");
+  const audits = (historyCache?.audits ?? []).filter((a) => a.run_id);
+  if (select) {
+    select.innerHTML = "";
+    if (audits.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No bills attached — upload one first.";
+      opt.disabled = true;
+      opt.selected = true;
+      select.appendChild(opt);
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      const drawerRunId = drawerState?.row?.audit?.run_id ?? null;
+      const baselineMatch = audits.find(
+        (a) => a.provider_name && a.provider_name === offer.baseline?.current_provider,
+      );
+      const preferredId = drawerRunId ?? baselineMatch?.run_id ?? audits[0].run_id;
+      for (const a of audits) {
+        const opt = document.createElement("option");
+        opt.value = a.run_id;
+        const label = a.provider_name ?? a.name ?? "Bill";
+        const balance = a.original_balance != null ? ` · ${fmt$(a.original_balance)}` : "";
+        opt.textContent = `${label}${balance}`;
+        if (a.run_id === preferredId) opt.selected = true;
+        select.appendChild(opt);
+      }
+    }
+  }
+
+  // Default the amount input to the offer's recommended price — the user
+  // can edit if their actual signup price differs (promo, discount, etc.).
+  const amountInput = $("#switch-amount-input");
+  if (amountInput) {
+    const def = Number(offer.offered ?? 0);
+    amountInput.value = Number.isFinite(def) && def >= 0 ? def.toFixed(2) : "";
   }
 
   scrim.hidden = false;
@@ -3917,7 +3968,7 @@ function openSwitchModal(offer) {
   const completeBtn = $("#switch-complete");
   const prevBtnText = completeBtn ? completeBtn.textContent : "Switch completed";
   if (completeBtn) {
-    completeBtn.disabled = false;
+    completeBtn.disabled = audits.length === 0;
     completeBtn.textContent = "Switch completed";
   }
 
@@ -3941,14 +3992,23 @@ function openSwitchModal(offer) {
 
   if (completeBtn) {
     completeBtn.onclick = async () => {
-      const runId = drawerState?.row?.audit?.run_id;
       if (errEl) {
         errEl.hidden = true;
         errEl.textContent = "";
       }
-      if (!runId) {
+      const chosenRunId = (select?.value ?? "").trim();
+      if (!chosenRunId) {
         if (errEl) {
-          errEl.textContent = "Couldn't find the bill this offer belongs to. Refresh and try again.";
+          errEl.textContent = "Pick which bill this switch is for.";
+          errEl.hidden = false;
+        }
+        return;
+      }
+      const raw = (amountInput?.value ?? "").trim();
+      const amount = Number(raw);
+      if (!raw || !Number.isFinite(amount) || amount < 0) {
+        if (errEl) {
+          errEl.textContent = "Enter a valid monthly amount in dollars.";
           errEl.hidden = false;
         }
         return;
@@ -3960,14 +4020,11 @@ function openSwitchModal(offer) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            run_id: runId,
+            run_id: chosenRunId,
             category: offer.category ?? null,
             current_provider: currentName,
             new_provider: recommendedName,
-            // We log the recommended price as the new monthly amount —
-            // the user just signed up for that plan, so that's what
-            // they're paying now. No need to re-prompt.
-            new_amount: Number(offer.offered ?? 0),
+            new_amount: amount,
           }),
         });
         if (!res.ok) {
@@ -3975,14 +4032,18 @@ function openSwitchModal(offer) {
           throw new Error(j?.message ?? j?.error ?? res.statusText);
         }
         cleanup();
-        // Reload history + drawer so the activity log immediately shows
-        // the new switch on the bill's Activity tab.
+        // Reload history so the Negotiation tab's row + drawer Activity
+        // tab immediately reflect the new provider + amount.
         await loadHistory();
-        const updated = findUpdatedRowAfterRefresh(drawerState.row);
-        if (updated) {
-          drawerState.row = updated;
-          openBillDrawer(updated);
+        if (currentNav === "bills") renderBills();
+        if (drawerState?.row) {
+          const updated = findUpdatedRowAfterRefresh(drawerState.row);
+          if (updated) {
+            drawerState.row = updated;
+            openBillDrawer(updated);
+          }
         }
+        showToast(`Switched to ${recommendedName}.`);
       } catch (err) {
         if (errEl) {
           errEl.textContent = `Couldn't save: ${err?.message ?? err}`;
@@ -5136,10 +5197,18 @@ async function deleteBill() {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ run_id: runId }),
   })
-    .then((res) => {
+    .then(async (res) => {
       if (!res.ok) {
         console.warn(`[delete] server returned ${res.status} for ${runId}`);
       }
+      // Comparison page reads /api/offer-history, which the server scopes
+      // to currently-active runs. After a delete, the offers for that run
+      // are gone from disk and filtered from the projection — but the
+      // SPA's local offersCache is now stale until the next nav. Refresh
+      // it explicitly so deleting every bill empties the Comparison tab
+      // immediately, no manual refresh required.
+      await loadOffers();
+      if (currentNav === "offers") renderOffers();
     })
     .catch((err) => {
       console.warn(`[delete] network error for ${runId}:`, err);
