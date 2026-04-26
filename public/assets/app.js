@@ -2297,6 +2297,58 @@ function renderConversation(report) {
  * verbatim when an audit lands. That avoids re-creating the table /
  * filters / banner from scratch every time a poll cycle runs.
  */
+/**
+ * Custom hero for the Comparison tab. Like renderHeroEmptyView, but the
+ * CTA is an early-access signup that persists on the user record. After
+ * signup the button text flips to "Added to early access" and stays
+ * disabled — every subsequent visit (even after a reload) reflects the
+ * already-signed-up state because we read currentUser.early_access_at.
+ */
+function renderEarlyAccessHero(view) {
+  if (view.querySelector(":scope > .empty-hero")) return;
+
+  const stash = document.createElement("div");
+  stash.style.display = "none";
+  while (view.firstChild) stash.appendChild(view.firstChild);
+
+  const alreadyJoined = !!currentUser?.early_access_at;
+  const ctaLabel = alreadyJoined ? "Added to early access ✓" : "Sign up for early access";
+
+  const hero = document.createElement("div");
+  hero.className = "empty-hero";
+  hero.innerHTML = `
+    <div class="empty-hero-card">
+      <h2 class="empty-hero-title">Comparison is in beta</h2>
+      <p class="empty-hero-body">Bonsai will persistently look at other options for your recurring costs — phone plans, internet, insurance, subscriptions — so you're always paying the lowest price possible. No more digging through plans every year.</p>
+      <button type="button" class="btn btn-primary btn-lg empty-hero-cta" id="early-access-btn"${alreadyJoined ? " disabled" : ""}>${escapeHtml(ctaLabel)}</button>
+    </div>`;
+
+  hero.appendChild(stash);
+  hero.dataset.viewChildren = "1";
+  view.appendChild(hero);
+
+  const btn = hero.querySelector("#early-access-btn");
+  btn?.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      const res = await fetch("/api/early-access", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const { user } = await res.json();
+      if (user) currentUser = user;
+      btn.textContent = "Added to early access ✓";
+    } catch (err) {
+      console.warn("[early-access] signup failed", err);
+      btn.textContent = "Try again";
+      btn.disabled = false;
+    }
+  });
+}
+
 function renderHeroEmptyView(view, { title, body, cta }) {
   // If we already painted the empty state for this view, just bail —
   // re-render would lose attached event listeners on the CTA.
@@ -2781,21 +2833,16 @@ let offersFilter = "Recommended";
 function renderOffers() {
   updatePageHeader({
     eyebrow: "Comparison",
-    title: "Coming soon",
+    title: "Beta",
     stats: null,
   });
 
-  // Comparison is on the roadmap but not yet live. Render a permanent
-  // "coming soon" hero regardless of audit state — better than shipping
-  // an offer-hunt feature that's secretly simulator-driven.
+  // Comparison is in beta — we ship the hero with an early-access
+  // signup CTA. Clicking it persists on the user record so the button
+  // shows "Added to early access" on subsequent visits.
   const view = $("#view-offers");
   if (view) {
-    renderHeroEmptyView(view, {
-      title: "Comparison is on the way",
-      body:
-        "We'll surface side-by-side prices from competing providers — pharmacies, plans, carriers, marketplaces — anchored to the bills you've audited. Not live yet.",
-      cta: "Got it",
-    });
+    renderEarlyAccessHero(view);
     return;
   }
 

@@ -2037,12 +2037,20 @@ function userPublic(user: User): {
   id: string;
   email: string;
   accepted_terms_at: number | null;
+  early_access_at: number | null;
 } {
   return {
     id: user.id,
     email: user.email,
     accepted_terms_at: user.accepted_terms_at,
+    early_access_at: user.early_access_at,
   };
+}
+
+async function handleJoinEarlyAccess(user: User): Promise<Response> {
+  const { joinEarlyAccess } = await import("./lib/auth.ts");
+  const updated = joinEarlyAccess(user.id);
+  return Response.json({ user: userPublic(updated) });
 }
 
 async function handleSignup(req: Request): Promise<Response> {
@@ -2341,6 +2349,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
         if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
+        if (req.method === "POST" && url.pathname === "/api/early-access") return handleJoinEarlyAccess(user);
         const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
         if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
         const contactStatusMatch = url.pathname.match(/^\/api\/contact\/([a-zA-Z0-9_-]+)$/);

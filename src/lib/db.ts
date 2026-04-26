@@ -105,6 +105,10 @@ export function getDb(): Database {
     "email_verified_at INTEGER",
     "accepted_terms_at INTEGER",
     "pending_email TEXT",
+    // When the user clicked "Sign up for early access" on the Comparison
+    // page. Used both to display "Added to early access" on subsequent
+    // visits and to query who's interested in the comparison feature.
+    "early_access_at INTEGER",
   ]) {
     try { db.exec(`ALTER TABLE users ADD COLUMN ${col};`); } catch { /* already exists */ }
   }
