@@ -73,12 +73,15 @@ describe("projectOfferHistory — activeRunIds filter", () => {
     }
   });
 
-  test("legacy files without run_id still project (don't surprise-empty on deploy)", () => {
+  test("legacy files without run_id are dropped under strict mode (FIX K)", () => {
+    // Earlier behavior preserved legacy files to avoid surprise-emptying
+    // the UI on deploy, but that broke the "delete every bill, expect
+    // Comparison empty" promise. Strict filter wins.
     const dir = join(tmpdir(), `bonsai-legacy-${Date.now()}-${Math.random()}`);
     try {
       seedFile(dir, "1.json", makeRun("Costco", undefined));
       const cards = projectOfferHistory(dir, { activeRunIds: new Set() });
-      expect(cards.length).toBe(1);
+      expect(cards.length).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -3604,23 +3604,19 @@ function renderOffers() {
   restoreViewChildren(view);
 
   // The savings banner only earns the page real estate when Bonsai has
-  // actually found recommended cheaper alternatives. The figure is
-  // ANNUAL ("Annual savings if you switch to all recommended" — see the
-  // eyebrow in index.html), so we sum monthly saves and multiply by 12.
+  // actually found recommended cheaper alternatives.
   //
-  // Hard invariant: the displayed savings can never exceed what the user
-  // is paying TODAY across the recommended baselines. Two ways the naive
-  // sum can overshoot:
-  //   1. Multiple alternative offers for the same baseline (3 cheaper
-  //      pharmacies for one Rx) — user can only realize ONE, so we pick
-  //      the best per baseline and discard the rest.
-  //   2. Per-offer maths that produced saves > current. clampSaved
-  //      defends against that at projection time but we double-check
-  //      here as the headline is a marketing surface.
+  // Hard invariant: the displayed savings can never exceed the cumulative
+  // amount the user is paying across all attached bills. The previous
+  // formulation summed per-baseline currents and multiplied by 12 — wrong
+  // for one-time bills (a $6k hospital charge isn't recurring) AND wrong
+  // for multi-baseline single bills where the analyzer derived overlapping
+  // slices (an ER visit, an X-ray, and a hospital balance are all the same
+  // dollars). The safe ceiling is just sumOfBillTotals across all bills
+  // that have run_ids covered by the recommended offers.
   const recommended = offersCache.filter((o) => o.recommended);
-  // Group by baseline (provider + category) and keep the offer with the
-  // largest `saves` per group — that's the one the user would actually
-  // pick if they were switching all of them.
+  // Pick best per baseline so a single bill's three pharmacy alternatives
+  // don't all stack up.
   const bestByBaseline = new Map();
   for (const o of recommended) {
     const key = `${o.baseline?.current_provider ?? ""}|${o.category ?? ""}`;
@@ -3628,15 +3624,23 @@ function renderOffers() {
     if (!cur || (o.saves || 0) > (cur.saves || 0)) bestByBaseline.set(key, o);
   }
   const bestList = [...bestByBaseline.values()];
-  const monthlySaves = bestList.reduce((s, o) => s + (o.saves || 0), 0);
-  const monthlyCurrent = bestList.reduce((s, o) => s + (o.current || 0), 0);
-  const annualSaves = Math.min(monthlySaves, monthlyCurrent) * 12;
+  const rawSavings = bestList.reduce((s, o) => s + (o.saves || 0), 0);
+  // Cap at total user spend across attached bills. Sum every bill in the
+  // history cache (final_balance when resolved, else original_balance).
+  const audits = historyCache?.audits ?? [];
+  const totalAttachedSpend = audits.reduce((s, a) => {
+    const owed = a.final_balance ?? a.original_balance ?? 0;
+    return s + (Number.isFinite(owed) && owed > 0 ? owed : 0);
+  }, 0);
+  const cappedSavings = totalAttachedSpend > 0
+    ? Math.min(rawSavings, totalAttachedSpend)
+    : rawSavings;
   const banner = $("#offers-banner");
   if (banner) {
-    banner.hidden = bestList.length === 0 || annualSaves <= 0;
+    banner.hidden = bestList.length === 0 || cappedSavings <= 0;
   }
   const bannerAmt = $("#banner-amount");
-  if (bannerAmt) bannerAmt.textContent = fmt$(annualSaves);
+  if (bannerAmt) bannerAmt.textContent = fmt$(cappedSavings);
 
   // Filters — "Recommended" first, then "All", then per-category chips.
   const filtersRoot = $("#offers-filters");

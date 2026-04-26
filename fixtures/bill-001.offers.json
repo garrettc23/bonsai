@@ -1,120 +1,43 @@
 [
   {
     "baseline": {
-      "label": "St. Synthetic Regional Hospital — emergency / urgent care",
-      "category": "urgent_care",
-      "current_provider": "St. Synthetic Regional Hospital ER",
-      "current_price": 1680.00,
-      "specifics": "Emergency Dept Visit, Moderate Complexity (CPT 99284)"
-    },
-    "offers": [
-      {
-        "provider": "MinuteClinic at CVS",
-        "price_usd": 159.00,
-        "terms_url": "https://www.cvs.com/minuteclinic/services-and-prices",
-        "channel": "voice",
-        "notes": "MinuteClinic visits average $159 nationwide — for the same non-emergency complaint that landed you in the ER, this is the right venue next time. Walk-in or same-day appointments.",
-        "recommended": true,
-        "savings_vs_baseline": 1521.00
-      },
-      {
-        "provider": "Carbon Health Urgent Care",
-        "price_usd": 189.00,
-        "terms_url": "https://carbonhealth.com/services/urgent-care",
-        "channel": "voice",
-        "notes": "Same-day urgent care chain in 17 states. Average $189 for moderate-complexity visits — well under ER pricing for non-life-threatening symptoms.",
-        "recommended": false,
-        "savings_vs_baseline": 1491.00
-      }
-    ],
-    "best": {
-      "provider": "MinuteClinic at CVS",
-      "price_usd": 159.00,
-      "terms_url": "https://www.cvs.com/minuteclinic/services-and-prices",
-      "channel": "voice",
-      "notes": "MinuteClinic visits average $159 nationwide — for the same non-emergency complaint that landed you in the ER, this is the right venue next time. Walk-in or same-day appointments.",
-      "recommended": true,
-      "savings_vs_baseline": 1521.00
-    },
-    "outcome": "lower_price_found",
-    "headline": "Found MinuteClinic at $159 vs your $1,680 ER visit — saves $1,521 next time you need this kind of care.",
-    "total_monthly_savings": 1521.00,
-    "started_at": "2026-04-26T00:00:00.000Z",
-    "completed_at": "2026-04-26T00:00:00.000Z"
-  },
-  {
-    "baseline": {
-      "label": "St. Synthetic Regional Hospital — outpatient imaging",
-      "category": "imaging",
-      "current_provider": "St. Synthetic Regional Hospital Radiology",
-      "current_price": 468.00,
-      "specifics": "Chest X-ray, 2 views (CPT 71046)"
-    },
-    "offers": [
-      {
-        "provider": "RadiologyAssist Outpatient Imaging",
-        "price_usd": 90.00,
-        "terms_url": "https://radiologyassist.com/pricing",
-        "channel": "voice",
-        "notes": "Cash-pay outpatient imaging center — chest X-ray (2 views) is $90 nationally, vs the hospital's $468. Same diagnostic image quality.",
-        "recommended": true,
-        "savings_vs_baseline": 378.00
-      },
-      {
-        "provider": "RAYUS Radiology",
-        "price_usd": 110.00,
-        "terms_url": "https://www.rayusradiology.com/pricing",
-        "channel": "voice",
-        "notes": "Independent imaging network in 22 states. Direct cash-pay X-ray pricing typically $95–$125, no facility-fee markup.",
-        "recommended": false,
-        "savings_vs_baseline": 358.00
-      }
-    ],
-    "best": {
-      "provider": "RadiologyAssist Outpatient Imaging",
-      "price_usd": 90.00,
-      "terms_url": "https://radiologyassist.com/pricing",
-      "channel": "voice",
-      "notes": "Cash-pay outpatient imaging center — chest X-ray (2 views) is $90 nationally, vs the hospital's $468. Same diagnostic image quality.",
-      "recommended": true,
-      "savings_vs_baseline": 378.00
-    },
-    "outcome": "lower_price_found",
-    "headline": "Found RadiologyAssist at $90 vs the hospital's $468 — same image, 80% less.",
-    "total_monthly_savings": 378.00,
-    "started_at": "2026-04-26T00:00:00.000Z",
-    "completed_at": "2026-04-26T00:00:00.000Z"
-  },
-  {
-    "baseline": {
-      "label": "Hospital financial assistance / charity care",
+      "label": "St. Synthetic Regional Hospital — outstanding balance",
       "category": "hospital_bill",
       "current_provider": "St. Synthetic Regional Hospital",
       "current_price": 6371.50,
-      "specifics": "Outstanding balance after defensible adjustments"
+      "specifics": "Bill total after defensible adjustments"
     },
     "offers": [
       {
-        "provider": "St. Synthetic Financial Assistance Program",
+        "provider": "Hospital Financial Assistance Program",
         "price_usd": 0.00,
         "terms_url": "https://www.aha.org/financial-assistance-policies",
         "channel": "email",
-        "notes": "Every nonprofit hospital is required to maintain a written financial assistance policy under IRS section 501(r). Households up to 200% of the federal poverty level often qualify for 100% write-off; up to 400% commonly qualify for sliding-scale discounts of 50–80%. Apply concurrently with Bonsai's negotiation — they stack.",
+        "notes": "Every nonprofit hospital is required to maintain a written financial assistance policy under IRS 501(r). Households up to 200% of the federal poverty level often qualify for 100% write-off; up to 400% commonly qualify for 50–80% sliding-scale discounts. Apply alongside Bonsai's negotiation — they stack.",
         "recommended": true,
+        "savings_vs_baseline": 6371.50
+      },
+      {
+        "provider": "Dollar For (charity care advocacy)",
+        "price_usd": 0.00,
+        "terms_url": "https://dollarfor.org",
+        "channel": "email",
+        "notes": "Free nonprofit that helps patients apply to hospital charity-care programs. Average client outcome: $3,000+ written off. Useful when the hospital's own program paperwork is dense or denied initially.",
+        "recommended": false,
         "savings_vs_baseline": 6371.50
       }
     ],
     "best": {
-      "provider": "St. Synthetic Financial Assistance Program",
+      "provider": "Hospital Financial Assistance Program",
       "price_usd": 0.00,
       "terms_url": "https://www.aha.org/financial-assistance-policies",
       "channel": "email",
-      "notes": "Every nonprofit hospital is required to maintain a written financial assistance policy under IRS section 501(r). Households up to 200% of the federal poverty level often qualify for 100% write-off; up to 400% commonly qualify for sliding-scale discounts of 50–80%. Apply concurrently with Bonsai's negotiation — they stack.",
+      "notes": "Every nonprofit hospital is required to maintain a written financial assistance policy under IRS 501(r). Households up to 200% of the federal poverty level often qualify for 100% write-off; up to 400% commonly qualify for 50–80% sliding-scale discounts. Apply alongside Bonsai's negotiation — they stack.",
       "recommended": true,
       "savings_vs_baseline": 6371.50
     },
     "outcome": "lower_price_found",
-    "headline": "Hospital must offer financial assistance under federal law — apply directly for 50–100% write-off.",
+    "headline": "Federal law requires nonprofit hospitals to offer financial assistance — apply for 50–100% write-off.",
     "total_monthly_savings": 6371.50,
     "started_at": "2026-04-26T00:00:00.000Z",
     "completed_at": "2026-04-26T00:00:00.000Z"
