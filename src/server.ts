@@ -26,6 +26,7 @@ import {
   runBonsai,
   runAuditPhase,
   runNegotiationPhase,
+  chooseChannel,
   type Channel,
   type BonsaiReport,
 } from "./orchestrator.ts";
@@ -79,6 +80,7 @@ import { deleteBillByRunId } from "./lib/delete-bill.ts";
 import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
 import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
 import { dialVoiceForUser } from "./server/voice-dial.ts";
+import { maybeAdvancePersistentForUser } from "./server/persistent-advance.ts";
 import {
   handleVoiceWebhook,
   VOICE_TOOL_NAMES,
@@ -1457,6 +1459,32 @@ async function kickoffNegotiation(runId: string): Promise<void> {
     // them in sync. Backstop forward in the inbound webhook covers reps
     // who hit just Reply.
     const cc = profile.email ? [profile.email] : undefined;
+
+    // Re-evaluate the channel now that run.contact is final. The audit-time
+    // pick was best-effort; the user may have edited contact between audit
+    // and approve. Persist the override so the SPA's plan view stays in
+    // sync with what's actually about to fire.
+    const approveContact = {
+      hasEmail: Boolean(
+        (run.contact?.support_email && run.contact.support_email.trim()) ||
+          (run.resolved_contact?.email && run.resolved_contact.email.trim()),
+      ),
+      hasPhone: Boolean(
+        (run.contact?.support_phone && run.contact.support_phone.trim()) ||
+          (run.resolved_contact?.phone && run.resolved_contact.phone.trim()),
+      ),
+    };
+    const reevaluated = chooseChannel(
+      run.partial_report.analyzer,
+      run.channel ?? "auto",
+      approveContact,
+    );
+    if (reevaluated.chosen !== run.partial_report.strategy.chosen) {
+      run.partial_report.strategy = reevaluated;
+      run.partial_report.summary.channel_used = reevaluated.chosen;
+      savePending(run);
+    }
+
     const full = await runNegotiationPhase(run.partial_report, {
       billPdfPath: run.bill_path,
       eobPdfPath: run.eob_path,
@@ -2028,6 +2056,12 @@ async function handleListFixtures(): Promise<Response> {
 
 async function handleHistory(): Promise<Response> {
   const { readdirSync, statSync } = await import("node:fs");
+  // Persistent-mode threads need a periodic check to escalate stale email
+  // threads to voice. Throttled per-user to once per 5 minutes inside the
+  // helper, so the SPA's history poll can fire as often as it likes.
+  void maybeAdvancePersistentForUser(getCurrentUser()).catch((err) => {
+    console.error("[history] persistent advance failed:", err);
+  });
   const outDir = currentUserPaths().reportsDir;
   if (!existsSync(outDir)) return Response.json({ audits: [], letters: [] });
   const entries = readdirSync(outDir);

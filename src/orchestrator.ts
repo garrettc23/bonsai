@@ -7,11 +7,12 @@
  *   3. Choose a channel (email | voice | both) and execute negotiation.
  *   4. Return a single report object the UI can render.
  *
- * Strategy heuristic:
- *   - balance_billing finding AND defensible_total >= $1,500 → "voice first"
- *     (phone converts better on high-signal disputes).
- *   - Otherwise → email (cheaper, async, lower friction).
- *   - User can always override via channel option.
+ * Strategy heuristic (auto):
+ *   - email available, no phone → email
+ *   - phone available, no email → voice
+ *   - both available → persistent (email first, voice escalation after
+ *     24 working hours of no reply)
+ *   - User can always override via channel option (email/voice/persistent).
  *
  * Every step is simulated end-to-end unless Resend/ElevenLabs env vars are
  * set. Swapping to real is a one-env-var flip.
@@ -128,25 +129,30 @@ export interface BonsaiReport {
 }
 
 export function chooseChannel(
-  analyzer: AnalyzerResult,
+  _analyzer: AnalyzerResult,
   explicit: Channel,
+  contact: { hasEmail: boolean; hasPhone: boolean },
 ): { chosen: "email" | "voice" | "persistent"; reason: string } {
   if (explicit === "email") return { chosen: "email", reason: "Caller explicitly requested email." };
   if (explicit === "voice") return { chosen: "voice", reason: "Caller explicitly requested voice." };
   if (explicit === "persistent")
     return {
       chosen: "persistent",
-      reason: "Persistent mode: run email → voice until floor is hit or both channels exhausted.",
+      reason: "Persistent mode: email first, escalate to voice after 24 working hours of no reply.",
     };
-  const hasBB = analyzer.errors.some((e) => e.confidence === "high" && e.error_type === "balance_billing");
-  const total = analyzer.summary.high_confidence_total;
-  if (hasBB && total >= 1500) {
-    return {
-      chosen: "voice",
-      reason: `Balance-billing finding of $${total.toFixed(2)} — phone converts better than email on NSA disputes above $1,500.`,
-    };
+  if (!contact.hasEmail && !contact.hasPhone) {
+    throw new Error("chooseChannel: no contact channel available (caller must gate on hasContactChannel)");
   }
-  return { chosen: "email", reason: "No balance-billing envelope or dispute below $1,500 — email is the right first move." };
+  if (contact.hasEmail && !contact.hasPhone) {
+    return { chosen: "email", reason: "Email is the only contact channel on file — emailing the provider." };
+  }
+  if (!contact.hasEmail && contact.hasPhone) {
+    return { chosen: "voice", reason: "Phone is the only contact channel on file — calling the provider." };
+  }
+  return {
+    chosen: "persistent",
+    reason: "Both email and phone on file — emailing first, escalating to voice after 24 working hours of no reply.",
+  };
 }
 
 /**
@@ -169,7 +175,18 @@ export async function runAuditPhase(opts: RunBonsaiOpts): Promise<BonsaiReport> 
   });
 
   const appeal = generateAppealLetter(analyzer);
-  const strategy = chooseChannel(analyzer, opts.channel ?? "auto");
+  // Audit-time channel pick uses whatever contact info the caller has so
+  // the UI can show a recommendation. The authoritative pick happens at
+  // approve-time in kickoffNegotiation, where run.contact is populated.
+  const auditContact = {
+    hasEmail: Boolean(opts.provider_email && opts.provider_email.trim()),
+    hasPhone: Boolean(opts.provider_phone && opts.provider_phone.trim()),
+  };
+  const explicit = opts.channel ?? "auto";
+  const strategy =
+    explicit !== "auto" || auditContact.hasEmail || auditContact.hasPhone
+      ? chooseChannel(analyzer, explicit, auditContact)
+      : { chosen: "email" as const, reason: "Awaiting contact info — defaulting to email until the user fills it in." };
 
   const originalBalance = analyzer.metadata.bill_current_balance_due ?? 0;
   const defensible = analyzer.summary.high_confidence_total;
@@ -238,6 +255,7 @@ export async function runNegotiationPhase(
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
       cc: opts.cc,
+      run_id: opts.run_id,
     });
     report.persistent_run = run;
     // Surface the transcripts in the existing thread fields so the current
@@ -291,6 +309,7 @@ export async function runNegotiationPhase(
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
       cc: opts.cc,
+      run_id: opts.run_id,
     });
     let state = initState;
     saveNegotiationState(state);

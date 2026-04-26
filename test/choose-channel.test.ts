@@ -1,8 +1,13 @@
 /**
- * Channel-routing heuristic tests. The rule:
- *   explicit email/voice → honored verbatim
- *   auto + balance_billing + HIGH ≥ $1,500 → voice (phone converts better on NSA)
- *   auto + everything else → email (lower friction, leaves paper trail)
+ * Channel-routing rules.
+ *
+ * Auto picks based on what contact channels are on file (email/phone),
+ * not on bill amount or finding type. Email-first whenever email is
+ * available; voice when only phone; persistent (email → 24wh idle →
+ * voice) when both are present.
+ *
+ * Explicit caller choices (email/voice/persistent) win over the auto
+ * heuristic.
  */
 import { describe, expect, test } from "bun:test";
 import { chooseChannel } from "../src/orchestrator.ts";
@@ -39,45 +44,57 @@ function err(type: BillingError["error_type"], dollars: number): BillingError {
   };
 }
 
-describe("chooseChannel", () => {
-  test("honors explicit email", () => {
-    const a = fakeAnalyzer([err("balance_billing", 5000)], 5000);
-    expect(chooseChannel(a, "email").chosen).toBe("email");
+const a = fakeAnalyzer([err("balance_billing", 5000)], 5000);
+
+describe("chooseChannel — explicit overrides", () => {
+  test("explicit email is honored regardless of contact", () => {
+    expect(chooseChannel(a, "email", { hasEmail: false, hasPhone: false }).chosen).toBe("email");
+    expect(chooseChannel(a, "email", { hasEmail: true, hasPhone: true }).chosen).toBe("email");
   });
 
-  test("honors explicit voice even with no findings", () => {
-    const a = fakeAnalyzer([], 0);
-    expect(chooseChannel(a, "voice").chosen).toBe("voice");
+  test("explicit voice is honored regardless of contact", () => {
+    expect(chooseChannel(a, "voice", { hasEmail: true, hasPhone: false }).chosen).toBe("voice");
   });
 
-  test("auto + balance_billing above threshold → voice", () => {
-    const a = fakeAnalyzer([err("balance_billing", 3812)], 3812);
-    const r = chooseChannel(a, "auto");
+  test("explicit persistent is honored when both contacts on file", () => {
+    expect(chooseChannel(a, "persistent", { hasEmail: true, hasPhone: true }).chosen).toBe("persistent");
+  });
+});
+
+describe("chooseChannel — auto routing by contact", () => {
+  test("email only → email", () => {
+    const r = chooseChannel(a, "auto", { hasEmail: true, hasPhone: false });
+    expect(r.chosen).toBe("email");
+  });
+
+  test("phone only → voice", () => {
+    const r = chooseChannel(a, "auto", { hasEmail: false, hasPhone: true });
     expect(r.chosen).toBe("voice");
-    expect(r.reason).toContain("Balance-billing");
   });
 
-  test("auto + balance_billing below $1,500 → email", () => {
-    const a = fakeAnalyzer([err("balance_billing", 800)], 800);
-    expect(chooseChannel(a, "auto").chosen).toBe("email");
+  test("both on file → persistent", () => {
+    const r = chooseChannel(a, "auto", { hasEmail: true, hasPhone: true });
+    expect(r.chosen).toBe("persistent");
+    expect(r.reason).toContain("24 working hours");
   });
 
-  test("auto + no balance_billing → email regardless of total", () => {
-    const a = fakeAnalyzer(
-      [err("duplicate", 2000), err("denied_service", 3000)],
-      5000,
+  test("neither on file → throws (caller must gate)", () => {
+    expect(() => chooseChannel(a, "auto", { hasEmail: false, hasPhone: false })).toThrow(
+      /no contact channel/i,
     );
-    expect(chooseChannel(a, "auto").chosen).toBe("email");
+  });
+});
+
+describe("chooseChannel — old BB-$1500 rule is dead", () => {
+  test("balance_billing $5,000 with both contacts → persistent (NOT voice)", () => {
+    const big = fakeAnalyzer([err("balance_billing", 5000)], 5000);
+    expect(chooseChannel(big, "auto", { hasEmail: true, hasPhone: true }).chosen).toBe(
+      "persistent",
+    );
   });
 
-  test("auto + zero findings → email", () => {
-    const a = fakeAnalyzer([], 0);
-    expect(chooseChannel(a, "auto").chosen).toBe("email");
-  });
-
-  test("explicit choice wins over heuristic", () => {
-    // Would route to voice under auto, but user said email
-    const a = fakeAnalyzer([err("balance_billing", 10000)], 10000);
-    expect(chooseChannel(a, "email").chosen).toBe("email");
+  test("non-BB $5,000 with email only → email (no amount-based override)", () => {
+    const big = fakeAnalyzer([err("duplicate", 2000), err("denied_service", 3000)], 5000);
+    expect(chooseChannel(big, "auto", { hasEmail: true, hasPhone: false }).chosen).toBe("email");
   });
 });

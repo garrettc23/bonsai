@@ -1952,6 +1952,8 @@ function providerKindLabel() {
 
 function renderOpportunitiesSkeleton() {
   $("#opps-total").textContent = "—";
+  const qualifierEl = $("#opps-total-qualifier");
+  if (qualifierEl) qualifierEl.hidden = true;
   const ul = $("#opps-list");
   ul.innerHTML = "";
   for (let i = 0; i < 3; i++) {
@@ -2052,21 +2054,22 @@ function deriveReceiptItems(report) {
 
 function renderOpportunities() {
   if (!oppsState) return;
-  const { all, cap, dismissed, report } = oppsState;
+  const { all, dismissed, report } = oppsState;
   const visible = all.filter((o) => !dismissed.has(o.opp_id));
-  // Estimates may overlap (multiple strategies all chip at the same
-  // defensible amount), and savings can't exceed what the user owes.
-  // Clamp to the cap so the headline never goes north of their bill.
-  const rawTotal = visible.reduce((s, o) => s + (o.estimate ?? 0), 0);
-  const total = clampSaved(rawTotal, cap);
+  // Headline shows the raw sum so dismissing an opp reduces the figure
+  // 1:1 — what the user expects. Overlap with the bill cap is acknowledged
+  // by the "estimated" qualifier next to the dollar figure.
+  const total = visible.reduce((s, o) => s + (o.estimate ?? 0), 0);
 
   $("#opps-total").textContent = total > 0 ? fmt$(total) : "—";
+  const qualifierEl = $("#opps-total-qualifier");
+  if (qualifierEl) qualifierEl.hidden = total <= 0;
 
   const provider = report?.analyzer?.metadata?.provider_name ?? "the provider";
   const titleEl = $("#review-title");
   if (titleEl) {
     titleEl.textContent = total > 0
-      ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
+      ? `We estimate we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
       : "Bill reviewed — a few angles to try.";
   }
   const subEl = $("#review-sub");
@@ -3684,14 +3687,11 @@ function buildOfferCard(o) {
     <div class="offer-actions">
       <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
       <button class="btn btn-ghost" data-action="compare">Compare</button>
-      <button class="btn btn-primary" data-action="hunt">Switch for me</button>
+      <button class="btn btn-primary" data-action="switch">Switch</button>
     </div>`;
-  const switchBtn = card.querySelector('[data-action="hunt"]');
-  if (switchBtn && o.baseline) {
-    switchBtn.addEventListener("click", () => runOfferHuntForCard(o, card));
-  } else if (switchBtn) {
-    switchBtn.disabled = true;
-    switchBtn.title = "No baseline wired for this offer";
+  const switchBtn = card.querySelector('[data-action="switch"]');
+  if (switchBtn) {
+    switchBtn.addEventListener("click", () => openSwitchModal(o));
   }
   const compareBtn = card.querySelector('[data-action="compare"]');
   if (compareBtn) {
@@ -3758,13 +3758,8 @@ function openCompareModal(offer, card) {
   setIfExists("#cmp-confidence", "—");
 
   const switchBtn = $("#cmp-switch");
-  if (offer.baseline) {
-    switchBtn.disabled = false;
-    switchBtn.title = "";
-  } else {
-    switchBtn.disabled = true;
-    switchBtn.title = "No baseline wired for this offer";
-  }
+  switchBtn.disabled = false;
+  switchBtn.title = "";
 
   scrim.hidden = false;
   modal.hidden = false;
@@ -3790,12 +3785,97 @@ function openCompareModal(offer, card) {
   document.addEventListener("keydown", onKey);
   switchBtn.onclick = () => {
     cleanup();
-    if (offer.baseline && card) {
-      void runOfferHuntForCard(offer, card);
-      // Scroll to the card so the user sees the hunt panel populate.
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
+    openSwitchModal(offer);
   };
+}
+
+/**
+ * Per-category sign-up step. Generic enough that we don't need a verified
+ * source URL to be useful — fall back to "find their sign-up page" wording.
+ */
+function switchSignupStep(offer) {
+  const provider = offer.source ?? "the recommended provider";
+  const url = offer.terms_url || offer.source_url;
+  if (url) {
+    return `Sign up at <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(provider)}</a>.`;
+  }
+  return `Sign up with ${escapeHtml(provider)} (find their sign-up page on their site).`;
+}
+
+function switchMatchStep(offer) {
+  const cat = (offer.category ?? "").toLowerCase();
+  if (cat.includes("prescription") || cat.includes("rx")) {
+    return "Match the same medication, dose, and quantity so the price comparison stays apples-to-apples.";
+  }
+  if (cat.includes("insurance")) {
+    return "Pick the same coverage tier and deductible as your current plan so you're comparing like for like.";
+  }
+  if (cat.includes("internet") || cat.includes("telecom") || cat.includes("phone")) {
+    return "Pick the same speed tier (or as close as available) so the comparison stays apples-to-apples.";
+  }
+  if (cat.includes("utility") || cat.includes("energy") || cat.includes("electric")) {
+    return "Match the same usage tier (kWh/mo) so the rate comparison holds up against your real bill.";
+  }
+  return "Pick the same plan tier or coverage as your current service so the comparison stays apples-to-apples.";
+}
+
+function switchCancelStep(offer) {
+  const current = offer.baseline?.current_provider ?? "your existing provider";
+  return `Cancel your service with ${escapeHtml(current)} <em>after</em> the new one is active so you don't end up with a coverage gap.`;
+}
+
+function openSwitchModal(offer) {
+  const modal = $("#switch-modal");
+  const scrim = $("#switch-scrim");
+  if (!modal || !scrim) return;
+
+  $("#switch-category").textContent = offer.category
+    ? `${offer.category} — How to switch`
+    : "How to switch";
+  const recommended = offer.source ?? "the recommended provider";
+  const current = offer.baseline?.current_provider ?? "your current provider";
+  $("#switch-title").textContent = `Switch from ${current} to ${recommended}`;
+
+  const stepsEl = $("#switch-steps");
+  if (stepsEl) {
+    stepsEl.innerHTML = "";
+    for (const html of [switchSignupStep(offer), switchMatchStep(offer), switchCancelStep(offer)]) {
+      const li = document.createElement("li");
+      li.innerHTML = html;
+      stepsEl.appendChild(li);
+    }
+  }
+
+  const noteEl = $("#switch-note");
+  if (noteEl) {
+    const saves = offer.saves ? fmt$(offer.saves) : null;
+    const period = offer.period ?? "/mo";
+    noteEl.textContent = saves
+      ? `Bonsai estimates you'll save ${saves}${period}. Real savings depend on your usage and any switch fees from your current provider.`
+      : "Real savings depend on your usage and any switch fees from your current provider.";
+  }
+
+  scrim.hidden = false;
+  modal.hidden = false;
+  requestAnimationFrame(() => {
+    scrim.classList.add("open");
+    modal.classList.add("open");
+  });
+
+  const cleanup = () => {
+    scrim.classList.remove("open");
+    modal.classList.remove("open");
+    setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
+    $("#switch-close").onclick = null;
+    $("#switch-ok").onclick = null;
+    scrim.onclick = null;
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
+  $("#switch-close").onclick = cleanup;
+  $("#switch-ok").onclick = cleanup;
+  scrim.onclick = cleanup;
+  document.addEventListener("keydown", onKey);
 }
 
 async function runOfferHuntForCard(offer, card) {

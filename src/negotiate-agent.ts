@@ -91,6 +91,10 @@ export interface RunNegotiationAgentOpts {
    * inbox so they stay in the loop on every message the agent sends.
    * Visible to the rep on purpose. */
   cc?: string[];
+  /** PendingRun id this negotiation is tied to. Stamped on the
+   * NegotiationState so the persistent-mode advance pass can correlate
+   * a stale email thread back to its run for voice escalation. */
+  run_id?: string;
   anthropic?: Anthropic;
 }
 
@@ -119,6 +123,7 @@ async function runEmailAttempt(opts: {
   agent_tone?: AgentTone;
   prior_attempts_summary?: string;
   cc?: string[];
+  run_id?: string;
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["email"] }> {
   // Pick Resend if env is configured, else fall back to MockEmailClient.
@@ -138,6 +143,7 @@ async function runEmailAttempt(opts: {
     agent_tone: opts.agent_tone,
     prior_attempts_summary: opts.prior_attempts_summary,
     cc: opts.cc,
+    run_id: opts.run_id,
   });
   let state = initState;
   saveNegotiationState(state);
@@ -309,6 +315,7 @@ export async function runNegotiationAgent(
         user_directives: opts.user_directives,
         agent_tone: opts.agent_tone,
         cc: opts.cc,
+        run_id: opts.run_id,
         anthropic,
       });
       attempts.push(attempt);
