@@ -134,6 +134,8 @@ export class ResendEmailClient implements EmailClient {
   }
 }
 
+let warnedMockMode = false;
+
 /** Factory: returns ResendEmailClient if env is set, else MockEmailClient.
  * `threadsDir` overrides the per-user default — used by the webhook
  * handler, which is unauthenticated and resolves the dir from the on-disk
@@ -153,5 +155,3 @@ export async function autoEmailClient(threadsDir?: string): Promise<EmailClient>
   const { MockEmailClient } = await import("./email-mock.ts");
   return new MockEmailClient(threadsDir);
 }
-
-let warnedMockMode = false;
