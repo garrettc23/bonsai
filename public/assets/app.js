@@ -2316,16 +2316,13 @@ function renderEarlyAccessHero(view) {
   stash.style.display = "none";
   while (view.firstChild) stash.appendChild(view.firstChild);
 
-  const alreadyJoined = !!currentUser?.early_access_at;
-  const ctaLabel = alreadyJoined ? "Added to early access ✓" : "Sign up for early access";
-
   const hero = document.createElement("div");
   hero.className = "empty-hero";
   hero.innerHTML = `
     <div class="empty-hero-card">
       <h2 class="empty-hero-title">Comparison is in beta</h2>
       <p class="empty-hero-body">Bonsai will persistently look at other options for your recurring costs — phone plans, internet, insurance, subscriptions — so you're always paying the lowest price possible. No more digging through plans every year.</p>
-      <button type="button" class="btn btn-primary btn-lg empty-hero-cta" id="early-access-btn"${alreadyJoined ? " disabled" : ""}>${escapeHtml(ctaLabel)}</button>
+      <button type="button" class="btn btn-primary btn-lg empty-hero-cta" id="early-access-btn"></button>
     </div>`;
 
   hero.appendChild(stash);
@@ -2333,22 +2330,38 @@ function renderEarlyAccessHero(view) {
   view.appendChild(hero);
 
   const btn = hero.querySelector("#early-access-btn");
-  btn?.addEventListener("click", async () => {
+  if (!btn) return;
+
+  // Sync the button text + state to the user's current join status.
+  // Called once on mount and again after every toggle so we never have
+  // a stale label.
+  const sync = () => {
+    const joined = !!currentUser?.early_access_at;
+    btn.textContent = joined
+      ? "Added to early access ✓ (click to leave)"
+      : "Sign up for early access";
+    btn.classList.toggle("is-joined", joined);
+  };
+  sync();
+
+  btn.addEventListener("click", async () => {
     if (btn.disabled) return;
+    const wasJoined = !!currentUser?.early_access_at;
     btn.disabled = true;
-    btn.textContent = "Adding…";
+    btn.textContent = wasJoined ? "Removing…" : "Adding…";
     try {
       const res = await fetch("/api/early-access", {
-        method: "POST",
+        method: wasJoined ? "DELETE" : "POST",
         credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
       const { user } = await res.json();
       if (user) currentUser = user;
-      btn.textContent = "Added to early access ✓";
+      sync();
     } catch (err) {
-      console.warn("[early-access] signup failed", err);
+      console.warn("[early-access] toggle failed", err);
       btn.textContent = "Try again";
+    } finally {
       btn.disabled = false;
     }
   });

@@ -152,6 +152,26 @@ export function joinEarlyAccess(userId: string): User {
   return rowToUser(fresh);
 }
 
+/**
+ * Remove the user from the Comparison early-access waitlist. Idempotent
+ * — re-calling on a user who isn't on the list is a no-op.
+ */
+export function leaveEarlyAccess(userId: string): User {
+  const db = getDb();
+  const existing = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow | null;
+  if (!existing) throw new AuthError("user_not_found", "User no longer exists.");
+  if (existing.early_access_at) {
+    db.query(`UPDATE users SET early_access_at = NULL WHERE id = ?`)
+      .run(userId);
+  }
+  const fresh = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow;
+  return rowToUser(fresh);
+}
+
 export async function verifyCredentials(email: string, password: string): Promise<User> {
   const normalizedEmail = normalizeEmail(email);
   const db = getDb();

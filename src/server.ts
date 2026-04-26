@@ -2055,6 +2055,12 @@ async function handleJoinEarlyAccess(user: User): Promise<Response> {
   return Response.json({ user: userPublic(updated) });
 }
 
+async function handleLeaveEarlyAccess(user: User): Promise<Response> {
+  const { leaveEarlyAccess } = await import("./lib/auth.ts");
+  const updated = leaveEarlyAccess(user.id);
+  return Response.json({ user: userPublic(updated) });
+}
+
 async function handleSignup(req: Request): Promise<Response> {
   const body = (await req.json().catch(() => null)) as
     | { email?: string; password?: string; accepted_terms?: boolean }
@@ -2352,6 +2358,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
         if (req.method === "POST" && url.pathname === "/api/early-access") return handleJoinEarlyAccess(user);
+        if (req.method === "DELETE" && url.pathname === "/api/early-access") return handleLeaveEarlyAccess(user);
         const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
         if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
         const contactStatusMatch = url.pathname.match(/^\/api\/contact\/([a-zA-Z0-9_-]+)$/);
