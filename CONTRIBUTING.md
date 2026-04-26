@@ -65,6 +65,12 @@ Open a discussion before opening a PR for any of these:
 - Comments only when the *why* is non-obvious. Don't restate the code.
 - Prefer reading existing patterns over inventing new ones.
 
+## Post-clone polish (maintainers only)
+
+Some repo settings can't be set via CLI. After forking or setting up a fresh maintainer environment:
+
+- Upload `public/og-image.png` (1280×640) at GitHub → Settings → Social preview.
+
 ## Questions
 
 Open a [Discussion](https://github.com/<your-fork>/bonsai/discussions) or file an issue. Bonsai is volunteer-maintained — replies may take a few days.

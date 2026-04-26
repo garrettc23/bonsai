@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.32.1] - 2026-04-26
+
+### Added
+- **`SECURITY.md`** — security policy for the OSS launch. Supported versions (latest only, beta), private reporting via `gcahill@firebaystudios.com`, in-scope (auth bypass, RCE, cross-user data exposure, secret extraction) vs. out-of-scope (rate-limit bypass, social engineering, brute force without lockout), and a standard 90-day coordinated disclosure timeline.
+- **GitHub Actions CI workflow** at `.github/workflows/ci.yml`. Runs on every PR to `main` and every push to `main`: `bun install --frozen-lockfile` → `bun run typecheck` → `bun run test`. `oven-sh/setup-bun@v2` handles Bun deps caching automatically. Any non-zero exit fails the workflow — no warn-only steps.
+
+### Changed
+- **Scrubbed personal email from v0.1.21.1 changelog entry.** Replaced `edward@firebaystudios.com` with the RFC 2606 `user@example.com` example domain. The original was a contact-card paste used to illustrate the bug repro and didn't need to ship to a public repo.
+- **CONTRIBUTING.md gained a "Post-clone polish" section** documenting the social-preview image upload (`public/og-image.png` → GitHub Settings → Social preview), since GitHub doesn't expose that setting via CLI.
+- **Repo metadata via `gh repo edit`:** homepage set to `https://bonsai.firebaystudios.com`, dropped the `healthcare` topic, added `bill-negotiation`, `personal-finance`, and `cost-optimization` topics — Bonsai is general-purpose personal-bill cost optimization, not medical-only.
+
 ## [0.1.32.0] - 2026-04-26
 
 ### Added
@@ -118,7 +129,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [0.1.21.1] - 2026-04-26
 
 ### Fixed
-- **Contact-card poll no longer overwrites a typed billing-dept email (continued).** v0.1.12.0 patched the wipe-to-empty in `applyContactStatus`'s lookup-failed branch but missed the parallel hazard in the success branch — `if (document.activeElement !== emailEl) emailEl.value = c.email ?? ""` ran on every poll tick (every 2.5s) and clobbered the user's input the moment focus moved to the Accept button. So a user who pasted `edward@firebaystudios.com`, watched the "Manually entered by the user." note appear, and then clicked "Accept & lower my bill" could still hit the missing_contact warning if a poll fired in the focus-shift window. Same `!emailEl.value` guard now applies to both branches: empty fields populate from the polled contact, non-empty fields are left alone. Phone field gets the same treatment.
+- **Contact-card poll no longer overwrites a typed billing-dept email (continued).** v0.1.12.0 patched the wipe-to-empty in `applyContactStatus`'s lookup-failed branch but missed the parallel hazard in the success branch — `if (document.activeElement !== emailEl) emailEl.value = c.email ?? ""` ran on every poll tick (every 2.5s) and clobbered the user's input the moment focus moved to the Accept button. So a user who pasted `user@example.com`, watched the "Manually entered by the user." note appear, and then clicked "Accept & lower my bill" could still hit the missing_contact warning if a poll fired in the focus-shift window. Same `!emailEl.value` guard now applies to both branches: empty fields populate from the polled contact, non-empty fields are left alone. Phone field gets the same treatment.
 - **`approveAndRun`'s pre-flight contact save now surfaces HTTP errors instead of swallowing them.** The save was wrapped in a try/catch that only handled network errors — a 4xx/5xx response from `/api/contact/override` would resolve normally, the code would proceed to `/api/approve` with stale `run.contact`, and the user would see the missing_contact warning even though the autosave "didn't fail" from the client's perspective. Now we check `saveRes.ok`, surface the server's error message in `#contact-save-status`, highlight the contact card, and abort before approve fires.
 
 ## [0.1.21.0] - 2026-04-26
