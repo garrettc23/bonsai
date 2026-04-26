@@ -767,7 +767,12 @@ async function init() {
   // Complaint flow — non-bill negotiations (flight delays, refunds, etc.)
   $("#open-complaint-btn")?.addEventListener("click", openComplaintModal);
   $("#complaint-cancel")?.addEventListener("click", closeComplaintModal);
-  $("#complaint-scrim")?.addEventListener("click", closeComplaintModal);
+  // Click the scrim *background* to close, but not clicks on the modal
+  // box itself — without the target check the modal would dismiss
+  // every time the user clicked into one of its inputs.
+  $("#complaint-scrim")?.addEventListener("click", (ev) => {
+    if (ev.target === ev.currentTarget) closeComplaintModal();
+  });
   $("#complaint-submit")?.addEventListener("click", submitComplaint);
 
   // ─── Multi-file staging: drop/pick up to 10 files, review, then "Next" ──
@@ -1286,13 +1291,11 @@ function openComplaintModal() {
   $("#complaint-error").hidden = true;
   $("#complaint-error").textContent = "";
   $("#complaint-scrim").hidden = false;
-  $("#complaint-modal").hidden = false;
   setTimeout(() => $("#complaint-company")?.focus(), 50);
 }
 
 function closeComplaintModal() {
   $("#complaint-scrim").hidden = true;
-  $("#complaint-modal").hidden = true;
 }
 
 async function submitComplaint() {
