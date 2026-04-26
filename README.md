@@ -279,8 +279,6 @@ PORT=3333 bun run serve
 - `POST /webhooks/resend-inbound` — Resend posts parsed inbound mail here, signed via svix. Handler verifies the signature against `RESEND_WEBHOOK_SECRET` (constant-time HMAC, 5-minute replay window), correlates to a thread (`X-Bonsai-Thread-Id` → `In-Reply-To` → `References`), appends to `out/threads/{thread_id}.json` deduplicated by `message_id`, and kicks one `stepNegotiation`. Returns `401` on bad signature, `202` if no thread correlation, `200` (idempotent) on duplicate message ids.
 - `GET /api/receipts` — projects completed `out/report-*.json` files into per-bill rows plus a cumulative savings total. The Home page renders a green hero counter and the three most recent receipts above the dropzone.
 
-On boot, the server runs `seedReceipts()` which copies `fixtures/seed-receipts/*.json` into `out/report-*.json` if the destination doesn't already exist. Idempotent; never overwrites a real run.
-
 ## Tests
 
 ```bash
@@ -296,17 +294,21 @@ src/
   analyzer.ts            # PDF → errors + metadata via tool-use loop
   appeal-letter.ts       # deterministic markdown generator
   negotiate-email.ts     # email negotiation loop (mutex + MAX_TURNS escalation + BCC)
+  negotiate-agent.ts     # negotiation orchestration helpers
+  offer-agent.ts         # comparison agent (managed-agent-backed)
+  opps-filter.ts         # opportunity probability gate
   simulate-reply.ts      # role-playing rep for email simulator
   replay.ts              # scripted-inbound demo fallback when webhook unreachable
-  seed-receipts.ts       # cold-start: copies seed receipts into out/
   orchestrator.ts        # runBonsai() — single end-to-end entry
   server.ts              # Bun.serve HTTP + upload + fixture API + receipts + webhook router
   env.ts                 # explicit .env loader + validateRequiredEnv()
   types.ts               # BillingError / BillMetadata / AnalyzerResult
   clients/               # email + email-resend + email-mock
+  server/                # webhooks (resend inbound + voice dial/webhooks)
   tools/                 # record-metadata, record-error (grounding contract), finalize
   voice/                 # agent-config, client, simulator, tool-handlers
-  lib/                   # ground-truth, thread-store, provider-contact, pdf-extract
+  lib/                   # ground-truth, thread-store, provider-contact, pdf-extract,
+                         # auth, db, backup, rate-limit, user-settings, etc.
 scripts/                 # day1-poc, day2..5, run-bonsai, voice-smoke, resend-inbound-smoke
 fixtures/                # synthetic bill + EOB markdown + generated PDFs
 public/                  # static web UI (index, landing, terms, privacy)
