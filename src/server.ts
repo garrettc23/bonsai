@@ -61,7 +61,8 @@ import {
   type User,
 } from "./lib/auth.ts";
 import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
-import { withUserContext } from "./lib/user-context.ts";
+import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
+import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -286,6 +287,20 @@ function loadPending(runId: string): PendingRun | null {
 }
 
 async function handleAudit(req: Request): Promise<Response> {
+  // Per-user daily cap. Audit kicks off Opus 4.7 (operator-paid, ~$0.25–$1.00/run);
+  // without a ceiling, one runaway user can drain the budget overnight.
+  // Env-overridable so paid tiers / staging can lift it without a rebuild.
+  const user = getCurrentUser();
+  const dailyMax = Number.parseInt(process.env.BONSAI_AUDIT_DAILY_LIMIT ?? "20", 10);
+  const rl = rateLimit({
+    key: `audit:user:${user.id}`,
+    max: Number.isFinite(dailyMax) && dailyMax > 0 ? dailyMax : 20,
+    windowMs: 24 * 60 * 60 * 1000,
+  });
+  if (!rl.ok) {
+    return rateLimitResponse(rl.retryAfterSec, "Daily limit hit, upgrade to remove.");
+  }
+
   // Supports two body shapes:
   //   1. multipart/form-data with `bill` file (+ optional eob) → upload path
   //   2. application/json { fixture, eob?, channel? } → sample/fixture path
@@ -2570,6 +2585,19 @@ async function handleForgotPassword(req: Request): Promise<Response> {
   const body = (await req.json().catch(() => null)) as { email?: string } | null;
   const email = body?.email?.trim();
   if (!email) return Response.json({ error: "Missing email" }, { status: 400 });
+  // Per-email cap. Keying on the requested email (not IP) matches the abuse
+  // model — we care about per-account harassment, not per-IP signup floods.
+  const rl = rateLimit({
+    key: `forgot:${email.toLowerCase()}`,
+    max: 5,
+    windowMs: 60 * 60 * 1000,
+  });
+  if (!rl.ok) {
+    return rateLimitResponse(
+      rl.retryAfterSec,
+      "Too many reset requests for this email. Try again later.",
+    );
+  }
   const user = getUserByEmail(email);
   // Don't leak whether the email is on file. Always look like we sent
   // something — only the dev-mode hint differs.
@@ -2654,7 +2682,7 @@ const server = Bun.serve({
   // Railway specifically.
   hostname: "0.0.0.0",
   idleTimeout: 240,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     try {
       // Liveness probe for Railway / any platform health check. Cheap and
@@ -2664,7 +2692,21 @@ const server = Bun.serve({
         return new Response("ok", { headers: { "Content-Type": "text/plain" } });
       }
       // Auth endpoints first — these run without a session.
-      if (req.method === "POST" && url.pathname === "/api/auth/signup") return handleSignup(req);
+      if (req.method === "POST" && url.pathname === "/api/auth/signup") {
+        const ip = getClientIp(req, server);
+        const rl = rateLimit({
+          key: `signup:ip:${ip}`,
+          max: 10,
+          windowMs: 60 * 60 * 1000,
+        });
+        if (!rl.ok) {
+          return rateLimitResponse(
+            rl.retryAfterSec,
+            "Too many signups from this address. Try again later.",
+          );
+        }
+        return handleSignup(req);
+      }
       if (req.method === "POST" && url.pathname === "/api/auth/login") return handleLogin(req);
       if (req.method === "POST" && url.pathname === "/api/auth/logout") return handleLogout(req);
       if (req.method === "GET" && url.pathname === "/api/auth/me") return handleMe(requireUser(req));
