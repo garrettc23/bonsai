@@ -2478,9 +2478,18 @@ async function handleSignup(req: Request): Promise<Response> {
     // to find the Profile tab. Wrapped in withUserContext because
     // setProfileConfig resolves the per-user settings file via the ALS
     // store. User can still overwrite it in Settings → Profile later.
+    //
+    // T&C acceptance at signup also locks in the agent-authorization +
+    // HIPAA consent — the linked Terms doc covers both, so we don't make
+    // the user re-acknowledge them in Settings before their first audit.
+    // Both remain user-revocable from Settings → Profile.
     await withUserContext(user, async () => {
       const { setProfileConfig } = await import("./lib/user-settings.ts");
-      setProfileConfig({ email: user.email });
+      setProfileConfig({
+        email: user.email,
+        authorized: true,
+        hipaa_acknowledged: true,
+      });
     });
     return new Response(JSON.stringify({ user: userPublic(user) }), {
       headers: {
