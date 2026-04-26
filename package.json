@@ -1,6 +1,6 @@
 {
   "name": "bill-agent",
-  "version": "0.1.22.0",
+  "version": "0.1.23.0",
   "description": "Agent that finds errors in medical bills and drafts appeal letters",
   "private": true,
   "type": "module",
