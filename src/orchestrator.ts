@@ -30,8 +30,16 @@ import {
 } from "./negotiate-email.ts";
 import { simulateReply, type Persona as EmailPersona } from "./simulate-reply.ts";
 import { simulateCall, type RepPersona as VoicePersona } from "./voice/simulator.ts";
-import type { CallState } from "./voice/tool-handlers.ts";
+import {
+  loadCallState,
+  type CallState,
+} from "./voice/tool-handlers.ts";
 import { runNegotiationAgent, type PersistentNegotiationResult } from "./negotiate-agent.ts";
+import { dialVoiceForUser } from "./server/voice-dial.ts";
+import { loadConversationMeta } from "./lib/call-store.ts";
+import { stateCallIdFor } from "./server/voice-webhooks.ts";
+import { maybeCurrentUser } from "./lib/user-context.ts";
+import type { User } from "./lib/auth.ts";
 
 export type Channel = "email" | "voice" | "persistent" | "auto";
 
@@ -73,6 +81,10 @@ export interface RunBonsaiOpts {
   /** CC recipients on every outbound email — typically the user's own
    * inbox so they stay in the loop on every message the agent sends. */
   cc?: string[];
+  /** PendingRun id this orchestrator pass is tied to. Threaded down so the
+   * voice-dial helper can stamp it onto the conversation meta envelope and
+   * the SPA can join transcripts back to the bill row. */
+  run_id?: string;
 }
 
 export interface ThreadMessage {
@@ -99,6 +111,10 @@ export interface BonsaiReport {
     call_id: string;
     state: CallState;
     transcript: Array<{ who: "agent" | "rep" | "tool"; text: string }>;
+    /** Which path produced this transcript: a real ElevenLabs call vs the
+     *  dual-Claude simulator. The SPA badges this so testers can tell at a
+     *  glance whether they're looking at a live call. */
+    source: "real" | "simulator";
   };
   summary: {
     original_balance: number;
@@ -238,6 +254,7 @@ export async function runNegotiationPhase(
         call_id: run.attempts.find((a) => a.channel === "voice")?.call_id ?? "",
         state: run.voice.state,
         transcript: run.voice.transcript,
+        source: "simulator",
       };
     }
     report.summary.final_balance = run.best?.final_amount ?? null;
@@ -335,18 +352,43 @@ export async function runNegotiationPhase(
     }
   } else {
     // voice
-    const { call_id, state, transcript } = await simulateCall({
-      analyzer,
-      persona: opts.voice_persona ?? "cooperative",
-      final_acceptable_floor: opts.final_acceptable_floor,
-      max_turns: 14,
-    });
-    report.voice_call = {
-      call_id,
-      state,
-      transcript: transcript.map((t) => ({ who: t.who, text: t.text })),
-    };
+    const useReal =
+      Boolean(process.env.ELEVENLABS_API_KEY?.trim()) &&
+      Boolean(process.env.ELEVENLABS_TWILIO_PHONE_NUMBER_ID?.trim()) &&
+      Boolean(process.env.ELEVENLABS_WEBHOOK_BASE?.trim());
+    const ctxUser = maybeCurrentUser();
 
+    if (useReal && ctxUser) {
+      const { state, transcript, conversation_id, source } = await runRealVoiceCall({
+        user: ctxUser,
+        analyzer,
+        provider_phone: providerPhone,
+        run_id: opts.run_id ?? `orchestrator_${Date.now().toString(36)}`,
+        final_acceptable_floor: opts.final_acceptable_floor,
+        bill_kind: analyzer.metadata.bill_kind ?? undefined,
+      });
+      report.voice_call = {
+        call_id: conversation_id,
+        state,
+        transcript,
+        source,
+      };
+    } else {
+      const { call_id, state, transcript } = await simulateCall({
+        analyzer,
+        persona: opts.voice_persona ?? "cooperative",
+        final_acceptable_floor: opts.final_acceptable_floor,
+        max_turns: 14,
+      });
+      report.voice_call = {
+        call_id,
+        state,
+        transcript: transcript.map((t) => ({ who: t.who, text: t.text })),
+        source: "simulator",
+      };
+    }
+
+    const state = report.voice_call!.state;
     if (state.outcome.status === "success" || state.outcome.status === "partial") {
       report.summary.outcome = "resolved";
       report.summary.final_balance = state.outcome.negotiated_amount ?? null;
@@ -367,6 +409,92 @@ export async function runNegotiationPhase(
   }
 
   return report;
+}
+
+/**
+ * Real-voice path: dial via ElevenLabs, wait for the end_call webhook to
+ * land (or VOICE_DRY_RUN to short-circuit), then reconstruct the
+ * `voice_call` shape the rest of the orchestrator expects.
+ *
+ * Polling cadence: 5s, default ceiling 30 min. Reps put us on hold; voice
+ * mail trees are slow; the simulator's bounded turn budget doesn't apply
+ * here, so the timeout is generous.
+ */
+async function runRealVoiceCall(opts: {
+  user: User;
+  analyzer: AnalyzerResult;
+  provider_phone: string;
+  run_id: string;
+  final_acceptable_floor?: number;
+  bill_kind?: import("./types.ts").BillKind;
+}): Promise<{
+  conversation_id: string;
+  state: CallState;
+  transcript: Array<{ who: "agent" | "rep" | "tool"; text: string }>;
+  source: "real";
+}> {
+  const dialResult = await dialVoiceForUser(opts.user, {
+    run_id: opts.run_id,
+    analyzer: opts.analyzer,
+    provider_phone: opts.provider_phone,
+    final_acceptable_floor: opts.final_acceptable_floor,
+    bill_kind: opts.bill_kind,
+  });
+  if (!dialResult.ok) {
+    throw new Error(`voice dial failed: ${dialResult.error}`);
+  }
+
+  const { conversation_id, dry_run } = dialResult;
+  const stateId = stateCallIdFor(conversation_id);
+
+  if (!dry_run) {
+    await waitForCallEnded(opts.user.id, conversation_id, 30 * 60 * 1000, 5_000);
+  }
+
+  let meta = loadConversationMeta(opts.user.id, conversation_id);
+  if (meta && meta.status === "active") {
+    // Polling exited because the deadline elapsed without an end_call
+    // webhook landing. Mark the meta as failed so downstream consumers
+    // (Bills view, addSpend bookkeeping, /api/history) don't think the
+    // call is still live. We don't have a reliable spend figure here;
+    // the operator can reconcile via the ElevenLabs dashboard.
+    meta = {
+      ...meta,
+      status: "failed",
+      ended_at: Date.now(),
+      outcome: { ...meta.outcome, notes: "Call did not finish within 30 min." },
+    };
+    saveConversationMeta(meta);
+  }
+  const finalState = loadCallState(stateId) ?? {
+    call_id: stateId,
+    analyzer: opts.analyzer,
+    final_acceptable_floor: opts.final_acceptable_floor ?? 0,
+    tool_events: [],
+    outcome: { status: "in_progress" as const },
+  };
+  const transcript = (meta?.transcript ?? []).map((t) => ({
+    who: t.role,
+    text: t.text,
+  }));
+  return { conversation_id, state: finalState, transcript, source: "real" };
+}
+
+async function waitForCallEnded(
+  user_id: string,
+  conversation_id: string,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const meta = loadConversationMeta(user_id, conversation_id);
+    if (meta?.status === "ended" || meta?.status === "failed") return;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  // Don't throw — caller flips meta to "failed" and returns a degraded
+  // voice_call. Throwing here would propagate up through kickoffNegotiation
+  // and lose the partial transcript on a stuck call.
 }
 
 /**
