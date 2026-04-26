@@ -215,7 +215,7 @@ interface PendingRun {
     email: string | null;
     phone: string | null;
     source_urls: string[];
-    confidence: "high" | "medium" | "low";
+    confidence: "high" | "medium" | "low" | "none";
     notes: string;
     /** True when the user manually edited the contact (skip future re-resolution). */
     user_edited?: boolean;
