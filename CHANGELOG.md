@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.7.0] - 2026-04-25
+
+### Added
+- **Branded landing page at `/`.** A first-time visitor now arrives at a real marketing page — sticky nav with the `Bons|ai` wordmark, Instrument Serif hero ("Every bill, negotiated."), four feature cards (grounded audit, appeal letter, email negotiation, voice negotiation), four-step how-it-works, six-question FAQ, and a footer with Terms / Privacy / contact / disclaimer. The signed-in app moves to `/app` (with `/app/*` deep-link support), so existing bookmarks keep working. New `public/landing.html` (~270 lines) and `public/assets/landing.css` (~345 lines) reuse the SPA's brand tokens, fonts, and dark-pill button — single source of truth in `app.css`, no token duplication.
+- **Open Graph + Twitter card metadata.** Pasting a Bonsai URL into iMessage, Slack, or Twitter now unfurls with a 1200×630 preview image (`public/og-image.png`) and a clean title + description block. OG meta added to all four public pages: landing, app shell, terms, privacy. The OG image is rendered from a committed SVG source via `scripts/build-og-image.ts` (uses the existing `sharp` dep — re-run after editing `public/og-image.svg`).
+
+### Changed
+- **`/` → `landing.html`, SPA → `/app`.** `handleStatic` (`src/server.ts`) re-routes `/` to the new landing page and serves the SPA shell (`index.html`) for `/app` and any `/app/...` deep link. `/terms` and `/privacy` continue to resolve via the existing extensionless mapping. Password-reset emails now generate `https://<host>/app?reset=<token>` so clicking the link drops the user into the SPA's reset view (was `/?reset=...`, which now harmlessly hits the landing page instead).
+- **SPA navigation hooks.** After a successful password reset, `app.js` strips the token by replacing the URL with `/app` (was `/`). Logging out now redirects to `/` (the landing page) rather than reloading the empty auth screen.
+- **Static-asset MIME types.** `contentType()` now recognizes `.png`, `.jpg/.jpeg`, `.webp`, and `.ico` so the OG image and any future raster assets serve with the correct `Content-Type` instead of `application/octet-stream`.
+
 ## [0.1.6.0] - 2026-04-25
 
 ### Changed
