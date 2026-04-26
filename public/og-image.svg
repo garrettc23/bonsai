@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Source for public/og-image.png. Regenerate with: bun run scripts/build-og-image.ts -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#FAFAF7"/>
+
+  <!-- Wordmark, top-left -->
+  <text x="80" y="120" font-family="Georgia, 'Iowan Old Style', serif" font-size="48" fill="#0E0E0C">Bons<tspan fill="#8B5E14">ai</tspan></text>
+
+  <!-- Headline, two lines, Instrument-Serif-ish -->
+  <text x="80" y="320" font-family="Georgia, 'Iowan Old Style', serif" font-size="120" fill="#0E0E0C" letter-spacing="-2">Every bill,</text>
+  <text x="80" y="460" font-family="Georgia, 'Iowan Old Style', serif" font-size="120" fill="#0E0E0C" letter-spacing="-2">negotiated.</text>
+
+  <!-- Hairline rule, amber, mirrors the wordmark accent -->
+  <rect x="80" y="490" width="700" height="2" fill="#8B5E14" opacity="0.45"/>
+
+  <!-- Subtle bottom divider -->
+  <rect x="80" y="555" width="1040" height="1" fill="#0E0E0C" opacity="0.08"/>
+
+  <!-- Footer host -->
+  <text x="80" y="595" font-family="Inter, Helvetica, sans-serif" font-size="18" fill="#8B8B7E" letter-spacing="2">BONSAI.FIREBAYSTUDIOS.COM</text>
+</svg>

@@ -99,6 +99,10 @@ function contentType(path: string): string {
   if (path.endsWith(".css")) return "text/css; charset=utf-8";
   if (path.endsWith(".js")) return "application/javascript; charset=utf-8";
   if (path.endsWith(".svg")) return "image/svg+xml";
+  if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+  if (path.endsWith(".webp")) return "image/webp";
+  if (path.endsWith(".ico")) return "image/x-icon";
   if (path.endsWith(".json")) return "application/json; charset=utf-8";
   return "application/octet-stream";
 }
@@ -1809,7 +1813,17 @@ async function handleListBill(runId: string): Promise<Response> {
 }
 
 async function handleStatic(pathname: string): Promise<Response> {
-  let path = pathname === "/" ? "/index.html" : pathname;
+  // Path split: `/` is the marketing landing page, `/app` and any
+  // deep-linked `/app/...` boot the SPA shell. Asset URLs stay rooted at
+  // `/assets/...` regardless.
+  let path: string;
+  if (pathname === "/") {
+    path = "/landing.html";
+  } else if (pathname === "/app" || pathname.startsWith("/app/")) {
+    path = "/index.html";
+  } else {
+    path = pathname;
+  }
   // Allow extensionless URLs like `/terms` to resolve to `terms.html` so we
   // don't have to special-case static legal pages in the route table.
   let fsPath = join(PUBLIC_DIR, path);
@@ -2566,7 +2580,7 @@ async function handleForgotPassword(req: Request): Promise<Response> {
   const url = new URL(req.url);
   // Build the link off the request's own host so dev (localhost:3344),
   // ngrok tunnels, and production all produce a working link.
-  const link = `${url.protocol}//${url.host}/?reset=${encodeURIComponent(reset.token)}`;
+  const link = `${url.protocol}//${url.host}/app?reset=${encodeURIComponent(reset.token)}`;
   const sent = await sendResetEmailViaResend(user.email, link);
   if (!sent) {
     // Resend isn't wired — surface the link in the server log so the
