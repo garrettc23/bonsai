@@ -701,7 +701,7 @@ function renderResetView(token) {
       }
       // Server sets a fresh session cookie on success — strip the token from
       // the URL and reload into the app.
-      window.history.replaceState({}, "", "/");
+      window.history.replaceState({}, "", "/app");
       window.location.reload();
     } catch (err) {
       errEl.textContent = err?.message ?? "Network error.";
@@ -719,7 +719,9 @@ let currentUser = null;
 
 async function logout() {
   try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch {}
-  window.location.reload();
+  // Send the user to the marketing landing page after logout — reloading
+  // the SPA shell would just bounce them straight back to the auth screen.
+  window.location.href = "/";
 }
 
 async function init() {
