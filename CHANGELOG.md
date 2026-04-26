@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.12.0] - 2026-04-26
+## [0.1.13.0] - 2026-04-26
 
 ### Changed
 - **Comparison page now shows real cheaper alternatives instead of an empty hero.** The Comparison tab in the sidebar is no longer a "beta" placeholder — it loads offer cards from `/api/offer-history`, which flattens every persisted offer-hunt run into a single newest-first, savings-first list. When a fresh user lands on Comparison with no runs yet, the page polls every 5 seconds (capped at 5 minutes) so the offers populated by the background hunt that fires on each audit completion appear automatically. Cards drop the placeholder fields the old mock data carried (`confidence`, `friction`, `eta`, `unit`, per-category icons) — every field the UI now displays comes from a real backend value. The Compare modal is simplified accordingly. Switching providers (`Switch for me`) hits the live `/api/offer-hunt` and renders the agent's recorded offers with provider name, price, savings, channel, terms link, and a recommendation flag.
@@ -25,6 +25,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Dependencies
 - Bumped `@anthropic-ai/sdk` from `^0.40.0` to `^0.91.1` for the Managed Agents `client.beta.{agents,sessions,environments}.*` namespaces. The new SDK strict-types `input_schema.type` as the literal `"object"`, so `OPPS_TOOL` in `src/opps-filter.ts` is now annotated as `Anthropic.Tool` to satisfy the tighter type.
+
+## [0.1.12.0] - 2026-04-26
+
+### Changed
+- **Bills mid-negotiation no longer say "Watching" in the list view.** The lifecycle classifier in `public/assets/app.js` only considered `status === "negotiating"` and `outcome === "negotiating"` as active — but in real-email mode the kickoff worker flips `status` to `"completed"` once the outbound is sent, leaving `outcome` at `"in_progress"` while the agent waits on a reply. That fell through to the catch-all "Watching" chip and read like the bill was idle when in fact the agent was actively negotiating. Added `outcome === "in_progress"` to the `isNegotiating` predicate so those rows show "Negotiating" with the yellow chip. Audited-but-not-yet-approved bills now surface "Awaiting your approval" instead of "Watching" — the chip already existed in the attention bucket but the row never landed there. "Watching" is now reserved for the post-resolution monitor state (mock rows where the user pressed Start with "Resume on schedule").
+- **Accept Terms at signup also locks in agent authorization + HIPAA consent.** New users had to find Settings → Profile and tick two more boxes before Bonsai could legitimately negotiate a medical bill on their behalf. The signup handler in `src/server.ts` now passes `authorized: true` and `hipaa_acknowledged: true` to `setProfileConfig` alongside the existing email seed (already wrapped in `withUserContext`). Both stamps land in the per-user settings file with their respective `*_at` timestamps. Both consents remain user-revocable from Settings → Profile — this only removes the friction of re-acknowledging the same scope the linked T&C document already covers.
+
+### Fixed
+- **Pasted billing-dept email no longer gets wiped by the contact-card poll.** When the provider-contact lookup returned `confidence: "none"`, `applyContactStatus` would unconditionally set `#contact-email`/`#contact-phone` to `""` for any element that wasn't `document.activeElement`. The 2.5s poll runs continuously, so a user who typed an email and then moved focus to the "Accept & lower my bill" button could have their input erased between keystroke and click — `approveAndRun` would then read the empty field, fail its front-end gate, and surface the "we need an email or phone" warning even though the user clearly entered one. The wipe is now guarded by `!emailEl.value` (and the phone equivalent), so it only runs when the field is already empty. Init still wipes on first render via `initContactCard`, which is the only path that needs to.
+- **The "Reset" button on the Bills filter bar now visibly activates when filters are applied.** Previously it had a single quiet style regardless of state, so users couldn't tell at a glance whether their list was filtered or empty. Added a `is-active` class toggled by a new `syncBillsFilterResetState` helper that runs on every change handler (search, category, date, price, score) and on initial bind. The active state in `public/assets/app.css` darkens the border, fills the text, and tints the background so it reads as the obvious "click here to clear" affordance.
+- **Bill drawer subheader is now just the relative time.** It used to compose the patient name, date of service, and "last activity \<time\>" with mid-dot separators (`Jane Doe · 2025-03-14 · last activity 5 min ago`) — duplicative because the patient name already lives in the drawer header above. Subheader is now the `relTime`-formatted last-activity string alone.
 
 ## [0.1.11.0] - 2026-04-25
 
