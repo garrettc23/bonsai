@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.29.0] - 2026-04-26
+
+### Fixed
+- **Comparison banner cap was producing impossible totals.** The v0.1.28.0 math multiplied per-baseline currents by 12 — wrong for one-time bills (a $6k hospital charge isn't recurring) and wrong for multi-baseline single bills where the analyzer derived overlapping slices (an ER visit + an X-ray + a hospital balance are slices of the same bill, not additive). For the sample bill that produced **$99,246 displayed savings on a $6,372 bill**. Fixed by dropping the ×12 multiplier and capping at the cumulative `original_balance` across every attached bill in `historyCache`. Eyebrow is now "Potential savings if you switch to all recommended" — annual was the wrong frame.
+- **Comparison persisted offers after every bill was deleted.** v0.1.27.0's strict-filter for `projectOfferHistory` had an exception for legacy offer files (no `run_id`) so deploying didn't surprise-empty the UI. The exception leaked stale demos through after delete-all. Strict mode is now actually strict: when `activeRunIds` is provided, every file must have a `run_id` matching the set. Legacy files without one are dropped.
+- **Sample-bill fixture simplified to one baseline.** v0.1.28.0 shipped three baselines (urgent_care + imaging + hospital_bill) for the same hospital bill, which double-counted in the banner sum. Reduced to one baseline (the bill total) with two real alternatives — the hospital's federally-mandated financial-assistance program and the Dollar For nonprofit advocate. The math no longer overlaps with itself.
+
 ## [0.1.28.0] - 2026-04-26
 
 ### Added

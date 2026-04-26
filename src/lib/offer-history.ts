@@ -47,14 +47,13 @@ export function offerCardFromRecord(
 export interface ProjectOfferHistoryOpts {
   /**
    * Set of PendingRun ids the Comparison view should follow. When
-   * provided, offer files whose `run_id` isn't in this set are dropped —
-   * Comparison stays in sync with whatever bills currently exist on the
-   * Negotiation page. Files that pre-date `run_id` tagging are kept (their
-   * `run_id` is undefined, which we treat as "legacy, don't filter") so
-   * deploying this change doesn't blank out the UI on existing data.
+   * provided (non-null), STRICTLY filter: every offer file must have a
+   * `run_id` matching the set. Files without a `run_id` (legacy, pre-FIX-F)
+   * are dropped too — once a user has deleted every bill, Comparison must
+   * go empty even if old hunts left orphans on disk.
    *
-   * Pass `null` to skip the filter (every offer file projects, same as
-   * the pre-FIX-F behavior). Useful for tests + admin tools.
+   * Pass `null` (or omit) to skip the filter (every offer file projects).
+   * Useful for tests + admin tools.
    */
   activeRunIds?: ReadonlySet<string> | null;
 }
@@ -80,11 +79,13 @@ export function projectOfferHistory(
     try {
       const run = JSON.parse(readFileSync(full, "utf8")) as OfferHuntResult;
       if (!run?.baseline || !Array.isArray(run.offers)) continue;
-      // Skip orphans: when activeRunIds is provided AND this file has a
-      // run_id, drop it unless that run still exists. Files without a
-      // run_id are pre-FIX-F legacy and stay (better to show stale offers
-      // than to surprise-empty the UI on deploy).
-      if (activeRunIds && run.run_id && !activeRunIds.has(run.run_id)) continue;
+      // Strict filter: when activeRunIds is provided, the file must have
+      // a run_id matching the active set. Legacy files (no run_id) are
+      // dropped too — Comparison going empty after delete-all-bills is
+      // more important than preserving stale offers from pre-FIX-F runs.
+      if (activeRunIds) {
+        if (!run.run_id || !activeRunIds.has(run.run_id)) continue;
+      }
       runs.push({ run, modified: statSync(full).mtimeMs, file: f });
     } catch {
       // skip unparseable files
