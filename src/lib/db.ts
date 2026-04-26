@@ -121,6 +121,16 @@ export function getDb(): Database {
       environment_id TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
+
+    -- One row per UTC date the nightly volume backup succeeded. Used by the
+    -- scheduler to decide whether to fire a catch-up run on boot (last
+    -- success missing or > 25h old). bytes is informational; the prune job
+    -- works off S3 object names, not this table.
+    CREATE TABLE IF NOT EXISTS backup_runs (
+      utc_date TEXT PRIMARY KEY,
+      succeeded_at INTEGER NOT NULL,
+      bytes INTEGER NOT NULL
+    );
   `);
   // Light-touch column migrations for users — older DBs (pre-email-
   // verification, pre-terms-acceptance) already have a `users` table from

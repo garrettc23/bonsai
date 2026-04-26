@@ -64,6 +64,14 @@ import {
   type User,
 } from "./lib/auth.ts";
 import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
+import {
+  backupConfigured,
+  getLastSuccessfulBackup,
+  pruneOldBackups,
+  runNightlyBackup,
+} from "./lib/backup.ts";
+import { handlePublicConfig } from "./lib/public-config.ts";
+import { isApiPath, serveErrorPage } from "./lib/error-pages.ts";
 import { deleteBillByRunId } from "./lib/delete-bill.ts";
 import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
 import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
@@ -1922,7 +1930,7 @@ async function handleStatic(pathname: string): Promise<Response> {
       fsPath = htmlFs;
     }
   }
-  if (!existsSync(fsPath)) return new Response("Not found", { status: 404 });
+  if (!existsSync(fsPath)) return serveErrorPage("404", 404);
   // naive path traversal guard: must start with PUBLIC_DIR
   const resolved = fsPath;
   if (!resolved.startsWith(PUBLIC_DIR)) return new Response("Forbidden", { status: 403 });
@@ -2685,6 +2693,7 @@ const PUBLIC_API_PATHS = new Set([
   "/api/auth/me",
   "/api/auth/forgot",
   "/api/auth/reset",
+  "/api/public-config",
 ]);
 
 // Fail-fast on missing required env. The Anthropic SDK only complains
@@ -2719,6 +2728,13 @@ const server = Bun.serve({
       // need credentials. Returns 200 as long as the event loop is alive.
       if (req.method === "GET" && url.pathname === "/healthz") {
         return new Response("ok", { headers: { "Content-Type": "text/plain" } });
+      }
+      // Public branding config — read by landing.html, error pages, and the
+      // SPA to render the operator's support address. Unauthenticated by
+      // design (the landing page is unauthenticated). Empty/unset values
+      // come back as null so the front-end hides the affected element.
+      if (req.method === "GET" && url.pathname === "/api/public-config") {
+        return handlePublicConfig();
       }
       // Auth endpoints first — these run without a session.
       if (req.method === "POST" && url.pathname === "/api/auth/signup") {
@@ -2854,13 +2870,47 @@ const server = Bun.serve({
         return new Response("Method not allowed", { status: 405 });
       });
     } catch (err) {
-      console.error("server error:", err);
-      return Response.json(
-        { error: (err as Error).message, stack: (err as Error).stack },
-        { status: 500 },
-      );
+      // Log with a [500] prefix + path so Railway logs are searchable. Stack
+      // trace stays server-side — leaking it to the client both looks broken
+      // and hands attackers reconnaissance about our internals.
+      console.error("[500]", url.pathname, err);
+      if (isApiPath(url.pathname)) {
+        return Response.json({ error: "Internal server error" }, { status: 500 });
+      }
+      return serveErrorPage("500", 500);
     }
   },
 });
 
 console.log(`Bonsai server listening on http://localhost:${server.port}`);
+
+scheduleBackups();
+
+/**
+ * Nightly backup scheduler. Disabled (no-op) when the four `BACKUP_S3_*`
+ * env vars are unset — important so OSS forks and local dev don't try to
+ * upload anything. On boot, fires immediately if the last successful run
+ * is missing or > 25h old (catches deploys that crossed midnight + first
+ * boot after wiring up backups). Then re-fires every 24h via setInterval.
+ *
+ * Backup failures never crash the server: caught + logged, the next
+ * tick retries.
+ */
+function scheduleBackups(): void {
+  if (!backupConfigured()) {
+    console.log("[backup] disabled (BACKUP_S3_* env vars unset)");
+    return;
+  }
+  const fire = () => {
+    runNightlyBackup()
+      .then(() => pruneOldBackups())
+      .catch((err) => console.error("[backup] FAILED", err));
+  };
+  const last = getLastSuccessfulBackup();
+  const isStale = !last || Date.now() - last.succeeded_at > 25 * 60 * 60 * 1000;
+  if (isStale) {
+    console.log("[backup] firing catch-up run on boot");
+    fire();
+  }
+  setInterval(fire, 24 * 60 * 60 * 1000);
+}
