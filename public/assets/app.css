@@ -2041,6 +2041,14 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink);
   border-color: var(--ink-soft);
 }
+.bills-filters .filter-reset.is-active {
+  color: var(--ink);
+  border-color: var(--ink);
+  background: var(--surface-alt);
+}
+.bills-filters .filter-reset.is-active:hover {
+  background: var(--surface);
+}
 .bills-empty-filtered {
   padding: 28px;
   text-align: center;

@@ -1738,8 +1738,13 @@ function applyContactStatus(data) {
     titleEl.textContent = `Add a ${role} contact for ${provider}`;
     notesEl.textContent =
       `We couldn't find this provider's ${role} email — paste it from your bill.`;
-    if (document.activeElement !== emailEl) emailEl.value = "";
-    if (document.activeElement !== phoneEl) phoneEl.value = "";
+    // Never wipe a non-empty value the user has already typed. The poll
+    // runs every 2.5s; if it lands while focus is on a different element
+    // (e.g. the Approve button the user is about to click), wiping here
+    // would erase their input and the front-end gate would fire as if
+    // they hadn't typed anything.
+    if (document.activeElement !== emailEl && !emailEl.value) emailEl.value = "";
+    if (document.activeElement !== phoneEl && !phoneEl.value) phoneEl.value = "";
     srcEl.innerHTML = "";
     return;
   }
@@ -2956,7 +2961,14 @@ function renderBills() {
 
   const auditRows = audits.map((a) => {
     const score = scoreFromAudit(a);
-    const isNegotiating = a.status === "negotiating" || a.outcome === "negotiating";
+    // outcome === "in_progress" is the real-email mode case: the agent
+    // dispatched and is waiting on a reply. status flips to "completed"
+    // (kickoff finished) but outcome stays "in_progress" — the bill is
+    // very much an active negotiation, not a passive watch.
+    const isNegotiating =
+      a.status === "negotiating" ||
+      a.outcome === "negotiating" ||
+      a.outcome === "in_progress";
     const isFailed = a.status === "failed" || a.outcome === "failed";
     const isCancelled = a.status === "cancelled" || a.outcome === "cancelled";
     const isEscalated = a.outcome === "escalated";
@@ -3043,6 +3055,16 @@ function renderBills() {
   scheduleBillsPoll();
 }
 
+function billsFilterIsActive() {
+  return Boolean(
+    BILLS_FILTER.q || BILLS_FILTER.category || BILLS_FILTER.date || BILLS_FILTER.price || BILLS_FILTER.score,
+  );
+}
+
+function syncBillsFilterResetState() {
+  $("#bills-filter-reset")?.classList.toggle("is-active", billsFilterIsActive());
+}
+
 function bindBillsFilters(allRowsRef) {
   const onChange = () => {
     BILLS_FILTER.q = $("#bills-filter-q")?.value?.trim().toLowerCase() ?? "";
@@ -3050,6 +3072,7 @@ function bindBillsFilters(allRowsRef) {
     BILLS_FILTER.date = $("#bills-filter-date")?.value ?? "";
     BILLS_FILTER.price = $("#bills-filter-price")?.value ?? "";
     BILLS_FILTER.score = $("#bills-filter-score")?.value ?? "";
+    syncBillsFilterResetState();
     // Always pull the freshest rows on re-filter (audits may have landed since).
     renderBills();
   };
@@ -3065,8 +3088,10 @@ function bindBillsFilters(allRowsRef) {
     for (const id of ["bills-filter-category", "bills-filter-date", "bills-filter-price", "bills-filter-score"]) {
       const el = document.getElementById(id); if (el) el.value = "";
     }
+    syncBillsFilterResetState();
     renderBills();
   });
+  syncBillsFilterResetState();
 }
 
 function filterBillsRows(rows) {
@@ -3163,6 +3188,14 @@ function rowStatusChip(r) {
   // Mock bills paused via the drawer's Stop button surface that on the
   // Bills row even though there's no audit record for them.
   if (!r.audit && getMockPaused(r.id)) return { key: "paused", label: "Paused by you" };
+  // Audited but not yet approved — user hasn't pressed Accept on the
+  // review screen. Surface this explicitly so it doesn't get conflated
+  // with the post-resolution "Watching" state below.
+  if (r.audit?.status === "audited") return { key: "awaiting", label: "Awaiting your approval" };
+  // Genuine "Watching": the bill has been settled and the user pressed
+  // Start in the drawer to confirm a re-check cadence (mock rows for now;
+  // real backend wires up later). Active negotiation NEVER lands here —
+  // isNegotiating above catches in_progress / negotiating.
   return { key: "watching", label: "Watching" };
 }
 
@@ -4398,7 +4431,7 @@ async function openBillDrawer(row) {
 
   // Header
   $("#drawer-title").textContent = row.vendor ?? "—";
-  $("#drawer-sub").textContent = `${row.account ?? ""} · last activity ${row.lastCheck}`;
+  $("#drawer-sub").textContent = row.lastCheck ?? "";
 
   // Stats (initial — will be enriched after fetch for audits)
   renderDrawerStats(row, null);
