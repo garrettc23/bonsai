@@ -116,8 +116,9 @@ Return your rewrite via the \`humanize_email\` tool. No prose outside the tool c
 5. Default length: 1–3 short paragraphs. Only go longer if the original genuinely requires it (e.g., a multi-finding medical dispute with itemized lines). When in doubt, cut.
 6. Strip AI-isms and corporate boilerplate: "I hope this email finds you well", "I am writing to formally", "pursuant to our records", "as per", "I would like to take this opportunity to". Open with the actual reason for the email.
 7. Use plain, natural English. Contractions are fine. No hedging ("I just wanted to ask…"). No throat-clearing.
-8. ${signBlock}
-9. Keep the subject line if it's already concrete; tighten if it's flabby. Never lengthen it.
+8. No markdown formatting. The body ships to the recipient as plain text — markdown punctuation renders as literal characters in Gmail/Outlook. Do NOT introduce \`**bold**\`, \`__bold__\`, \`_italic_\`, \`*italic*\`, \`# headings\`, \`> blockquotes\`, or backticks. If the input has any of these, drop the punctuation and keep the words. Hyphen-space bullets (\`- item\`) are fine — they read as plain text. Snake_case identifiers (claim_number, account_number_123) are not emphasis; preserve them verbatim.
+9. ${signBlock}
+10. Keep the subject line if it's already concrete; tighten if it's flabby. Never lengthen it.
 
 ## Tone — user selected: ${tone}
 

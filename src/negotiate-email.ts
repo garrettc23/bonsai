@@ -136,6 +136,7 @@ Do NOT emit prose; the tool call is your entire output.
 
 - Subject for replies: keep the original subject; prepend "Re: " if not already there.
 - Body: 1–3 short paragraphs by default. Only go longer if the situation genuinely demands it (multi-finding medical dispute, complex back-and-forth). Cut anything not load-bearing.
+- No markdown. The body ships as plain text — \`**bold**\` renders as literal asterisks, \`## headings\` as literal hashes, backticks as literal backticks. Forbidden: \`**\`, \`__\`, \`_x_\`, \`*x*\`, \`# headings\`, \`> blockquotes\`, backticks. Hyphen-space bullets (\`- item\`) are fine because they read as plain text. Snake_case identifiers (claim_number, account_number) are fine — they're not emphasis.
 - Don't open with "I hope this email finds you well", "I am writing to formally", or other AI-isms — the humanizer will strip them, but skipping them yourself saves a hop.
 - Reference the original appeal letter ("as documented in my initial dispute") rather than re-attaching the whole findings list on follow-ups.`;
 
@@ -145,18 +146,18 @@ const SEND_EMAIL_TOOL: Anthropic.Tool = {
     "Draft and send the next outbound email in the negotiation thread. This sends the message immediately; do not compose a draft and then call this as a preview.",
   input_schema: {
     type: "object",
-    required: ["subject", "body_markdown"],
+    required: ["subject", "body_text"],
     properties: {
       subject: {
         type: "string",
         minLength: 3,
         description: "Subject line. For replies, preserve the original subject with 'Re: ' prefix.",
       },
-      body_markdown: {
+      body_text: {
         type: "string",
         minLength: 50,
         description:
-          "Full email body in markdown. Include greeting, 3–6 short paragraphs, and a signature block.",
+          "Plain-text email body. Do NOT use markdown formatting — the message ships as plain text, so any markdown punctuation renders as literal characters in Gmail/Outlook. Forbidden: `**bold**`, `__bold__`, `_italic_`, `*italic*`, `# Headings`, `> blockquotes`, and backticks. Hyphen-space bullets (`- item`) are fine because they read as plain text. Include a greeting, 1–3 short paragraphs, and a signature block.\n\nDo: We're disputing the $900 balance-billing charge on claim CLM-001. Per the EOB, patient responsibility is $100.\nDon't: **We are disputing** the `$900` balance-billing charge on _claim CLM-001_. ## Background — per the EOB, patient responsibility is $100.",
       },
     },
   },
@@ -207,7 +208,7 @@ const ESCALATE_HUMAN_TOOL: Anthropic.Tool = {
 function renderThreadForClaude(thread: { outbound: SentEmail[]; inbound: InboundEmail[] }): string {
   const items: Array<{ ts: string; role: "us" | "them"; body: string; subject: string }> = [];
   for (const m of thread.outbound) {
-    items.push({ ts: m.sent_at, role: "us", subject: m.subject, body: m.body_markdown });
+    items.push({ ts: m.sent_at, role: "us", subject: m.subject, body: m.body_text });
   }
   for (const m of thread.inbound) {
     items.push({ ts: m.received_at, role: "them", subject: m.subject, body: m.body_text });
@@ -346,7 +347,7 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     to: provider_email,
     from: user_email,
     subject: humanized.subject,
-    body_markdown: humanized.body,
+    body_text: humanized.body,
     thread_id,
     cc: opts.cc,
   };
@@ -435,14 +436,14 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
 
     for (const block of toolUses) {
       if (block.name === "send_email") {
-        const input = block.input as { subject: string; body_markdown: string };
+        const input = block.input as { subject: string; body_text: string };
         const lastInbound = inboundSinceLast[inboundSinceLast.length - 1];
         // Humanizer pass on every follow-up. Same contract as the initial
         // letter — preserves grounded facts, applies tone + playbook, strips
         // AI-isms. is_first_contact: false so the humanizer doesn't open
         // with introductions.
         const humanized = await humanize({
-          body: input.body_markdown,
+          body: input.body_text,
           subject: input.subject,
           tone: state.agent_tone,
           bill_kind: state.analyzer.metadata.bill_kind,
@@ -455,7 +456,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
           to: state.provider_email,
           from: state.user_email,
           subject: humanized.subject,
-          body_markdown: humanized.body,
+          body_text: humanized.body,
           thread_id: state.thread_id,
           in_reply_to: lastInbound?.message_id,
           cc: state.cc,
