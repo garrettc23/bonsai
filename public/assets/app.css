@@ -169,6 +169,17 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   background: var(--line-strong);
 }
 .nav-item.active .nav-dot { background: var(--green); }
+/* Comparison nav pulses while a hunt is plausibly in flight server-side
+   (~10s after each audit). Soft fade on the icon + label so the user
+   notices the activity without it feeling like an alert badge. */
+.nav-item.is-hunting .nav-ic,
+.nav-item.is-hunting > span:nth-child(2) {
+  animation: nav-hunt-pulse 1.4s ease-in-out infinite;
+}
+@keyframes nav-hunt-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
 .nav-count.soft {
   background: var(--surface-alt);
   color: var(--ink-soft);
