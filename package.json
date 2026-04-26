@@ -1,7 +1,8 @@
 {
   "name": "bill-agent",
   "version": "0.1.21.0",
-  "description": "Agent that finds errors in medical bills and drafts appeal letters",
+  "description": "Agents to manage personal bills — open-source agents that audit, dispute, and renegotiate insurance, utilities, medical, credit, and subscription costs.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {
