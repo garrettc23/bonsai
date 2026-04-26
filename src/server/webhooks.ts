@@ -130,7 +130,7 @@ async function forwardInboundToUser(opts: {
     `─────────────────────────`,
     ``,
     `The agent has read this and is composing the next round.`,
-    `Open Bonsai to follow along: https://bonsai.app/`,
+    `Open Bonsai to follow along: https://${process.env.BONSAI_PUBLIC_DOMAIN ?? "your-bonsai-domain.com"}/`,
   ].join("\n");
   try {
     const res = await fetch("https://api.resend.com/emails", {

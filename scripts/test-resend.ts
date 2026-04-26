@@ -15,7 +15,7 @@
  *
  * Env required:
  *   RESEND_API_KEY  — re_... key from resend.com/api-keys
- *   RESEND_FROM     — verified sender, e.g. "Bonsai <appeals@yourdomain.com>"
+ *   RESEND_FROM     — verified sender, e.g. "Bonsai <appeals@your-domain.com>"
  *
  * What to check:
  *   - The Resend dashboard (resend.com/emails) shows the message as
@@ -24,7 +24,7 @@
  *     not promotions. If it lands in spam, the verified domain's SPF or
  *     DKIM is misconfigured, or the sender reputation is too low.
  *   - The From line on the received email reads:
- *       "Bonsai (for <recipient-or-cc>) <appeals@yourdomain.com>"
+ *       "Bonsai (for <recipient-or-cc>) <appeals@your-domain.com>"
  *     If it shows the raw verified address only, the display-name wrap
  *     isn't firing — bug in withDisplayName().
  */
@@ -48,7 +48,7 @@ if (!apiKey) {
 }
 if (!fromEmail) {
   console.error("RESEND_FROM is not set. Add it to .env or your shell.");
-  console.error("Example: RESEND_FROM='Bonsai <appeals@yourdomain.com>'");
+  console.error("Example: RESEND_FROM='Bonsai <appeals@your-domain.com>'");
   process.exit(2);
 }
 
