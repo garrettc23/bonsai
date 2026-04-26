@@ -19,6 +19,7 @@ import type {
 } from "./email.ts";
 import { newId } from "./email.ts";
 import { currentUserPaths } from "../lib/user-paths.ts";
+import { stripMarkdown } from "../lib/strip-markdown.ts";
 
 function defaultThreadsDir(): string {
   return currentUserPaths().threadsDir;
@@ -55,13 +56,16 @@ export class MockEmailClient implements EmailClient {
   }
 
   async send(msg: OutboundEmail): Promise<SentEmail> {
+    // Mirror ResendEmailClient: strip any markdown that drifted past the
+    // negotiator + humanizer prompts so the persisted thread reflects the
+    // plain-text body that would actually go out on the wire.
     const sent: SentEmail = {
       message_id: newId("msg"),
       sent_at: new Date().toISOString(),
       to: msg.to,
       from: msg.from,
       subject: msg.subject,
-      body_markdown: msg.body_markdown,
+      body_text: stripMarkdown(msg.body_text),
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
       cc: msg.cc,
