@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.22.0] - 2026-04-26
+
+### Changed
+- **Offer hunt now fires on approve too, not just on audit.** Previously the comparison agent ran exactly once at audit time, and `mapBillKindToCategory` returned `null` for every real `BillKind` value (`medical`/`telecom`/`utility`/...) — none matched the `OfferCategory` enum (`prescription`/`lab_work`/`hospital_bill`/...). Net effect: the audit-time hunt almost always silently no-op'd, and a user who accepted the appeal but never visited Comparison saw no offers. Multi-category `deriveOfferBaselines` (replaces single-baseline `deriveBaselineFromAudit`) inspects `provider_name` regex (Walgreens/CVS → prescription, Quest/LabCorp → lab_work, hospital + balance > $1500 → hospital_bill, etc.), `bill_kind`, and error `line_quote` drug-name patterns to emit one `Baseline` per detected category. Both `/api/audit` and `/api/approve` fire the new `runOfferHuntsForRun` helper.
+- **Comparison nav pulse now follows the live server-side hunt instead of a fixed 10s window.** New `GET /api/offer-hunt/status/:run_id` endpoint reports `{in_flight, baselines_total, baselines_done, started_at, ended_at}` from a new `offer_hunt` field on `PendingRun` (disk-persisted, survives restart). The Comparison nav pulses while any tracked run is in_flight, capped at 5 minutes — accepting an appeal and walking away to another tab still shows the pulse and refreshes offers when the hunt lands. Replaces the prior tab-active-only 10s pulse that gave up before real 30–90s managed-agent hunts could complete.
+
 ## [0.1.21.2] - 2026-04-26
 
 ### Fixed
