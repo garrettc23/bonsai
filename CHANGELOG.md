@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.8.0] - 2026-04-25
+
+### Added
+- **Rate limiting on public endpoints.** A stranger from Twitter can no longer drain the operator's Anthropic budget overnight or spam the password-reset mailer. New `src/lib/rate-limit.ts` is an in-process sliding-window counter (no Redis dep — fine for single-host beta) keyed by an arbitrary string. Three routes are gated:
+  - `POST /api/auth/forgot` — 5 reset requests per email per hour. Keyed on email (not IP) so per-account harassment is the abuse model, not per-IP signup floods.
+  - `POST /api/auth/signup` — 10 signups per IP per hour. IP comes from `x-forwarded-for` (Railway) with `server.requestIP(req)` as the local-dev fallback.
+  - `POST /api/audit` — 20 audits per user per day, env-overridable via `BONSAI_AUDIT_DAILY_LIMIT`. Audit kicks off Opus 4.7 at ~$0.25–$1.00 per run; the env knob lets staging or paid tiers lift the cap without a rebuild. The 429 response says "Daily limit hit, upgrade to remove." so the future paywall message is already in place.
+  - `POST /webhooks/resend-inbound` stays unlimited — svix-HMAC-verified, dropping a legitimate rep reply would look like Bonsai is dead.
+- Every 429 ships a `Retry-After` header plus `{ error, retry_after_sec }` JSON body so the SPA can surface the wait time inline.
+
 ## [0.1.7.0] - 2026-04-25
 
 ### Added
