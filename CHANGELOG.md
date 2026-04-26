@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.15.0] - 2026-04-26
+
+### Fixed
+- **Comparison page no longer says "Comparison is in beta".** When the feature shipped in v0.1.13.0, `renderEarlyAccessHero` was left in place as the fallback for users with no offers cached — so a fresh user landing on Comparison still saw the old gating hero with "Sign up for early access". Replaced with `renderHeroEmptyView({title: "No alternatives yet", body: "Bonsai hunts for cheaper providers across your recurring costs every time you upload a bill. Drop one on the Home tab to kick off your first audit — Comparison populates automatically once it's done.", cta: "Go to Home"})`, which matches the empty-state pattern used on the Bills tab and routes the CTA to `/overview`.
+- **Polling spinner no longer destroys the offer-grid chrome.** The spinner branch in `renderOffers` was using `view.innerHTML = ...` which nuked `#offers-grid`, `#offers-banner`, and `#offers-filters`. Once that happened, the cards branch couldn't find those elements on the next render and silently no-op'd — so even when offers arrived after a poll cycle they never appeared on screen. New `renderComparisonHuntingHero` uses the same stash-and-swap pattern as `renderHeroEmptyView`, and `renderOffers` calls `restoreViewChildren(view)` before rendering cards to bring the chrome back from the stash.
+
+The `/api/early-access` endpoint and `users.early_access_at` column are left intact — users who opted in during the beta still have that record, even though the UI no longer surfaces a way to add new signups.
+
 ## [0.1.14.0] - 2026-04-26
 
 ### Added
