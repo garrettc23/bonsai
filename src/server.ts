@@ -492,11 +492,20 @@ async function handleAudit(req: Request): Promise<Response> {
  * flow the bill audit produces. The PendingRun is "complaint-shaped":
  * empty errors[], non-bill metadata, complaint-style appeal letter.
  */
+/**
+ * One-shot complaint intake. Creates the run with status="negotiating"
+ * immediately and returns the run_id so the client can navigate straight
+ * to Bills. The slow Opus draft happens in the background; once it lands,
+ * we save the appeal letter onto the run and call kickoffNegotiation,
+ * which is what actually sends the email.
+ */
 async function handleComplaint(req: Request): Promise<Response> {
   const body = (await req.json().catch(() => null)) as {
     company?: string;
     description?: string;
     desired_outcome?: string;
+    support_email?: string | null;
+    support_phone?: string | null;
   } | null;
   const company = body?.company?.trim();
   const description = body?.description?.trim();
@@ -507,7 +516,144 @@ async function handleComplaint(req: Request): Promise<Response> {
     );
   }
   const desired = body?.desired_outcome?.trim() ?? "";
+  const supportEmail = (typeof body?.support_email === "string" ? body!.support_email.trim() : "") || "";
+  const supportPhone = (typeof body?.support_phone === "string" ? body!.support_phone.trim() : "") || "";
+  if (!supportEmail && !supportPhone) {
+    return Response.json(
+      { error: "missing_contact", message: "Add a support email or phone before submitting." },
+      { status: 400 },
+    );
+  }
 
+  // Operator-side gate, same one /api/approve runs. We refuse to create
+  // the run at all if real email isn't configured — better than letting
+  // a complaint sit in Bills with no way to actually send it.
+  const resendKey = process.env.RESEND_API_KEY ?? null;
+  const resendFrom = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL ?? null;
+  if (!resendKey || !resendFrom) {
+    return Response.json(
+      {
+        error: "email_not_configured",
+        message:
+          "Bonsai isn't set up to send real email yet. The operator needs to verify a Resend sending domain and set RESEND_API_KEY + RESEND_FROM.",
+      },
+      { status: 503 },
+    );
+  }
+
+  // Build a stub BonsaiReport. The appeal letter is empty for now — the
+  // background worker fills it in once Opus is done drafting.
+  const fixtureName = `complaint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const partial: BonsaiReport = {
+    analyzer: {
+      metadata: {
+        provider_name: company,
+        provider_billing_address: "",
+        patient_name: "",
+        claim_number: "",
+        date_of_service: "",
+        insurer_name: "",
+        eob_patient_responsibility: 0,
+        bill_current_balance_due: 0,
+        account_number: "",
+        bill_kind: "other",
+      },
+      errors: [],
+      summary: {
+        high_confidence_total: 0,
+        worth_reviewing_total: 0,
+        bill_total_disputed: 0,
+        headline: `Complaint to ${company}`,
+      },
+      grounding_failures: [],
+      meta: {
+        model: "claude-opus-4-7",
+        input_tokens: 0,
+        output_tokens: 0,
+        elapsed_ms: 0,
+        tool_turns: 0,
+      },
+    },
+    appeal: {
+      markdown: "",
+      subject: `Complaint regarding ${company}`,
+      defensible_total: 0,
+      used_placeholders: [],
+    },
+    strategy: {
+      chosen: "persistent",
+      reason: "Complaint mode: email the company, escalate to phone if they stonewall.",
+    },
+    summary: {
+      original_balance: 0,
+      defensible_disputed: 0,
+      final_balance: null,
+      patient_saved: null,
+      channel_used: "persistent",
+      outcome: "in_progress",
+      outcome_detail: "Drafting the complaint letter.",
+    },
+  };
+
+  const run: PendingRun = {
+    run_id: newRunId(),
+    fixture_name: fixtureName,
+    bill_path: "",
+    bill_paths: [],
+    bill_names: [],
+    channel: "persistent",
+    partial_report: partial,
+    qa: [],
+    created_at: Date.now(),
+    // Skip the audited→negotiating dance: complaint flow has no review
+    // step, so we go straight to negotiating once the user submits.
+    status: "negotiating",
+    approved_at: Date.now(),
+    contact: {
+      support_email: supportEmail || null,
+      support_phone: supportPhone || null,
+      support_portal_url: null,
+      account_holder_name: null,
+      bill_kind: "other",
+    },
+    contact_status: "resolved",
+    resolved_contact: {
+      email: supportEmail || null,
+      phone: supportPhone || null,
+      source_urls: [],
+      confidence: "high",
+      notes: "User-provided.",
+      user_edited: true,
+      resolved_at: Date.now(),
+    },
+  };
+  savePending(run);
+
+  // Hand off to the background worker. It drafts via Opus, saves the letter
+  // onto the run, then calls kickoffNegotiation which actually sends the
+  // email. The user is already on Bills by the time any of this completes.
+  void draftComplaintAndKickoff(run.run_id, { company, description, desired }).catch((err) => {
+    console.error(`[complaint draft ${run.run_id}]`, err);
+    const latest = loadPending(run.run_id);
+    if (latest) {
+      latest.status = "failed";
+      latest.error = (err as Error).message;
+      savePending(latest);
+    }
+  });
+
+  return Response.json({ run_id: run.run_id });
+}
+
+/**
+ * Background worker for the complaint flow. Drafts the letter via Opus,
+ * persists it onto the run, then kicks off the actual outbound negotiation.
+ * Run on its own so /api/complaint can return the run_id immediately.
+ */
+async function draftComplaintAndKickoff(
+  runId: string,
+  inputs: { company: string; description: string; desired: string },
+): Promise<void> {
   const system = [
     "You are Bonsai, drafting a formal complaint letter on the user's behalf to a company.",
     "The user describes the issue and what they want; you produce a tight, persuasive complaint letter that:",
@@ -521,9 +667,9 @@ async function handleComplaint(req: Request): Promise<Response> {
   ].join("\n");
 
   const userMsg = [
-    `Company: ${company}`,
-    `Issue: ${description}`,
-    desired ? `Desired outcome: ${desired}` : "",
+    `Company: ${inputs.company}`,
+    `Issue: ${inputs.description}`,
+    inputs.desired ? `Desired outcome: ${inputs.desired}` : "",
   ].filter(Boolean).join("\n");
 
   const COMPLAINT_TOOL: Anthropic.Tool = {
@@ -558,118 +704,105 @@ async function handleComplaint(req: Request): Promise<Response> {
     },
   };
 
-  let drafted: {
+  const anthropic = new Anthropic();
+  const resp = await anthropic.messages.create({
+    model: "claude-opus-4-7",
+    max_tokens: 1500,
+    system,
+    tools: [COMPLAINT_TOOL],
+    tool_choice: { type: "tool", name: "draft_complaint" },
+    messages: [{ role: "user", content: userMsg }],
+  });
+  const tool = resp.content.find(
+    (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "draft_complaint",
+  );
+  if (!tool) throw new Error("Model did not draft the complaint");
+  const drafted = tool.input as {
     subject: string;
     letter_markdown: string;
     headline: string;
     opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
   };
+
+  const run = loadPending(runId);
+  if (!run) return; // user must have deleted it
+  run.partial_report.appeal.markdown = drafted.letter_markdown;
+  run.partial_report.appeal.subject = drafted.subject;
+  run.partial_report.analyzer.summary.headline = drafted.headline;
+  run.partial_report.summary.outcome_detail = "Negotiation in progress.";
+  run.complaint_opportunities = drafted.opportunities;
+  savePending(run);
+
+  await kickoffNegotiation(runId);
+}
+
+/**
+ * Pre-draft chat for the complaint intake screen. The user is filling out
+ * the form (company / what happened / desired) and wants to ask Bonsai a
+ * question — "is this worth pursuing?", "what's a reasonable ask?", etc.
+ *
+ * No PendingRun exists yet at this point (the run is created when the user
+ * clicks Accept &amp; negotiate), so we keep the conversation client-side
+ * and re-send the full history on every turn. Stateless on the server.
+ */
+async function handleComplaintChat(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    company?: string;
+    description?: string;
+    desired_outcome?: string;
+    history?: Array<{ role: "user" | "assistant"; body: string }>;
+    message?: string;
+  } | null;
+  const message = body?.message?.trim();
+  if (!message) {
+    return Response.json({ error: "Missing message" }, { status: 400 });
+  }
+  const company = body?.company?.trim() ?? "";
+  const description = body?.description?.trim() ?? "";
+  const desired = body?.desired_outcome?.trim() ?? "";
+  const history = Array.isArray(body?.history) ? body!.history : [];
+
+  const system = [
+    "You are Bonsai, an advisor helping the user fill out a complaint or refund request before we contact the company on their behalf.",
+    "The user is mid-form. They may ask whether their case is strong, what to say, what to ask for, or how Bonsai will handle it.",
+    "Tone: warm, plain-language, encouraging. 1-3 sentences. No prefaces, no 'great question'.",
+    "DO NOT cite regulations, statutes, or legal codes (no 'DOT 14 CFR', 'Magnuson-Moss', 'FTC Mail Order Rule'). Keep it everyday-language. If the user is unsure whether they have a case, give a confidence-building answer in human terms.",
+    "Don't draft the full letter — the user hasn't hit Accept yet. Just answer what they asked.",
+    "",
+    "CURRENT FORM STATE:",
+    `Company: ${company || "(blank)"}`,
+    `Issue: ${description || "(blank)"}`,
+    `Desired outcome: ${desired || "(blank)"}`,
+  ].join("\n");
+
+  const messages: Anthropic.Messages.MessageParam[] = [];
+  for (const m of history) {
+    if (m.role !== "user" && m.role !== "assistant") continue;
+    if (typeof m.body !== "string" || !m.body.trim()) continue;
+    messages.push({ role: m.role, content: m.body });
+  }
+  messages.push({ role: "user", content: message });
+
   try {
     const anthropic = new Anthropic();
     const resp = await anthropic.messages.create({
       model: "claude-opus-4-7",
-      max_tokens: 1500,
+      max_tokens: 400,
       system,
-      tools: [COMPLAINT_TOOL],
-      tool_choice: { type: "tool", name: "draft_complaint" },
-      messages: [{ role: "user", content: userMsg }],
+      messages,
     });
-    const tool = resp.content.find(
-      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "draft_complaint",
-    );
-    if (!tool) {
-      return Response.json({ error: "Model did not draft the complaint" }, { status: 502 });
+    const reply = resp.content
+      .filter((b): b is Anthropic.Messages.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+    if (!reply) {
+      return Response.json({ error: "Model returned no text" }, { status: 502 });
     }
-    drafted = tool.input as typeof drafted;
+    return Response.json({ reply });
   } catch (err) {
     return Response.json({ error: (err as Error).message }, { status: 500 });
   }
-
-  // Synthesize a BonsaiReport-shaped object so the existing plan-review
-  // UI can render it without special-casing. The analyzer block carries
-  // the user's description in line_quote so anything that displays it
-  // ("the rep replied to: …") still looks coherent.
-  const fixtureName = `complaint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const partial: BonsaiReport = {
-    analyzer: {
-      metadata: {
-        provider_name: company,
-        provider_billing_address: "",
-        patient_name: "",
-        claim_number: "",
-        date_of_service: "",
-        insurer_name: "",
-        eob_patient_responsibility: 0,
-        bill_current_balance_due: 0,
-        account_number: "",
-        bill_kind: "other",
-      },
-      errors: [],
-      summary: {
-        high_confidence_total: 0,
-        worth_reviewing_total: 0,
-        bill_total_disputed: 0,
-        headline: drafted.headline,
-      },
-      grounding_failures: [],
-      meta: {
-        model: "claude-opus-4-7",
-        input_tokens: 0,
-        output_tokens: 0,
-        elapsed_ms: 0,
-        tool_turns: 1,
-      },
-    },
-    appeal: {
-      markdown: drafted.letter_markdown,
-      subject: drafted.subject,
-      defensible_total: 0,
-      used_placeholders: [],
-    },
-    strategy: {
-      chosen: "persistent",
-      reason: "Complaint mode: email the company, escalate to phone if they stonewall.",
-    },
-    summary: {
-      original_balance: 0,
-      defensible_disputed: 0,
-      final_balance: null,
-      patient_saved: null,
-      channel_used: "persistent",
-      outcome: "in_progress",
-      outcome_detail: "Awaiting user approval of the complaint letter.",
-    },
-  };
-
-  const run: PendingRun = {
-    run_id: newRunId(),
-    fixture_name: fixtureName,
-    bill_path: "",
-    bill_paths: [],
-    bill_names: [],
-    channel: "persistent",
-    partial_report: partial,
-    qa: [],
-    created_at: Date.now(),
-    status: "audited",
-    contact: { support_email: null, support_phone: null, support_portal_url: null, account_holder_name: null, bill_kind: "other" },
-    contact_status: "pending",
-  };
-  savePending(run);
-
-  // Stash the drafted opportunities on the run itself so /api/opportunities
-  // can return them without a second Opus call. Skipped for bill audits
-  // (no field set), used here for complaint runs.
-  run.complaint_opportunities = drafted.opportunities;
-  savePending(run);
-
-  // Kick off the contact lookup so the user's company gets a contact
-  // resolved (e.g. customer-support@united.com).
-  kickoffContactResolution(run.run_id).catch((err) => {
-    console.error(`[contact ${run.run_id}]`, err);
-  });
-
-  return Response.json({ run_id: run.run_id, report: partial });
 }
 
 /**
@@ -2552,6 +2685,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);
         if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
         if (req.method === "POST" && url.pathname === "/api/complaint") return handleComplaint(req);
+        if (req.method === "POST" && url.pathname === "/api/complaint/chat") return handleComplaintChat(req);
         if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
         if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
         if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);

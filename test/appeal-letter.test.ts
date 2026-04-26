@@ -60,12 +60,18 @@ describe("generateAppealLetter — placeholders", () => {
     expect(letter.used_placeholders).toContain("EOB PATIENT RESPONSIBILITY");
   });
 
-  test("treats empty-string metadata as missing", () => {
+  test("treats empty-string metadata as missing and omits bracketed scaffolding", () => {
     const letter = generateAppealLetter(
       fakeResult({ metadata: { patient_name: "" as string } }),
     );
+    // Still tracked so the orchestrator can flag the run.
     expect(letter.used_placeholders).toContain("PATIENT NAME");
-    expect(letter.markdown).toContain("[PATIENT NAME]");
+    // But the markdown drops the field entirely instead of leaving
+    // [PATIENT NAME] for the user to fill in — the humanizer can't
+    // reliably scrub brackets, and missing-name reads better as omitted
+    // than as a glaring placeholder.
+    expect(letter.markdown).not.toContain("[PATIENT NAME]");
+    expect(letter.markdown).not.toContain("[");
   });
 });
 
@@ -163,10 +169,14 @@ describe("generateAppealLetter — dollar formatting", () => {
     expect(letter.markdown).toContain("$3,812.00");
   });
 
-  test("renders [AMOUNT] when eob_patient_responsibility is null", () => {
+  test("omits the EOB-vs-bill comparison when eob_patient_responsibility is null", () => {
     const letter = generateAppealLetter(
       fakeResult({ metadata: { eob_patient_responsibility: null } }),
     );
-    expect(letter.markdown).toContain("[AMOUNT]");
+    // No bracketed [AMOUNT] — the entire EOB-comparison sentence is
+    // dropped because we can't render it grounded.
+    expect(letter.markdown).not.toContain("[AMOUNT]");
+    expect(letter.markdown).not.toContain("total patient responsibility is");
+    expect(letter.used_placeholders).toContain("EOB PATIENT RESPONSIBILITY");
   });
 });

@@ -183,16 +183,25 @@ async function confirmDiscardUnsaved() {
   //   2) Profile/Settings field edits (unsavedGuard).
   if (currentNav === "overview" && hasInFlightAuditWork()) {
     const isReview = currentWorkflowView === "review";
-    return confirmModal({
-      title: isReview
-        ? "Leave without accepting the plan?"
-        : "Discard the bill you're about to upload?",
-      body: isReview
-        ? "Bonsai already audited this bill. If you leave now, the audit and the negotiation plan are gone — you'll need to re-upload to get them back."
-        : "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.",
-      confirmText: isReview ? "Leave" : "Discard",
-      cancelText: isReview ? "Stay on this plan" : "Stay here",
-    });
+    const isComplaint = currentWorkflowView === "complaint";
+    let title, body, confirmText, cancelText;
+    if (isReview) {
+      title = "Leave without accepting the plan?";
+      body = "Bonsai already audited this bill. If you leave now, the audit and the negotiation plan are gone — you'll need to re-upload to get them back.";
+      confirmText = "Leave";
+      cancelText = "Stay on this plan";
+    } else if (isComplaint) {
+      title = "Discard this complaint?";
+      body = "You've started typing a complaint. Leaving will clear what you've written.";
+      confirmText = "Discard";
+      cancelText = "Keep editing";
+    } else {
+      title = "Discard the bill you're about to upload?";
+      body = "You have a bill queued but Bonsai hasn't audited it yet. Leaving will clear those files and you'll need to re-upload.";
+      confirmText = "Discard";
+      cancelText = "Stay here";
+    }
+    return confirmModal({ title, body, confirmText, cancelText });
   }
   if (!unsavedGuard?.isDirty?.()) return true;
   if (!(currentNav === "profile" || currentNav === "settings")) return true;
@@ -223,10 +232,10 @@ function fmt$2(n) {
 // they don't lose the in-flight work.
 let currentWorkflowView = "overview";
 function setWorkflowView(view) {
-  // overview | progress | review | results | error — all sub-views inside the main content area.
+  // overview | complaint | progress | review | results | error — sub-views inside the main content area.
   // Only one of these is visible at a time when nav=overview.
   currentWorkflowView = view;
-  for (const v of ["overview", "progress", "review", "results", "error"]) {
+  for (const v of ["overview", "complaint", "progress", "review", "results", "error"]) {
     const el = $(`#view-${v}`);
     if (!el) continue;
     if (v === view) el.classList.remove("hidden");
@@ -242,8 +251,20 @@ function setWorkflowView(view) {
 function hasInFlightAuditWork() {
   if (currentWorkflowView === "progress") return true;
   if (currentWorkflowView === "review" && reviewState != null) return true;
+  if (currentWorkflowView === "complaint" && hasComplaintInProgress()) return true;
   if (hasStagedUpload()) return true;
   return false;
+}
+
+function hasComplaintInProgress() {
+  // True when the user has typed anything into the complaint intake — leaving
+  // mid-typing should warn so the draft text isn't silently lost.
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const desc = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+  const email = $("#complaint-contact-email")?.value?.trim() ?? "";
+  const phone = $("#complaint-contact-phone")?.value?.trim() ?? "";
+  return Boolean(company || desc || desired || email || phone);
 }
 
 async function showNav(name) {
@@ -268,6 +289,10 @@ async function showNav(name) {
     // state and re-prompt unnecessarily.
     if (homeFromMidFlow) {
       reviewState = null;
+      clearComplaintInputs();
+    }
+    if (tabSwitch && currentWorkflowView === "complaint") {
+      clearComplaintInputs();
     }
   }
   currentNav = name;
@@ -277,7 +302,7 @@ async function showNav(name) {
     n.classList.toggle("active", n.dataset.nav === name);
   }
   // Hide every view; the nav-specific ones get revealed below
-  for (const v of ["overview", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
+  for (const v of ["overview", "complaint", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
     $(`#view-${v}`)?.classList.add("hidden");
   }
   if (name === "overview") {
@@ -764,16 +789,20 @@ async function init() {
     await runPhasedFromSample(fixture, channel);
   });
 
-  // Complaint flow — non-bill negotiations (flight delays, refunds, etc.)
-  $("#open-complaint-btn")?.addEventListener("click", openComplaintModal);
-  $("#complaint-cancel")?.addEventListener("click", closeComplaintModal);
-  // Click the scrim *background* to close, but not clicks on the modal
-  // box itself — without the target check the modal would dismiss
-  // every time the user clicked into one of its inputs.
-  $("#complaint-scrim")?.addEventListener("click", (ev) => {
-    if (ev.target === ev.currentTarget) closeComplaintModal();
-  });
+  // Complaint flow — non-bill negotiations (flight delays, refunds, etc.).
+  // Opens a dedicated workflow sub-view (not a modal) so the intake feels
+  // like the same lane as the bill audit flow.
+  $("#open-complaint-btn")?.addEventListener("click", openComplaintView);
   $("#complaint-submit")?.addEventListener("click", submitComplaint);
+
+  // Right-column advisory chat. Stateless on the server — we re-send the
+  // full history on every turn so /api/complaint/chat can answer in
+  // context of the form fields the user has filled out so far.
+  $("#complaint-chat-form")?.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    submitComplaintChat();
+  });
+  attachPhoneFormatter($("#complaint-contact-phone"));
 
   // ─── Multi-file staging: drop/pick up to 10 files, review, then "Next" ──
   const uploadForm = $("#upload-form");
@@ -1064,7 +1093,7 @@ async function init() {
   // Pre-load history for Bills count badge + approvals
   await loadHistory();
   updateNavCounts();
-  renderApprovalsOnOverview();
+  renderAttentionList();
   loadReceipts();
 
   // Default view
@@ -1287,21 +1316,109 @@ async function runAndRender(fn) {
 
 let reviewState = null; // { run_id, partial_report }
 
-function openComplaintModal() {
-  $("#complaint-error").hidden = true;
-  $("#complaint-error").textContent = "";
-  $("#complaint-scrim").hidden = false;
+// Complaint chat history for the right-column advisory chat. Lives only in
+// memory because no PendingRun exists yet — we send the full history on
+// every turn so /api/complaint/chat can stay stateless.
+let complaintChatHistory = [];
+
+function openComplaintView() {
+  const errEl = $("#complaint-error");
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
+  setWorkflowView("complaint");
+  updatePageHeader({
+    eyebrow: "Negotiate",
+    title: "Tell Bonsai what happened",
+  });
   setTimeout(() => $("#complaint-company")?.focus(), 50);
 }
 
-function closeComplaintModal() {
-  $("#complaint-scrim").hidden = true;
+function clearComplaintInputs() {
+  const company = $("#complaint-company");
+  const desc = $("#complaint-description");
+  const desired = $("#complaint-desired");
+  if (company) company.value = "";
+  if (desc) desc.value = "";
+  if (desired) desired.value = "";
+  const email = $("#complaint-contact-email");
+  const phone = $("#complaint-contact-phone");
+  if (email) email.value = "";
+  if (phone) phone.value = "";
+  const errEl = $("#complaint-error");
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
+  const chatLog = $("#complaint-chat-log");
+  if (chatLog) chatLog.innerHTML = "";
+  complaintChatHistory = [];
 }
 
+async function submitComplaintChat() {
+  const input = $("#complaint-chat-input");
+  const msg = input?.value?.trim() ?? "";
+  if (!msg) return;
+  const log = $("#complaint-chat-log");
+  if (!log) return;
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const description = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+
+  const qDiv = document.createElement("div");
+  qDiv.className = "qa-msg q";
+  qDiv.innerHTML = `<div class="qa-role">You</div><div class="qa-body"></div>`;
+  qDiv.querySelector(".qa-body").textContent = msg;
+  log.appendChild(qDiv);
+  input.value = "";
+  input.disabled = true;
+  const btn = $("#complaint-chat-form button");
+  if (btn) btn.disabled = true;
+  const thinking = document.createElement("div");
+  thinking.className = "qa-msg a";
+  thinking.innerHTML = `<div class="qa-role">Bonsai</div><div class="qa-body"><span class="dots"><span></span><span></span><span></span></span></div>`;
+  log.appendChild(thinking);
+  log.scrollTop = log.scrollHeight;
+
+  try {
+    const res = await fetch("/api/complaint/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        company,
+        description,
+        desired_outcome: desired,
+        history: complaintChatHistory,
+        message: msg,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { reply } = await res.json();
+    thinking.querySelector(".qa-body").textContent = reply;
+    complaintChatHistory.push({ role: "user", body: msg });
+    complaintChatHistory.push({ role: "assistant", body: reply });
+  } catch (err) {
+    thinking.querySelector(".qa-body").textContent = `Error: ${err?.message ?? err}`;
+    thinking.classList.add("error");
+  } finally {
+    input.disabled = false;
+    if (btn) btn.disabled = false;
+    input.focus();
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+// One-click flow: draft the complaint, save the user-typed contact, kick
+// off negotiation, and route the user to Bills. Mirrors the multi-step
+// bill flow but runs all three calls inline since there's no review step.
 async function submitComplaint() {
   const company = $("#complaint-company")?.value?.trim() ?? "";
   const description = $("#complaint-description")?.value?.trim() ?? "";
   const desired = $("#complaint-desired")?.value?.trim() ?? "";
+  const email = $("#complaint-contact-email")?.value?.trim() ?? "";
+  const phone = $("#complaint-contact-phone")?.value?.trim() ?? "";
   const errEl = $("#complaint-error");
   const submitBtn = $("#complaint-submit");
   if (!company || !description) {
@@ -1309,41 +1426,45 @@ async function submitComplaint() {
     errEl.hidden = false;
     return;
   }
+  if (!email && !phone) {
+    errEl.textContent = "Add a customer-support email or phone so Bonsai knows where to reach out.";
+    errEl.hidden = false;
+    return;
+  }
   errEl.hidden = true;
   submitBtn.disabled = true;
-  submitBtn.textContent = "Drafting…";
-  // Show the loading view immediately; the Opus draft takes ~10-15s.
-  closeComplaintModal();
-  setWorkflowView("progress");
-  updatePageHeader({
-    eyebrow: "Drafting your complaint",
-    title: `Building the case against ${escapeHtml(company)}`,
-  });
-  startTimeline();
+  submitBtn.textContent = "Sending to Bonsai…";
+  // Single POST — server creates the run + status=negotiating immediately,
+  // then drafts the letter and sends the email in the background. The user
+  // is on Bills before any of that completes.
   try {
     const res = await fetch("/api/complaint", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ company, description, desired_outcome: desired }),
+      body: JSON.stringify({
+        company,
+        description,
+        desired_outcome: desired,
+        support_email: email || null,
+        support_phone: phone || null,
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
-    const { run_id, report } = await res.json();
-    stopTimeline();
-    reviewState = { run_id, partial_report: report };
-    renderReviewView(report);
-    setWorkflowView("review");
-    // Reset the modal inputs for next time.
-    $("#complaint-company").value = "";
-    $("#complaint-description").value = "";
-    $("#complaint-desired").value = "";
+
+    clearComplaintInputs();
+    // Reset workflow state so the nav guard doesn't prompt on the way out.
+    setWorkflowView("overview");
+    reviewState = null;
+    await loadHistory();
+    updateNavCounts();
+    await showNav("bills");
   } catch (err) {
-    stopTimeline();
     $("#error-body").textContent = String(err?.message ?? err);
     setWorkflowView("error");
   } finally {
     submitBtn.disabled = false;
-    submitBtn.textContent = "Draft my complaint";
+    submitBtn.textContent = "Accept & negotiate";
   }
 }
 
@@ -2025,7 +2146,7 @@ async function approveAndRun() {
     reviewState = null;
     await loadHistory();
     updateNavCounts();
-    showNav("bills");
+    await showNav("bills");
   } catch (err) {
     $("#error-body").textContent = String(err?.message ?? err);
     setWorkflowView("error");
@@ -2068,8 +2189,8 @@ function resetPageHeader() {
     });
   } else if (currentNav === "bills") {
     updatePageHeader({
-      eyebrow: "Bills",
-      title: "Every bill monitored",
+      eyebrow: "Negotiation",
+      title: "Every negotiation in one place",
       stats: null,
     });
   } else if (currentNav === "offers") {
@@ -2473,41 +2594,147 @@ function restoreViewChildren(view) {
   hero.remove();
 }
 
-// ─── Approvals (Overview) ───────────────────────────────────────
+// ─── Attention carousel (Negotiation tab) ─────────────────────────
+// Every bill that needs the user's sign-off (or any other action — error,
+// paused, verify-outcome, awaiting-approval) surfaces here above the
+// stats. One card visible at a time; arrows page through the rest. The
+// primary + secondary action buttons inline on the card mirror the
+// drawer's Attention tab, so users can resolve without opening it.
 
-function renderApprovalsOnOverview() {
+const ATTENTION_CARD_BODY = {
+  escalated: (a) => `Provider countered. Defensible amount: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve the counter or push back for a lower price.`,
+  awaiting: () => `Audit complete. Review the plan and accept to start negotiating.`,
+  error: (a) => a.error ? `Bonsai's agent hit an error: ${escapeHtml(a.error)}. Retry to keep going.` : `Bonsai's agent hit an error mid-negotiation. Retry to keep going.`,
+  paused: () => `Paused by you. Resume to keep negotiating.`,
+  verify_outcome: () => `Negotiation resolved. Confirm whether your next bill matched what Bonsai got.`,
+};
+
+let attentionCarouselIndex = 0;
+
+function makeRowFromAudit(a, reason) {
+  // Re-build the lightweight row shape openBillDrawer / handleAttentionAction
+  // / resumeAgent expect, so an inline carousel button can drive the same
+  // server actions as the drawer.
+  const score = scoreFromAudit(a);
+  return {
+    id: `audit-${a.name}`,
+    kind: "audit",
+    vendor: a.provider_name ?? a.name,
+    account: a.patient_name ? `${a.patient_name} · ${a.date_of_service ?? "—"}` : (a.date_of_service ?? "One-time bill"),
+    lastCheck: relTime(a.modified),
+    addedAt: a.modified ?? Date.now(),
+    balance: a.final_balance ?? a.original_balance ?? 0,
+    rate: "",
+    category: inferCategory(a),
+    score,
+    scoreLabel: scoreLabelFor(score),
+    auto: true,
+    audit: a,
+    status: a.status,
+    lifecycle: "attention",
+    attentionReason: reason,
+  };
+}
+
+function renderAttentionList() {
   const root = $("#approvals-grid");
   const block = $("#approvals-block");
   const title = $("#approvals-title");
   if (!root || !block) return;
   const audits = historyCache?.audits ?? [];
-  const escalated = audits.filter((a) => a.outcome === "escalated");
-  if (!escalated.length) {
+  const attention = audits
+    .map((a) => ({ a, reason: attentionReason(a) }))
+    .filter((x) => x.reason != null);
+  if (!attention.length) {
     block.hidden = true;
     return;
   }
+  // Clamp the carousel index so resolved items at the end don't strand us
+  // on a blank slot — and so a fresh attention item lands on a valid card.
+  if (attentionCarouselIndex >= attention.length) attentionCarouselIndex = 0;
+  if (attentionCarouselIndex < 0) attentionCarouselIndex = attention.length - 1;
+
   block.hidden = false;
-  title.textContent = escalated.length === 1
+  title.textContent = attention.length === 1
     ? "One negotiation needs your sign-off."
-    : `${escalated.length} negotiations need your sign-off.`;
-  root.innerHTML = "";
-  for (const a of escalated) {
-    const card = document.createElement("div");
-    card.className = "approval-card";
-    card.innerHTML = `
-      <div class="approval-card-head">
-        <div class="approval-card-icon">${ICONS.hospital}</div>
-        <div class="approval-card-meta">${(a.channel_used ?? "email").toUpperCase()} · ${a.date_of_service ?? "—"}</div>
-        <div class="approval-card-save">${fmt$(a.patient_saved ?? 0)}</div>
+    : `${attention.length} negotiations need your sign-off.`;
+
+  const cur = attention[attentionCarouselIndex];
+  const { a, reason } = cur;
+  const row = makeRowFromAudit(a, reason);
+  const content = ATTENTION_CONTENT[reason.key] ?? null;
+  const bodyFn = ATTENTION_CARD_BODY[reason.key] ?? (() => reason.label);
+
+  const primaryBtn = content?.primary
+    ? `<button type="button" class="btn btn-primary" data-attn-action="${escapeHtml(content.primary.id)}">${escapeHtml(content.primary.label)}</button>`
+    : "";
+  const secondaryBtn = content?.secondary
+    ? `<button type="button" class="btn btn-ghost" data-attn-action="${escapeHtml(content.secondary.id)}">${escapeHtml(content.secondary.label)}</button>`
+    : "";
+  const openBtn = `<button type="button" class="btn btn-ghost btn-tight" data-attn-open>Open details</button>`;
+
+  const showArrows = attention.length > 1;
+  const pager = showArrows
+    ? `<div class="attention-pager">
+         <div class="attention-dots">
+           ${attention.map((_, i) => `<span class="attention-dot${i === attentionCarouselIndex ? " is-active" : ""}"></span>`).join("")}
+         </div>
+         <div class="attention-counter mono">${attentionCarouselIndex + 1} of ${attention.length}</div>
+       </div>`
+    : "";
+
+  root.innerHTML = `
+    <div class="attention-carousel">
+      ${showArrows ? `<button type="button" class="attention-arrow" data-attn-nav="prev" aria-label="Previous">‹</button>` : ""}
+      <div class="approval-card approval-card-${reason.key}">
+        <div class="approval-card-head">
+          <div class="approval-card-icon">${ICONS.hospital}</div>
+          <div class="approval-card-meta">${(a.channel_used ?? "email").toUpperCase()} · ${a.date_of_service ?? relTime(a.modified)}</div>
+          <div class="approval-card-save">${fmt$(a.patient_saved ?? 0)}</div>
+        </div>
+        <div class="approval-card-title">${escapeHtml(a.provider_name ?? a.name)}</div>
+        <div class="approval-card-reason">${escapeHtml(reason.label)}</div>
+        <div class="approval-card-body">${bodyFn(a)}</div>
+        <div class="approval-card-actions">
+          ${openBtn}
+          ${secondaryBtn}
+          ${primaryBtn}
+        </div>
       </div>
-      <div class="approval-card-title">${escapeHtml(a.provider_name ?? a.name)}</div>
-      <div class="approval-card-body">Provider countered. Defensible amount: <strong>${fmt$(a.defensible_disputed ?? 0)}</strong>. Approve the counter or push back for a lower price.</div>
-      <div class="approval-card-actions">
-        <button class="btn btn-ghost" data-act="reject">Push back</button>
-        <button class="btn btn-primary" data-act="approve">Approve</button>
-      </div>`;
-    root.appendChild(card);
-  }
+      ${showArrows ? `<button type="button" class="attention-arrow" data-attn-nav="next" aria-label="Next">›</button>` : ""}
+    </div>
+    ${pager}
+  `;
+
+  // Carousel navigation
+  root.querySelectorAll("[data-attn-nav]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const dir = btn.dataset.attnNav;
+      attentionCarouselIndex =
+        dir === "prev"
+          ? (attentionCarouselIndex - 1 + attention.length) % attention.length
+          : (attentionCarouselIndex + 1) % attention.length;
+      renderAttentionList();
+    });
+  });
+
+  // Inline resolve actions — wire to the same handler the drawer uses.
+  // resumeAgent / stopAgent read drawerState.row, so seed it before firing.
+  // `silent: true` suppresses the post-action drawer auto-open so the user
+  // who clicked here gets the action and stays on the list.
+  root.querySelectorAll("[data-attn-action]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      drawerState.row = row;
+      handleAttentionAction(btn.dataset.attnAction, row, { silent: true });
+    });
+  });
+
+  root.querySelector("[data-attn-open]")?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    void openBillDrawer(row);
+  });
 }
 
 // ─── Mock recurring bills + offers + settings ──────────────────
@@ -2568,8 +2795,8 @@ function scheduleBillsPoll() {
 
 function renderBills() {
   updatePageHeader({
-    eyebrow: "Bills",
-    title: "Every bill monitored",
+    eyebrow: "Negotiation",
+    title: "Every negotiation in one place",
     stats: null,
   });
 
@@ -2581,10 +2808,10 @@ function renderBills() {
   if (view) {
     if (audits.length === 0) {
       renderHeroEmptyView(view, {
-        title: "No bills uploaded yet",
+        title: "No negotiations yet",
         body:
-          "Drop a bill on the home tab. Bonsai audits it, finds the overcharges, and starts negotiating with the provider — every step lands here as it happens.",
-        cta: "Upload a bill",
+          "Drop a bill or kick off a complaint from the home tab. Bonsai negotiates with the provider — every step, counter, and outcome lands here as it happens.",
+        cta: "Start a negotiation",
       });
       scheduleBillsPoll();
       return;
@@ -2643,6 +2870,11 @@ function renderBills() {
     (s, a) => s + clampSaved(a.patient_saved, a.original_balance),
     0,
   );
+
+  // Attention cards render above the metrics. Re-render every time the
+  // bills list refreshes so a counter that just landed (or got resolved)
+  // shows up without a tab switch.
+  renderAttentionList();
 
   $("#bills-stats").innerHTML = `
     <div>
@@ -2920,9 +3152,13 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
+  // Page-header title is the original "Cheaper alternatives, found for
+  // you" from when this tab was live. Comparison is now in beta — the
+  // hero card below ("Comparison is in beta" + early-access CTA) carries
+  // the not-yet-shipping state, so the page title can stay aspirational.
   updatePageHeader({
     eyebrow: "Comparison",
-    title: "Beta",
+    title: "Cheaper alternatives, found for you",
     stats: null,
   });
 
@@ -4360,7 +4596,8 @@ function confirmModal({ title, body, confirmText = "Confirm", cancelText = "Canc
   });
 }
 
-async function resumeAgent() {
+async function resumeAgent(opts) {
+  const silent = opts?.silent === true;
   const row = drawerState?.row;
   const runId = row?.audit?.run_id;
   if (!runId) return;
@@ -4374,8 +4611,12 @@ async function resumeAgent() {
     await loadHistory();
     updateNavCounts();
     if (currentNav === "bills") renderBills();
-    // Stay in the drawer so the user can see the state flip back to
-    // Negotiating with the Stop button ready.
+    // When invoked from the carousel, the user never opened the drawer —
+    // re-opening it after the action would feel like an unwanted modal.
+    // Skip the drawer hand-off and just leave them on the list. The
+    // attention card will fall away on the next render since the
+    // negotiation has flipped back to active.
+    if (silent) return;
     const updatedRow = findUpdatedRowAfterRefresh(row);
     if (updatedRow) {
       drawerState.row = updatedRow;
@@ -5028,13 +5269,14 @@ async function promptResumeMode(row) {
   }
 }
 
-function handleAttentionAction(action, row) {
+function handleAttentionAction(action, row, opts) {
+  const silent = opts?.silent === true;
   const runId = row?.audit?.run_id;
   // verify_outcome lives outside the start/resume machinery — it just
   // POSTs the user's verdict and re-renders. "Yes" submits immediately;
   // "No or partial" pops a small modal so we can capture notes.
   if (action === "outcome_yes") {
-    void submitOutcomeVerification(row, "yes");
+    void submitOutcomeVerification(row, "yes", undefined, { silent });
     return;
   }
   if (action === "outcome_no_match") {
@@ -5051,10 +5293,11 @@ function handleAttentionAction(action, row) {
       // through to resume so the agent's next round can confirm. The user
       // can also leave a Feedback note ("accept their counter, no further
       // negotiation") to make it explicit.
-      void resumeAgent();
+      void resumeAgent({ silent });
       // Close the drawer once the user's approved — keeping it open after
       // they hit the primary action feels like the action didn't take.
-      closeBillDrawer();
+      // From the carousel the drawer isn't open; closeBillDrawer is a no-op.
+      if (!silent) closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -5062,13 +5305,13 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "resolved";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    closeBillDrawer();
+    if (!silent) closeBillDrawer();
     return;
   }
   if (action === "start" || action === "resume" || action === "retry" || action === "keep_negotiating") {
     if (runId) {
-      void resumeAgent();
-      closeBillDrawer();
+      void resumeAgent({ silent });
+      if (!silent) closeBillDrawer();
       return;
     }
     setMockPaused(row.id, false);
@@ -5076,14 +5319,15 @@ function handleAttentionAction(action, row) {
     row.lifecycle = "active";
     if (currentNav === "bills") renderBills();
     updateNavCounts();
-    closeBillDrawer();
+    if (!silent) closeBillDrawer();
   }
 }
 
 // POST the user's outcome verdict to the server. After it lands, refresh
 // the bills list so the row drops out of the attention bucket and the
 // drawer re-renders with the verified state.
-async function submitOutcomeVerification(row, verified, notes) {
+async function submitOutcomeVerification(row, verified, notes, opts) {
+  const silent = opts?.silent === true;
   const runId = row?.audit?.run_id;
   if (!runId) return;
   try {
@@ -5108,6 +5352,9 @@ async function submitOutcomeVerification(row, verified, notes) {
     row.attentionReason = null;
     if (currentNav === "bills") renderBills();
     updateNavCounts();
+    // From the carousel the drawer was never open — re-opening it after
+    // the user hits "Yes, it matched" feels like the action backfired.
+    if (silent) return;
     // Re-open so the drawer reflects the new state (e.g. status pill).
     void openBillDrawer(row);
   } catch (err) {

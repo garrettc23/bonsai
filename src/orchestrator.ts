@@ -175,6 +175,20 @@ export async function runAuditPhase(opts: RunBonsaiOpts): Promise<BonsaiReport> 
 }
 
 /**
+ * True when the provider email's domain is a reserved testing TLD —
+ * .example / .test / .invalid / .localhost (RFC 2606 / 6761). These are
+ * never deliverable through Resend; routing them through the simulator
+ * keeps the sample-bill demo from immediately failing.
+ */
+function isSyntheticEmail(email: string | null | undefined): boolean {
+  if (!email) return false;
+  const domain = email.split("@")[1]?.toLowerCase();
+  if (!domain) return false;
+  const tld = domain.split(".").pop();
+  return tld === "example" || tld === "test" || tld === "invalid" || tld === "localhost";
+}
+
+/**
  * Phase 2: Execute the negotiation against an already-audited bill. Takes the
  * partial report from `runAuditPhase` and fills in `persistent_run`, thread
  * transcripts, and final `summary.outcome`.
@@ -239,10 +253,18 @@ export async function runNegotiationPhase(
   }
 
   if (strategy.chosen === "email") {
-    // Pick Resend when env is configured, fall back to MockEmailClient
-    // for local dev without keys. autoEmailClient handles the env check.
-    const client = await autoEmailClient();
-    const isReal = !(client instanceof MockEmailClient);
+    // Synthetic recipient guard. Sample fixtures pre-seed contacts with
+    // .example / .test / .invalid TLDs (e.g. billing@stsynthetic.example)
+    // because we don't ship real provider addresses in the demo data.
+    // Resend rejects those domains as undeliverable, which used to surface
+    // as a generic "agent error" on the negotiation list right after the
+    // user clicked Accept. Detect them up-front and route through the
+    // simulator so the sample demos end-to-end regardless of env.
+    const synthetic = isSyntheticEmail(providerEmail);
+    const client = synthetic
+      ? new MockEmailClient()
+      : await autoEmailClient();
+    const isReal = !synthetic && !(client instanceof MockEmailClient);
     const { thread_id, state: initState } = await startNegotiation({
       analyzer,
       client,
