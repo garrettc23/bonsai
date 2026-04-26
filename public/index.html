@@ -463,7 +463,6 @@
                 <div class="eyebrow eyebrow-inverted">Annual savings if you switch to all recommended</div>
                 <div class="banner-amount" id="banner-amount">—</div>
               </div>
-              <button id="offers-accept-all" class="btn btn-ghost btn-on-dark">Accept all recommended</button>
             </div>
             <div class="offers-filters" id="offers-filters"></div>
             <div class="offers-grid" id="offers-grid"></div>
@@ -623,11 +622,24 @@
         </button>
       </div>
       <div class="cmp-body">
-        <ol class="switch-steps" id="switch-steps"></ol>
-        <div class="switch-note" id="switch-note"></div>
+        <div id="switch-steps-view">
+          <ol class="switch-steps" id="switch-steps"></ol>
+          <div class="switch-note" id="switch-note"></div>
+        </div>
+        <div id="switch-amount-view" hidden>
+          <div class="switch-amount-prompt" id="switch-amount-prompt"></div>
+          <label class="switch-amount-label" for="switch-amount-input">New monthly amount (USD)</label>
+          <input type="number" inputmode="decimal" min="0" step="0.01" id="switch-amount-input" class="switch-amount-input" placeholder="59.99" />
+          <div class="switch-amount-error" id="switch-amount-error" hidden></div>
+        </div>
       </div>
-      <div class="confirm-actions">
-        <button type="button" class="btn btn-primary" id="switch-ok">Got it</button>
+      <div class="confirm-actions" id="switch-actions-steps">
+        <button type="button" class="btn btn-ghost" id="switch-dismiss">Dismiss</button>
+        <button type="button" class="btn btn-primary" id="switch-complete">Complete</button>
+      </div>
+      <div class="confirm-actions" id="switch-actions-amount" hidden>
+        <button type="button" class="btn btn-ghost" id="switch-amount-cancel">Back</button>
+        <button type="button" class="btn btn-primary" id="switch-amount-submit">Save switch</button>
       </div>
     </div>
 

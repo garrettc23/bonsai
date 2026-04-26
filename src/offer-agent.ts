@@ -114,23 +114,71 @@ interface RecordOfferInput {
   recommended?: unknown;
 }
 
-function coerceRecordOffer(input: RecordOfferInput, baseline: Baseline): OfferRecord | null {
+/**
+ * Bonsai is a bill-negotiation service, so when a search result surfaces
+ * another bill-negotiation service ("switch to Goodbill!") we reject it
+ * server-side regardless of what the agent decided. Matching is done on a
+ * normalized provider name (lowercase, no whitespace/punct) so "Rocket
+ * Money", "rocket-money", and "RocketMoney" all collapse to one key.
+ */
+const COMPETITOR_BLOCKLIST = new Set([
+  "goodbill",
+  "trim",
+  "billfixers",
+  "truebill",
+  "resolve",
+  "billshark",
+  "cushion",
+  "rocketmoney",
+]);
+
+function normalizeProviderName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+export function isCompetitorProvider(name: string): boolean {
+  return COMPETITOR_BLOCKLIST.has(normalizeProviderName(name));
+}
+
+function coerceRecordOffer(
+  input: RecordOfferInput,
+  baseline: Baseline,
+  alreadyRecorded: ReadonlySet<string>,
+): { offer: OfferRecord; rejection: null } | { offer: null; rejection: string } {
   const provider = typeof input.provider === "string" ? input.provider.trim() : "";
   const price = typeof input.price_usd === "number" ? input.price_usd : Number(input.price_usd);
   const termsUrl = typeof input.terms_url === "string" ? input.terms_url.trim() : "";
   const recommended = input.recommended === true;
-  if (!provider || !termsUrl || !Number.isFinite(price) || price < 0) return null;
+  if (!provider || !termsUrl || !Number.isFinite(price) || price < 0) {
+    return { offer: null, rejection: "rejected: invalid input (need provider, terms_url, non-negative price_usd)" };
+  }
+  const normalized = normalizeProviderName(provider);
+  if (COMPETITOR_BLOCKLIST.has(normalized)) {
+    return {
+      offer: null,
+      rejection: `rejected: ${provider} is a bill-negotiation competitor, not an alternative provider. Find a different company.`,
+    };
+  }
+  if (alreadyRecorded.has(normalized)) {
+    return {
+      offer: null,
+      rejection: `rejected: ${provider} is already recorded for this baseline. Move on to a different provider.`,
+    };
+  }
   const channel =
     input.channel === "email" || input.channel === "voice" ? input.channel : undefined;
   const notes = typeof input.notes === "string" ? input.notes : undefined;
   return {
-    provider,
-    price_usd: price,
-    terms_url: termsUrl,
-    channel,
-    notes,
-    recommended,
-    savings_vs_baseline: baseline.current_price - price,
+    offer: {
+      provider,
+      price_usd: price,
+      terms_url: termsUrl,
+      channel,
+      notes,
+      recommended,
+      savings_vs_baseline: baseline.current_price - price,
+    },
+    rejection: null,
   };
 }
 
@@ -150,6 +198,10 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
   });
 
   const offers: OfferRecord[] = [];
+  // Tracks normalized provider names already recorded so we can reject
+  // duplicates server-side (the prompt asks the agent to dedupe but we
+  // can't trust it to remember across long sessions). Cleared per session.
+  const recordedProviders = new Set<string>();
   let exhausted = false;
   const seenEventIds = new Set<string>();
 
@@ -165,12 +217,15 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
 
     if (event.type === "agent.custom_tool_use") {
       if (event.name === "record_offer") {
-        const offer = coerceRecordOffer(event.input as RecordOfferInput, opts.baseline);
-        if (offer) offers.push(offer);
+        const result = coerceRecordOffer(event.input as RecordOfferInput, opts.baseline, recordedProviders);
+        if (result.offer) {
+          offers.push(result.offer);
+          recordedProviders.add(normalizeProviderName(result.offer.provider));
+        }
         pendingToolResults.push({
           type: "user.custom_tool_result",
           custom_tool_use_id: event.id,
-          content: [{ type: "text", text: offer ? "recorded" : "rejected: invalid input" }],
+          content: [{ type: "text", text: result.offer ? "recorded" : result.rejection }],
         });
       } else if (event.name === "mark_exhausted") {
         exhausted = true;

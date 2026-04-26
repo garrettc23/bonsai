@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.26.0] - 2026-04-26
+
+### Added
+- **Comparison Switch flow finishes the loop.** The Switch modal now leads with a primary Complete + ghost Dismiss. Complete prompts for the new monthly amount you negotiated with the recommended provider, then writes a row into the bill's activity log: "Switched from <previous> → <new> · now paying $X/mo on <date>." New `/api/switch-complete` endpoint persists the entry on `PendingRun.completed_switches`; the drawer's Activity tab reads it back via `/api/history`.
+- **Visible feedback when you Stop a negotiation.** The drawer's agent button optimistically flips to "Stopping…" the instant you click, the bills list re-renders even when you're not on the Bills tab, and a toast confirms "Negotiation stopped. You can resume anytime." The "Paused by you" status pill was already there — this surrounds it with the click feedback that was missing.
+
+### Changed
+- **Audit headline savings can never exceed what the user owes.** When the per-strategy estimates sum to more than the bill's max-savings cap (overlapping tactics that all attack the same defensible amount), individual estimates are now pro-rated at init time so the sum equals the cap. Dismissing one still drops the headline by exactly the displayed amount — both invariants hold by construction. Reverses the v0.1.25.0 raw-sum-with-qualifier approach now that the cap is a hard constraint.
+- **Comparison stops surfacing duplicates and competitors.** Server-side `coerceRecordOffer` rejects (a) any provider already recorded in the same hunt session and (b) bill-negotiation competitors (Goodbill, Trim, BillFixers, Truebill, Resolve, Billshark, Cushion, Rocket Money). `projectOfferHistory` re-runs the same dedup + competitor filter at projection time so older offer files on disk also stay clean. Offer-hunt agent system prompt updated to teach the agent the same rules (defense in depth).
+
+### Removed
+- **"Accept all recommended" bulk hunt button.** The button kicked off offer-hunt across every recommended baseline, but Bonsai isn't actually switching services for users — Comparison is informational. The dead `runOfferHuntForCard` + `renderHuntPanel` SPA functions and their CSS are gone with it.
+
 ## [0.1.25.0] - 2026-04-26
 
 ### Fixed

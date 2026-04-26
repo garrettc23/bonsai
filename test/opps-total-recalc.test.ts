@@ -47,17 +47,31 @@ describe("renderOpportunities headline total", () => {
   // empty arg list of the live render function.
   const body = extractFunction(appJs, "function renderOpportunities()");
 
-  test("does NOT clamp headline total to the bill cap", () => {
-    expect(body).not.toContain("clampSaved(rawTotal, cap)");
-    expect(body).not.toContain("clampSaved(rawTotal,cap)");
-  });
-
-  test("uses the raw sum of visible opportunity estimates", () => {
+  test("uses the sum of visible opportunity estimates", () => {
     expect(body).toMatch(/visible\.reduce\(.*estimate/s);
   });
 
   test("toggles the estimated qualifier visibility based on total", () => {
     expect(body).toContain("opps-total-qualifier");
+  });
+});
+
+describe("initOppsState pro-rates per-opp estimates against the cap", () => {
+  // Lock the invariant: when raw sum > cap, individual estimates get
+  // scaled so the full sum equals the cap. Dismissing one then reduces
+  // the headline by exactly the displayed amount (no jumpy re-scaling).
+  const body = extractFunction(appJs, "function initOppsState");
+
+  test("computes a scale factor capped to <= 1", () => {
+    expect(body).toMatch(/cap\s*\/\s*rawTotal/);
+  });
+
+  test("scales each opp's estimate when raw total exceeds the cap", () => {
+    expect(body).toMatch(/\.estimate.*\*\s*scale/s);
+  });
+
+  test("references maxSavingsCap so the cap matches the bill's owed amount", () => {
+    expect(body).toContain("maxSavingsCap(report)");
   });
 });
 

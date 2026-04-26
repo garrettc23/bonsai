@@ -257,6 +257,19 @@ interface PendingRun {
   outcome_notes?: string;
   outcome_verified_at?: number;
   /**
+   * User-marked Comparison switches. When the user clicks Complete on a
+   * Switch instructions modal and enters their new monthly amount, we
+   * append a row here so the drawer's activity log can show "Switched
+   * from <X> to <Y> at $Z/mo on <date>". Order is append-only.
+   */
+  completed_switches?: Array<{
+    category: string | null;
+    current_provider: string;
+    new_provider: string;
+    new_amount: number;
+    switched_at: string;
+  }>;
+  /**
    * Complaint flow only. Pre-drafted opportunity tactics produced by the
    * complaint composer at intake time, so /api/opportunities can return
    * them without a second Opus call.
@@ -1607,6 +1620,44 @@ async function handleStopNegotiation(req: Request): Promise<Response> {
 }
 
 /**
+ * Record a Comparison "Complete" — the user signed up with the
+ * recommended provider and is reporting their new monthly amount.
+ * Append-only log on the run; the SPA's Negotiation tab renders the
+ * entries chronologically.
+ */
+async function handleSwitchComplete(req: Request): Promise<Response> {
+  const body = (await req.json()) as {
+    run_id?: string;
+    category?: string | null;
+    current_provider?: string;
+    new_provider?: string;
+    new_amount?: number;
+  };
+  if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
+  if (!body.new_provider || !body.new_provider.trim()) {
+    return Response.json({ error: "Missing new_provider" }, { status: 400 });
+  }
+  const amount = Number(body.new_amount);
+  if (!Number.isFinite(amount) || amount < 0) {
+    return Response.json({ error: "Invalid new_amount" }, { status: 400 });
+  }
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+  run.completed_switches = [
+    ...(run.completed_switches ?? []),
+    {
+      category: body.category?.toString() ?? null,
+      current_provider: (body.current_provider ?? "").trim() || "Previous provider",
+      new_provider: body.new_provider.trim(),
+      new_amount: amount,
+      switched_at: new Date().toISOString(),
+    },
+  ];
+  savePending(run);
+  return Response.json({ ok: true, completed_switches: run.completed_switches });
+}
+
+/**
  * Delete a bill entirely. Idempotent: returns 200 with deleted=false if
  * the pending record is already gone, so the client's optimistic UI
  * doesn't paint an error toast over a successful local delete. The
@@ -2125,6 +2176,7 @@ async function handleHistory(): Promise<Response> {
         outcome_notes: pending?.outcome_notes ?? null,
         outcome_verified_at: pending?.outcome_verified_at ?? null,
         needs_outcome_check: needsOutcomeCheck,
+        completed_switches: pending?.completed_switches ?? [],
       };
     });
 
@@ -2164,6 +2216,7 @@ async function handleHistory(): Promise<Response> {
       outcome_notes: run.outcome_notes ?? null,
       outcome_verified_at: run.outcome_verified_at ?? null,
       needs_outcome_check: false,
+      completed_switches: run.completed_switches ?? [],
     });
   }
 
@@ -2951,6 +3004,7 @@ const server = Bun.serve({
         if (req.method === "GET" && url.pathname === "/api/voice/cost") return handleVoiceCost();
         if (req.method === "POST" && url.pathname === "/api/stop") return handleStopNegotiation(req);
         if (req.method === "POST" && url.pathname === "/api/resume") return handleResumeNegotiation(req);
+        if (req.method === "POST" && url.pathname === "/api/switch-complete") return handleSwitchComplete(req);
         if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
         if (req.method === "POST" && url.pathname === "/api/feedback") return handleFeedback(req);
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
