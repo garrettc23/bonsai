@@ -33,6 +33,10 @@ For each concrete alternative that beats the baseline price, call \`record_offer
 
 Set recommended=false for thinly-cheaper or hard-to-switch options so they show up as alternatives without being pushed.
 
+DO NOT recommend bill-negotiation services, bill-management apps, or subscription-tracking apps. Bonsai IS a bill-negotiation service — these companies are direct competitors, not "alternative providers." This includes (non-exhaustive): Goodbill, Trim, BillFixers, Truebill, Resolve, Billshark, Cushion, Rocket Money. If a search result surfaces one of these, skip it and keep looking for actual alternative service providers (other doctors, other ISPs, other generic-drug pharmacies, other utility companies, etc.).
+
+DO NOT record the same provider more than once for a given baseline. If a provider already has a record_offer call in this session, move on instead of re-recording with a different price tier.
+
 If after thorough searching no alternative beats the baseline, call \`mark_exhausted\` with current_provider_lowest=true. If you find offers but none cleanly beat baseline, still call \`mark_exhausted\` after recording them.
 
 Stop only after every credible offer is recorded or exhaustion is marked. All structured output goes through the custom tools — do not summarize in stdout.`;

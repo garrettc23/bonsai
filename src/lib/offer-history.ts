@@ -6,6 +6,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Baseline, OfferCategory, OfferHuntResult, OfferRecord } from "../offer-agent.ts";
+import { isCompetitorProvider } from "../offer-agent.ts";
 
 export interface OfferCard {
   id: string;
@@ -67,12 +68,26 @@ export function projectOfferHistory(offersDirPath: string): OfferCard[] {
   }
   runs.sort((a, b) => b.modified - a.modified);
 
+  // Dedupe across baselines + filter competitors. Same bill, same provider
+  // surfacing twice (e.g. analyzer derived two baselines that both hit
+  // GoodRx) is noise — keep the first appearance only. Competitors slip
+  // past older offer files that pre-date the server-side blocklist; filter
+  // them at projection time too so the UI never sees them.
+  const seen = new Set<string>();
+  const normalize = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+
   const cards: OfferCard[] = [];
   for (const { run, file } of runs) {
     const sorted = [...run.offers].sort(
       (a, b) => b.savings_vs_baseline - a.savings_vs_baseline,
     );
-    for (const o of sorted) cards.push(offerCardFromRecord(file, run.baseline, o));
+    for (const o of sorted) {
+      if (isCompetitorProvider(o.provider)) continue;
+      const key = normalize(o.provider);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cards.push(offerCardFromRecord(file, run.baseline, o));
+    }
   }
   return cards;
 }

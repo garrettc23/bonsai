@@ -1934,10 +1934,23 @@ async function loadOpportunities(report) {
 }
 
 function initOppsState(runId, all, report) {
+  // Hard invariant: the headline savings can never exceed what the user owes
+  // on the bill. When the analyzer's per-strategy estimates sum to more than
+  // the bill's max savings cap (e.g., five overlapping tactics that all
+  // attack the same defensible amount), pro-rate each opp's estimate so the
+  // sum equals the cap. We lock the scaled values once at init so dismissing
+  // an opp drops the headline by exactly the displayed amount — no jumpy
+  // re-scaling on every render.
+  const cap = maxSavingsCap(report);
+  const rawTotal = all.reduce((s, o) => s + Math.max(0, Number(o?.estimate ?? 0)), 0);
+  const scale = (cap > 0 && rawTotal > cap) ? cap / rawTotal : 1;
+  const scaledAll = scale === 1
+    ? all
+    : all.map((o) => ({ ...o, estimate: Math.max(0, Number(o?.estimate ?? 0)) * scale }));
   oppsState = {
     runId,
-    all,
-    cap: maxSavingsCap(report),
+    all: scaledAll,
+    cap,
     dismissed: loadDismissedOpps(runId),
     report,
   };
@@ -2056,9 +2069,10 @@ function renderOpportunities() {
   if (!oppsState) return;
   const { all, dismissed, report } = oppsState;
   const visible = all.filter((o) => !dismissed.has(o.opp_id));
-  // Headline shows the raw sum so dismissing an opp reduces the figure
-  // 1:1 — what the user expects. Overlap with the bill cap is acknowledged
-  // by the "estimated" qualifier next to the dollar figure.
+  // Headline = sum of visible (non-dismissed) estimates. Estimates are
+  // pre-scaled in initOppsState so the full sum never exceeds the bill's
+  // owed amount, and dismissing an opp reduces the headline by exactly
+  // the displayed value — both invariants hold by construction.
   const total = visible.reduce((s, o) => s + (o.estimate ?? 0), 0);
 
   $("#opps-total").textContent = total > 0 ? fmt$(total) : "—";
@@ -3633,22 +3647,6 @@ function renderOffers() {
     }
   }
 
-  // Accept-all: run hunts for every recommended offer that has a baseline.
-  const acceptAll = $("#offers-accept-all");
-  if (acceptAll && !acceptAll.dataset.wired) {
-    acceptAll.addEventListener("click", async () => {
-      const targets = offersCache.filter((o) => o.recommended && o.baseline);
-      if (!targets.length) return;
-      acceptAll.textContent = `Dispatching agent across ${targets.length} sources…`;
-      acceptAll.disabled = true;
-      for (const o of targets) {
-        const card = document.querySelector(`[data-hunt-slot="${o.id}"]`)?.closest(".offer-card");
-        if (card) await runOfferHuntForCard(o, card);
-      }
-      acceptAll.textContent = "All hunts complete — scroll to review";
-    });
-    acceptAll.dataset.wired = "1";
-  }
 }
 
 function buildOfferCard(o) {
@@ -3683,7 +3681,6 @@ function buildOfferCard(o) {
       </div>
     </div>
     ${o.why ? `<div><div class="offer-sub-title">Why it fits</div><div class="offer-sub">${escapeHtml(o.why)}</div></div>` : ""}
-    <div class="offer-hunt-slot" data-hunt-slot="${escapeHtml(o.id)}"></div>
     <div class="offer-actions">
       <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
       <button class="btn btn-ghost" data-action="compare">Compare</button>
@@ -3855,6 +3852,22 @@ function openSwitchModal(offer) {
       : "Real savings depend on your usage and any switch fees from your current provider.";
   }
 
+  // Reset the modal to step-1 (instructions) state on every open. Without
+  // this, a user who clicked Complete and bailed would re-open into the
+  // amount-input view instead of the steps.
+  $("#switch-steps-view").hidden = false;
+  $("#switch-amount-view").hidden = true;
+  $("#switch-actions-steps").hidden = false;
+  $("#switch-actions-amount").hidden = true;
+  $("#switch-amount-input").value = "";
+  $("#switch-amount-error").hidden = true;
+  $("#switch-amount-error").textContent = "";
+
+  const recommendedName = offer.source ?? "the recommended provider";
+  const currentName = offer.baseline?.current_provider ?? "your current provider";
+  $("#switch-amount-prompt").textContent =
+    `Once you're signed up with ${recommendedName}, enter the new monthly amount you're paying. Bonsai will log the switch in this bill's activity.`;
+
   scrim.hidden = false;
   modal.hidden = false;
   requestAnimationFrame(() => {
@@ -3867,88 +3880,89 @@ function openSwitchModal(offer) {
     modal.classList.remove("open");
     setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
     $("#switch-close").onclick = null;
-    $("#switch-ok").onclick = null;
+    $("#switch-dismiss").onclick = null;
+    $("#switch-complete").onclick = null;
+    $("#switch-amount-cancel").onclick = null;
+    $("#switch-amount-submit").onclick = null;
     scrim.onclick = null;
     document.removeEventListener("keydown", onKey);
   };
   const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
   $("#switch-close").onclick = cleanup;
-  $("#switch-ok").onclick = cleanup;
+  $("#switch-dismiss").onclick = cleanup;
   scrim.onclick = cleanup;
   document.addEventListener("keydown", onKey);
-}
 
-async function runOfferHuntForCard(offer, card) {
-  const slot = card.querySelector(`[data-hunt-slot="${offer.id}"]`);
-  const btn = card.querySelector('[data-action="hunt"]');
-  if (!slot || !btn) return;
-  btn.disabled = true;
-  btn.textContent = "Hunting…";
-  slot.innerHTML = `
-    <div class="hunt-panel">
-      <div class="hunt-status">
-        <span class="pulse-dot"></span>
-        Bonsai is searching the web for alternatives…
-      </div>
-    </div>`;
-  try {
-    const res = await apiFetch("/api/offer-hunt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseline: offer.baseline }),
-    });
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      slot.innerHTML = `<div class="hunt-panel error">Hunt failed: ${escapeHtml(data.error || res.statusText)}</div>`;
-      btn.textContent = "Try again";
-      btn.disabled = false;
+  // Step 1 → step 2 transition. Hide the instructions, show the amount
+  // input. Bring focus into the input so the user can type immediately.
+  $("#switch-complete").onclick = () => {
+    $("#switch-steps-view").hidden = true;
+    $("#switch-amount-view").hidden = false;
+    $("#switch-actions-steps").hidden = true;
+    $("#switch-actions-amount").hidden = false;
+    setTimeout(() => $("#switch-amount-input").focus(), 50);
+  };
+  $("#switch-amount-cancel").onclick = () => {
+    $("#switch-steps-view").hidden = false;
+    $("#switch-amount-view").hidden = true;
+    $("#switch-actions-steps").hidden = false;
+    $("#switch-actions-amount").hidden = true;
+  };
+  $("#switch-amount-submit").onclick = async () => {
+    const errEl = $("#switch-amount-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    const raw = $("#switch-amount-input").value.trim();
+    const amount = Number(raw);
+    if (!raw || !Number.isFinite(amount) || amount < 0) {
+      errEl.textContent = "Enter a valid dollar amount.";
+      errEl.hidden = false;
       return;
     }
-    slot.innerHTML = renderHuntPanel(data);
-    btn.textContent = data.outcome === "lower_price_found" ? "Switch confirmed" : "Hunt complete";
-    // Refresh the cache so the new run's offers populate other cards too.
-    void loadOffers();
-  } catch (err) {
-    slot.innerHTML = `<div class="hunt-panel error">Hunt failed: ${escapeHtml(err.message)}</div>`;
-    btn.textContent = "Try again";
-    btn.disabled = false;
-  }
+    const runId = drawerState?.row?.audit?.run_id;
+    if (!runId) {
+      errEl.textContent = "Couldn't find the bill this offer belongs to. Refresh and try again.";
+      errEl.hidden = false;
+      return;
+    }
+    const submitBtn = $("#switch-amount-submit");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Saving…";
+    try {
+      const res = await apiFetch("/api/switch-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          run_id: runId,
+          category: offer.category ?? null,
+          current_provider: currentName,
+          new_provider: recommendedName,
+          new_amount: amount,
+        }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j?.message ?? j?.error ?? res.statusText);
+      }
+      cleanup();
+      // Reload history + drawer so the activity log immediately shows the
+      // new switch. The drawer re-render brings the user to the activity
+      // tab where they'll see the entry.
+      await loadHistory();
+      const updated = findUpdatedRowAfterRefresh(drawerState.row);
+      if (updated) {
+        drawerState.row = updated;
+        openBillDrawer(updated);
+      }
+    } catch (err) {
+      errEl.textContent = `Couldn't save: ${err?.message ?? err}`;
+      errEl.hidden = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Save switch";
+    }
+  };
 }
 
-function renderHuntPanel(data) {
-  const outcomeTag = data.outcome === "lower_price_found"
-    ? `<span class="tag tag-mono tag-green">LOWER PRICE</span>`
-    : data.outcome === "current_is_lowest"
-    ? `<span class="tag tag-mono tag-amber">ALREADY LOWEST</span>`
-    : `<span class="tag tag-mono tag-red">NO RESULTS</span>`;
-  const rows = (data.offers || []).map((o) => {
-    const price = fmt$(o.price_usd);
-    const save = typeof o.savings_vs_baseline === "number"
-      ? (o.savings_vs_baseline > 0
-          ? `<span style="color:var(--green)">save ${fmt$(o.savings_vs_baseline)}</span>`
-          : `<span style="color:var(--ink-mute)">+${fmt$(Math.abs(o.savings_vs_baseline))}</span>`)
-      : "—";
-    const chanBadge = o.channel
-      ? `<span class="tag tag-mono" style="margin-right:6px">${escapeHtml(o.channel.toUpperCase())}</span>`
-      : "";
-    const recBadge = o.recommended
-      ? `<span class="tag tag-mono tag-green" style="margin-left:6px">RECOMMENDED</span>`
-      : "";
-    const termsLink = o.terms_url
-      ? `<a href="${escapeHtml(o.terms_url)}" target="_blank" rel="noopener noreferrer">terms</a>`
-      : "";
-    return `
-      <div class="hunt-row">
-        <div class="hunt-row-head">${chanBadge}<strong>${escapeHtml(o.provider)}</strong> · ${price} · ${save}${recBadge}</div>
-        <div class="hunt-row-note">${escapeHtml(o.notes || "")} ${termsLink}</div>
-      </div>`;
-  }).join("");
-  return `
-    <div class="hunt-panel">
-      <div class="hunt-head">${outcomeTag} <span class="hunt-headline">${escapeHtml(data.headline || "")}</span></div>
-      <div class="hunt-rows">${rows || '<div class="hunt-row-note">No alternatives recorded.</div>'}</div>
-    </div>`;
-}
 
 // Modal dialog confirming account deletion. Two-step affordance: must type
 // DELETE into the input before the confirm button enables.
@@ -5182,10 +5196,18 @@ async function stopAgent() {
   const row = drawerState.row;
   const runId = row?.audit?.run_id;
   if (!runId) return;
-  // Fire-and-re-render. No disabled state on the button — the user should
-  // always be able to stop, cancel stops, or change their mind. The
-  // operation only affects this specific run_id, so other bills keep
-  // negotiating uninterrupted.
+
+  // Immediate visual feedback — flip the drawer's main agent button to a
+  // "Stopping…" state before the API round-trip completes so the click
+  // never feels like it did nothing. `updateDrawerAgentButton` will re-set
+  // the button correctly on re-render after the response lands.
+  const agentBtn = $("#drawer-agent-btn");
+  const prevHTML = agentBtn ? agentBtn.innerHTML : null;
+  if (agentBtn) {
+    agentBtn.disabled = true;
+    agentBtn.innerHTML = `<span>Stopping…</span>`;
+  }
+
   try {
     const res = await apiFetch("/api/stop", {
       method: "POST",
@@ -5195,7 +5217,10 @@ async function stopAgent() {
     if (!res.ok) throw new Error(await res.text());
     await loadHistory();
     updateNavCounts();
-    if (currentNav === "bills") renderBills();
+    // Bills list must reflect the new status whether or not it's the
+    // current nav — otherwise the user lands on a stale list when they
+    // close the drawer and switch tabs.
+    renderBills();
     const updatedRow = findUpdatedRowAfterRefresh(row);
     if (updatedRow) {
       drawerState.row = updatedRow;
@@ -5203,9 +5228,35 @@ async function stopAgent() {
     } else {
       closeBillDrawer();
     }
+    showToast("Negotiation stopped. You can resume anytime.");
   } catch (err) {
+    if (agentBtn && prevHTML != null) {
+      agentBtn.disabled = false;
+      agentBtn.innerHTML = prevHTML;
+    }
     alert(`Couldn't stop: ${err?.message ?? err}`);
   }
+}
+
+// Lightweight toast banner — used by stop/resume/switch flows so the
+// user gets a visible "the click landed" confirmation even when the
+// underlying status pill is several scrolls away.
+function showToast(message, kind = "ok") {
+  let host = document.getElementById("bonsai-toast-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "bonsai-toast-host";
+    document.body.appendChild(host);
+  }
+  const toast = document.createElement("div");
+  toast.className = `bonsai-toast bonsai-toast-${kind}`;
+  toast.textContent = message;
+  host.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add("open"));
+  setTimeout(() => {
+    toast.classList.remove("open");
+    setTimeout(() => toast.remove(), 220);
+  }, 2400);
 }
 
 // After a status flip, the bills cache is refreshed but `drawerState.row`
@@ -6291,6 +6342,19 @@ function buildTimelineEvents(row, report) {
         actor: a.outcome,
         tone: isBest ? "green" : a.outcome === "escalated" ? "amber" : "ink",
       });
+    });
+  }
+
+  // 9.5 Manual Comparison switches the user marked as Complete.
+  const manualSwitches = row?.audit?.completed_switches ?? [];
+  for (const sw of manualSwitches) {
+    events.push({
+      ts: Date.parse(sw.switched_at) || Date.now(),
+      headline: `Switched provider — ${sw.current_provider} → ${sw.new_provider}`,
+      detail: `Now paying ${fmt$(sw.new_amount)}/mo${sw.category ? ` for ${sw.category}` : ""}.`,
+      channel: "switch",
+      actor: "You",
+      tone: "green",
     });
   }
 
