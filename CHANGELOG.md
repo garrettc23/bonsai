@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.20.0] - 2026-04-26
+
+### Removed
+- **"ElevenLabs (call)" card in Settings → Connected accounts.** Voice is now operator-owned in the same shape as Anthropic and Resend — the `ELEVENLABS_*` env vars on Railway are the source of truth, every user shares the operator's account/number/minutes, and there's nothing for an end user to configure. The card was a leftover from when voice was per-user-optional and added a confusing "do I need to do something here?" hurdle. `handleSettings` in `src/server.ts` now returns `integrations: []` (Anthropic and Resend were already hidden — they had moved to operator-owned in v0.1.x).
+
+The storage plumbing (`IntegrationsConfig.elevenlabs_*` fields, `applyIntegrationsToEnv` mapping, `/api/settings/integrations` accepting `elevenlabs_*` writes) is fully intact — ready to repower a per-user "Connect ElevenLabs" UI later if/when we want users to bring their own account. Just not surfaced today.
+
 ## [0.1.19.0] - 2026-04-26
 
 ### Changed
