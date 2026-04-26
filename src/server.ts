@@ -2368,32 +2368,17 @@ async function handleSettings(): Promise<Response> {
 
   const anthropicConnected = looksLikeRealApiKey(eff.anthropic_api_key);
   const resendConnected = looksLikeRealApiKey(eff.resend_api_key);
-  const elevenConnected = looksLikeRealApiKey(eff.elevenlabs_api_key);
 
   return Response.json({
     profile,
     tune,
-    // Operator-managed services (Anthropic Claude + Resend email) live in
-    // the host's env vars now — every user shares the same operator-paid
-    // analysis + the same verified sending domain. Hidden from the user
-    // because there's nothing for them to configure. Voice (ElevenLabs)
-    // stays per-user since it's optional and per-account.
-    integrations: [
-      {
-        key: "elevenlabs",
-        label: "ElevenLabs (call)",
-        status: elevenConnected ? "connected" : "missing",
-        detail: elevenConnected
-          ? `Agent ID ${eff.elevenlabs_agent_id ?? "(unset — create via client.createAgent())"}.`
-          : "Optional — connects voice negotiation. Until connected, voice flows run the dual-Claude simulator.",
-        required: false,
-        fields: [
-          { name: "elevenlabs_api_key", label: "API key", kind: "secret", last4: last4(eff.elevenlabs_api_key), from_user: !!stored.elevenlabs_api_key },
-          { name: "elevenlabs_agent_id", label: "Agent ID", kind: "text", value: eff.elevenlabs_agent_id ?? "", placeholder: "agent_xxxxxxxxxxxx", from_user: !!stored.elevenlabs_agent_id },
-          { name: "elevenlabs_webhook_base", label: "Webhook base URL", kind: "text", value: eff.elevenlabs_webhook_base ?? "", placeholder: "https://your-tunnel.ngrok.app", from_user: !!stored.elevenlabs_webhook_base },
-        ],
-      },
-    ],
+    // Operator-managed services (Anthropic Claude, Resend email, ElevenLabs
+    // voice) all live in the host's Railway env vars now — every user
+    // shares the operator-paid stack. Hidden from the user because there's
+    // nothing for them to configure. Storage layer for per-user override
+    // lives in user-settings.ts in case we ever want a per-user
+    // "Connect ElevenLabs" UI back, but it's not surfaced today.
+    integrations: [],
     // Status of the operator-managed services, surfaced read-only so the
     // dashboard can show "Email delivery: live" without giving the user a
     // form to fill in.
