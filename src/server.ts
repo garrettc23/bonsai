@@ -39,13 +39,13 @@ import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
 import { BillContact, BillKind, hasContactChannel, type BillContact as BillContactT } from "./types.ts";
 import { filterByProbability, PROBABILITY_FLOOR, OPPS_TOOL } from "./opps-filter.ts";
 import {
-  deriveBaselineFromAudit,
   runOfferHunt,
   saveOfferHunt,
   offersDir,
   type Baseline,
-  type OfferCategory,
 } from "./offer-agent.ts";
+import { deriveOfferBaselines } from "./lib/derive-offer-baselines.ts";
+import { projectOfferHuntStatus, type OfferHuntStatusPayload } from "./lib/offer-hunt-status.ts";
 import { projectOfferHistory } from "./lib/offer-history.ts";
 import {
   AuthError,
@@ -67,6 +67,14 @@ import {
   type User,
 } from "./lib/auth.ts";
 import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
+import {
+  backupConfigured,
+  getLastSuccessfulBackup,
+  pruneOldBackups,
+  runNightlyBackup,
+} from "./lib/backup.ts";
+import { handlePublicConfig } from "./lib/public-config.ts";
+import { isApiPath, serveErrorPage } from "./lib/error-pages.ts";
 import { deleteBillByRunId } from "./lib/delete-bill.ts";
 import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
 import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
@@ -259,6 +267,20 @@ interface PendingRun {
     icon: string;
     probability: number;
   }>;
+  /**
+   * Background offer-hunt progress, updated as each baseline's hunt resolves.
+   * Polled by the Comparison tab via GET /api/offer-hunt/status/:run_id so the
+   * pulse persists no matter where the user navigates. Absent until the first
+   * hunt fires; status="done" with baselines_total=0 means no usable baseline
+   * was derivable and no hunt ever ran.
+   */
+  offer_hunt?: {
+    baselines_total: number;
+    baselines_done: number;
+    started_at: number;
+    ended_at?: number;
+    status: "in_flight" | "done";
+  };
 }
 
 /** Days after a resolved negotiation before we nudge the user to verify. */
@@ -524,17 +546,13 @@ async function handleAudit(req: Request): Promise<Response> {
   }
 
   // Eagerly hunt for cheaper alternatives so the Comparison page is populated
-  // by the time the user navigates there. Best-effort only — if the audit
-  // metadata doesn't map to a known offer category, skip rather than burn
-  // managed-agent quota on a useless run.
-  const baseline = deriveBaselineFromAudit(partial?.analyzer?.metadata ?? {});
-  if (baseline) {
-    void runOfferHunt({ baseline })
-      .then((result) => saveOfferHunt(result))
-      .catch((err) => {
-        console.error(`[bg offer-hunt ${run.run_id}]`, err);
-      });
-  }
+  // by the time the user navigates there. Best-effort only — if no baseline
+  // is derivable, runOfferHuntsForRun records an empty done-state and
+  // returns immediately.
+  const auditBaselines = partial?.analyzer ? deriveOfferBaselines(partial.analyzer) : [];
+  void runOfferHuntsForRun(run.run_id, auditBaselines).catch((err) => {
+    console.error(`[bg offer-hunt audit ${run.run_id}]`, err);
+  });
 
   return Response.json({ run_id: run.run_id, report: partial });
 }
@@ -1350,6 +1368,18 @@ async function handleApprove(req: Request): Promise<Response> {
     console.error(`[bg negotiation ${run.run_id}]`, err);
   });
 
+  // Backstop the audit-time hunt: re-fire here so users who skipped the
+  // Comparison tab during review still get offers. Idempotent — saveOfferHunt
+  // writes timestamped files, so duplicates don't clobber each other.
+  const approveBaselines = run.partial_report.analyzer
+    ? deriveOfferBaselines(run.partial_report.analyzer)
+    : [];
+  if (approveBaselines.length > 0) {
+    void runOfferHuntsForRun(run.run_id, approveBaselines).catch((err) => {
+      console.error(`[bg offer-hunt approve ${run.run_id}]`, err);
+    });
+  }
+
   return Response.json({
     run_id: run.run_id,
     status: run.status,
@@ -1357,6 +1387,53 @@ async function handleApprove(req: Request): Promise<Response> {
     provider_name: run.partial_report.analyzer?.metadata?.provider_name ?? null,
     channel: run.partial_report.strategy.chosen,
   });
+}
+
+/**
+ * Drive an N-baseline offer hunt for a given run, updating PendingRun.offer_hunt
+ * after each baseline resolves. Sequential (not parallel) to keep managed-agent
+ * quota bounded — most audits only produce 1–2 baselines anyway.
+ */
+async function runOfferHuntsForRun(runId: string, baselines: Baseline[]): Promise<void> {
+  const start = loadPending(runId);
+  if (!start) return;
+  start.offer_hunt = {
+    baselines_total: baselines.length,
+    baselines_done: 0,
+    started_at: Date.now(),
+    status: baselines.length === 0 ? "done" : "in_flight",
+  };
+  if (baselines.length === 0) start.offer_hunt.ended_at = Date.now();
+  savePending(start);
+  if (baselines.length === 0) return;
+
+  for (const baseline of baselines) {
+    try {
+      const result = await runOfferHunt({ baseline });
+      saveOfferHunt(result);
+    } catch (err) {
+      console.error(`[bg offer-hunt ${runId}] ${baseline.label}`, err);
+    }
+    const cur = loadPending(runId);
+    if (!cur) return;
+    cur.offer_hunt = {
+      baselines_total: cur.offer_hunt?.baselines_total ?? baselines.length,
+      baselines_done: (cur.offer_hunt?.baselines_done ?? 0) + 1,
+      started_at: cur.offer_hunt?.started_at ?? Date.now(),
+      status: "in_flight",
+    };
+    savePending(cur);
+  }
+
+  const final = loadPending(runId);
+  if (!final?.offer_hunt) return;
+  final.offer_hunt.status = "done";
+  final.offer_hunt.ended_at = Date.now();
+  savePending(final);
+}
+
+export function getOfferHuntStatus(runId: string): OfferHuntStatusPayload {
+  return projectOfferHuntStatus(loadPending(runId)?.offer_hunt);
 }
 
 /**
@@ -1925,7 +2002,7 @@ async function handleStatic(pathname: string): Promise<Response> {
       fsPath = htmlFs;
     }
   }
-  if (!existsSync(fsPath)) return new Response("Not found", { status: 404 });
+  if (!existsSync(fsPath)) return serveErrorPage("404", 404);
   // naive path traversal guard: must start with PUBLIC_DIR
   const resolved = fsPath;
   if (!resolved.startsWith(PUBLIC_DIR)) return new Response("Forbidden", { status: 403 });
@@ -2688,6 +2765,7 @@ const PUBLIC_API_PATHS = new Set([
   "/api/auth/me",
   "/api/auth/forgot",
   "/api/auth/reset",
+  "/api/public-config",
 ]);
 
 // Fail-fast on missing required env. The Anthropic SDK only complains
@@ -2722,6 +2800,13 @@ const server = Bun.serve({
       // need credentials. Returns 200 as long as the event loop is alive.
       if (req.method === "GET" && url.pathname === "/healthz") {
         return new Response("ok", { headers: { "Content-Type": "text/plain" } });
+      }
+      // Public branding config — read by landing.html, error pages, and the
+      // SPA to render the operator's support address. Unauthenticated by
+      // design (the landing page is unauthenticated). Empty/unset values
+      // come back as null so the front-end hides the affected element.
+      if (req.method === "GET" && url.pathname === "/api/public-config") {
+        return handlePublicConfig();
       }
       // Auth endpoints first — these run without a session.
       if (req.method === "POST" && url.pathname === "/api/auth/signup") {
@@ -2810,6 +2895,8 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req, user);
         if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
         if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
+        const offerHuntStatusMatch = url.pathname.match(/^\/api\/offer-hunt\/status\/([a-zA-Z0-9_-]+)$/);
+        if (req.method === "GET" && offerHuntStatusMatch) return Response.json(getOfferHuntStatus(offerHuntStatusMatch[1]));
         const offerRunMatch = url.pathname.match(/^\/api\/offer-run\/([a-zA-Z0-9._-]+)$/);
         if (req.method === "GET" && offerRunMatch) return handleOfferRun(offerRunMatch[1]);
         const reportMatch = url.pathname.match(/^\/api\/report\/([a-zA-Z0-9_-]+)$/);
@@ -2857,13 +2944,47 @@ const server = Bun.serve({
         return new Response("Method not allowed", { status: 405 });
       });
     } catch (err) {
-      console.error("server error:", err);
-      return Response.json(
-        { error: (err as Error).message, stack: (err as Error).stack },
-        { status: 500 },
-      );
+      // Log with a [500] prefix + path so Railway logs are searchable. Stack
+      // trace stays server-side — leaking it to the client both looks broken
+      // and hands attackers reconnaissance about our internals.
+      console.error("[500]", url.pathname, err);
+      if (isApiPath(url.pathname)) {
+        return Response.json({ error: "Internal server error" }, { status: 500 });
+      }
+      return serveErrorPage("500", 500);
     }
   },
 });
 
 console.log(`Bonsai server listening on http://localhost:${server.port}`);
+
+scheduleBackups();
+
+/**
+ * Nightly backup scheduler. Disabled (no-op) when the four `BACKUP_S3_*`
+ * env vars are unset — important so OSS forks and local dev don't try to
+ * upload anything. On boot, fires immediately if the last successful run
+ * is missing or > 25h old (catches deploys that crossed midnight + first
+ * boot after wiring up backups). Then re-fires every 24h via setInterval.
+ *
+ * Backup failures never crash the server: caught + logged, the next
+ * tick retries.
+ */
+function scheduleBackups(): void {
+  if (!backupConfigured()) {
+    console.log("[backup] disabled (BACKUP_S3_* env vars unset)");
+    return;
+  }
+  const fire = () => {
+    runNightlyBackup()
+      .then(() => pruneOldBackups())
+      .catch((err) => console.error("[backup] FAILED", err));
+  };
+  const last = getLastSuccessfulBackup();
+  const isStale = !last || Date.now() - last.succeeded_at > 25 * 60 * 60 * 1000;
+  if (isStale) {
+    console.log("[backup] firing catch-up run on boot");
+    fire();
+  }
+  setInterval(fire, 24 * 60 * 60 * 1000);
+}

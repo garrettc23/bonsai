@@ -195,6 +195,35 @@ bun run scripts/voice-smoke.ts
 
 The phone rings, the agent reads the opening line, hangup writes a transcript to `out/users/<id>/calls/`.
 
+## Backups
+
+Railway's volume isn't snapshotted by default — one disk fault loses every user's SQLite, threads, transcripts, and uploaded bills. The server can push a nightly tarball of `BONSAI_DATA_DIR` to any S3-compatible object store. Backups are **opt-in**: with the four env vars below unset, the server boots and logs `[backup] disabled` — nothing else happens.
+
+Recommended: [Backblaze B2](https://www.backblaze.com/cloud-storage) (S3-compatible, ~6× cheaper than S3 for storage, cheap egress). Cloudflare R2, AWS S3, and self-hosted MinIO all work too — same env vars.
+
+```bash
+BACKUP_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com
+BACKUP_S3_BUCKET=bonsai-backups
+BACKUP_S3_ACCESS_KEY_ID=...
+BACKUP_S3_SECRET_ACCESS_KEY=...
+```
+
+What happens after the next deploy:
+
+- On boot, if no successful backup is recorded — or the last one is more than 25 hours old — the server fires a catch-up run immediately.
+- Every 24 hours, the same job tars `BONSAI_DATA_DIR`, streams it to `bonsai-backups/YYYY-MM-DD.tar.gz`, and prunes anything older than 30 days.
+- Backup failures are non-fatal — they log `[backup] FAILED` and the next run retries.
+
+To verify a backup is recoverable:
+
+```bash
+bun run scripts/restore-backup.ts latest
+# Validates the tar contents and prints the exact tar -xzf command to run.
+# Never auto-extracts (restore is destructive).
+```
+
+Cost note: at typical beta scale (tens of MB per user × hundreds of users × 30-day retention) this runs single-digit dollars per month on B2.
+
 ## Configuration
 
 Every env var, in one place. See `.env.example` for the canonical reference.
@@ -219,6 +248,11 @@ Every env var, in one place. See `.env.example` for the canonical reference.
 | `BONSAI_VOICE_DAILY_LIMIT` | optional | Per-user daily call cap; default 5 |
 | `BONSAI_VOICE_DAILY_BUDGET_USD` | optional | Operator-wide daily voice budget; default 50 |
 | `VOICE_DRY_RUN` | optional | `true` logs the call we'd place without dialing |
+| `BONSAI_SUPPORT_EMAIL` | optional | Public support address for the SPA + landing footer (via `/api/public-config`) |
+| `BACKUP_S3_ENDPOINT` | optional | S3-compatible endpoint for nightly volume backup (B2, R2, S3, MinIO) |
+| `BACKUP_S3_BUCKET` | optional | Bucket name for nightly backups |
+| `BACKUP_S3_ACCESS_KEY_ID` | optional | Access key for the backup bucket |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | optional | Secret key for the backup bucket |
 
 ## Commands
 

@@ -1,6 +1,6 @@
 {
   "name": "bill-agent",
-  "version": "0.1.21.0",
+  "version": "0.1.23.0",
   "description": "Agents to manage personal bills — open-source agents that audit, dispute, and renegotiate insurance, utilities, medical, credit, and subscription costs.",
   "license": "MIT",
   "private": true,
@@ -20,6 +20,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
+    "@aws-sdk/client-s3": "^3.1037.0",
+    "@aws-sdk/lib-storage": "^3.1037.0",
     "heic-convert": "^2.1.0",
     "marked": "^14.1.0",
     "sharp": "^0.34.5",

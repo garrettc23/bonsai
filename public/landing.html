@@ -347,7 +347,7 @@
         <nav class="landing-footer-links" aria-label="Footer">
           <a href="/terms">Terms</a>
           <a href="/privacy">Privacy</a>
-          <a href="mailto:hello@your-bonsai-domain.com">Contact</a>
+          <a id="footer-contact" href="#" hidden>Contact</a>
           <a href="/app">Sign in</a>
         </nav>
         <p class="landing-disclaimer">
@@ -355,5 +355,22 @@
         </p>
       </div>
     </footer>
+    <script>
+      // Render the operator's support email from /api/public-config so the
+      // mailto isn't hardcoded — OSS forks override BONSAI_SUPPORT_EMAIL
+      // per-deploy. Hidden by default; reveals only when the endpoint
+      // returns a non-null support_email. Failures fall through silently.
+      fetch('/api/public-config')
+        .then(function (r) { return r.json(); })
+        .then(function (c) {
+          var a = document.getElementById('footer-contact');
+          if (a && c && c.support_email) {
+            a.href = 'mailto:' + c.support_email;
+            a.textContent = 'Contact';
+            a.hidden = false;
+          }
+        })
+        .catch(function () {});
+    </script>
   </body>
 </html>

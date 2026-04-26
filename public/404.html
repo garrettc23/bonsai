@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page not found — Bonsai</title>
+    <meta name="robots" content="noindex" />
+    <link rel="icon" type="image/svg+xml" href="/assets/bonsai-logo.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/assets/app.css" />
+  </head>
+  <body class="error-page">
+    <div class="error-card">
+      <span class="wordmark" aria-hidden="true">
+        <span class="wm-lead">Bons</span><span class="wm-tail">ai</span>
+      </span>
+      <h1>Page not found.</h1>
+      <p>We couldn't find that page. It may have moved, or the link might be wrong.</p>
+      <div class="actions">
+        <a class="btn btn-primary btn-lg" href="/">Back to Bonsai</a>
+      </div>
+      <footer>
+        <a id="footer-contact" href="#" hidden>Contact</a>
+      </footer>
+    </div>
+    <script>
+      fetch('/api/public-config')
+        .then(function (r) { return r.json(); })
+        .then(function (c) {
+          var a = document.getElementById('footer-contact');
+          if (a && c && c.support_email) {
+            a.href = 'mailto:' + c.support_email;
+            a.textContent = 'Contact';
+            a.hidden = false;
+          }
+        })
+        .catch(function () {});
+    </script>
+  </body>
+</html>
