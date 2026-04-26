@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.17.0] - 2026-04-26
+
+### Changed
+- **"You're with the best provider" now renders as an offer-shaped card.** Previously it used the giant `.empty-hero-card` visual language — display font, 56px padding, centered max-width. The result felt like an alert overlay sitting on top of an empty page, not part of the Comparison surface. New `buildBestProviderCard` builds a real `.offer-card` (1px line border, 10px radius, 20px padding, check icon in the head, "Why we think so" sub-section) so the user sees the same card chrome they'd see if Bonsai HAD found an alternative — minus the price row and Switch/Compare/Dismiss actions. Spans both grid columns via a thin `.offer-card-best { grid-column: 1 / -1; }` rule so it doesn't sit lopsided next to an empty cell.
+- **Comparison polling no longer activates when the user has no negotiations.** `pollOffersUntilFresh` now early-returns when `historyCache.audits.length === 0`. The comparison agent only runs server-side on audit completion (`handleAudit` in `src/server.ts`), so without any audits there's nothing in flight to wait on — polling the empty state and eventually surfacing "You're with the best provider" was misleading. New users with no bills uploaded see the idle "No alternatives yet — Go to Home" hero (already shipped in 0.1.15.0); the spinner and the timed-out card are reserved for users whose audits actually triggered a hunt.
+
 ## [0.1.16.0] - 2026-04-26
 
 ### Changed
