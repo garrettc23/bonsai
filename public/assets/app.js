@@ -247,13 +247,28 @@ function hasInFlightAuditWork() {
 }
 
 async function showNav(name) {
-  // Block navigation when leaving Profile or Settings with unsaved edits —
-  // prompts via the in-app confirm modal instead of the browser's native
-  // confirm() dialog.
-  if (name !== currentNav) {
+  // Block navigation when leaving in-flight work — prompts via the in-app
+  // confirm modal instead of the browser's native confirm() dialog.
+  // We trigger the prompt in two cases:
+  //   1) name !== currentNav (real tab switch — the obvious case)
+  //   2) name === currentNav === "overview" but the user is mid-flow on
+  //      a workflow sub-view (progress/review). Without this, clicking
+  //      "Home" while on the plan-review screen silently drops back to
+  //      the upload screen, losing the audit. (Both nav values are
+  //      "overview" so the first check passes through.)
+  const tabSwitch = name !== currentNav;
+  const homeFromMidFlow =
+    name === "overview" && currentNav === "overview" && hasInFlightAuditWork();
+  if (tabSwitch || homeFromMidFlow) {
     const ok = await confirmDiscardUnsaved();
     if (!ok) return;
-    clearUnsavedGuard();
+    if (tabSwitch) clearUnsavedGuard();
+    // Always reset workflow + reviewState when the user confirms leaving
+    // mid-flow — otherwise the next showNav would still see leftover
+    // state and re-prompt unnecessarily.
+    if (homeFromMidFlow) {
+      reviewState = null;
+    }
   }
   currentNav = name;
   if (name !== "bills") stopBillsPoll();
@@ -1417,9 +1432,16 @@ function applyContactStatus(data) {
   const srcEl = $("#contact-sources");
   const emailEl = $("#contact-email");
   const phoneEl = $("#contact-phone");
+  const card = document.getElementById("contact-card");
   const billKind =
     reviewState?.partial_report?.analyzer?.metadata?.bill_kind ?? "other";
   const role = contactRoleNoun(billKind);
+
+  // Default-clear the "needs input" highlight every render. The only
+  // place we add it is the click handler in approveAndRun (when the
+  // user tries to accept with both fields empty). Any successful
+  // poll/save lands a contact, which means we can drop the highlight.
+  card?.classList.remove("needs-input");
 
   if (data.status === "pending") {
     titleEl.textContent = `Looking up the ${role} contact…`;
