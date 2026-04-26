@@ -1675,10 +1675,15 @@ function applyContactStatus(data) {
   // The .needs-input highlight is NOT applied on render — only when the
   // user tries to Accept the plan with both fields empty.
   const provider = data.provider_name ?? "this provider";
-  if (!c.email && !c.phone) {
+  // confidence:"none" is the explicit "lookup failed or returned garbage"
+  // signal from src/lib/provider-contact.ts (timeout, no tool result, or
+  // low-confidence with no email/phone). Prompt the user to paste from
+  // their bill — keep the email + phone inputs editable so autosave + the
+  // Approve auto-save round-trip continue to work.
+  if (c.confidence === "none" || (!c.email && !c.phone)) {
     titleEl.textContent = `Add a ${role} contact for ${provider}`;
     notesEl.textContent =
-      `Bonsai couldn't find one in public sources. Add an email or phone for ${provider}'s ${role} — either works, email preferred when available.`;
+      `We couldn't find this provider's ${role} email — paste it from your bill.`;
     if (document.activeElement !== emailEl) emailEl.value = "";
     if (document.activeElement !== phoneEl) phoneEl.value = "";
     srcEl.innerHTML = "";
