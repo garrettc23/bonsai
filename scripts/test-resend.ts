@@ -9,9 +9,9 @@
  * → approve → negotiation. Sends a real email — pick a real recipient.
  *
  * Usage:
- *   bun run test-resend gcahill@firebaystudios.com
- *   bun run test-resend gcahill@firebaystudios.com garrett@cointracker.com
- *                       └── to (billing dept)         └── cc (account email)
+ *   bun run test-resend you@example.com
+ *   bun run test-resend billing@example.com you@example.com
+ *                       └── to (billing dept)   └── cc (account email)
  *
  * Env required:
  *   RESEND_API_KEY  — re_... key from resend.com/api-keys
@@ -35,7 +35,7 @@ const ccArg = process.argv[3];
 
 if (!recipient) {
   console.error("Usage: bun run test-resend <recipient-email> [<cc-email>]");
-  console.error("Example: bun run test-resend gcahill@firebaystudios.com");
+  console.error("Example: bun run test-resend you@example.com");
   process.exit(2);
 }
 

@@ -17,5 +17,5 @@
   <rect x="80" y="555" width="1040" height="1" fill="#0E0E0C" opacity="0.08"/>
 
   <!-- Footer host -->
-  <text x="80" y="595" font-family="Inter, Helvetica, sans-serif" font-size="18" fill="#8B8B7E" letter-spacing="2">BONSAI.FIREBAYSTUDIOS.COM</text>
+  <text x="80" y="595" font-family="Inter, Helvetica, sans-serif" font-size="18" fill="#8B8B7E" letter-spacing="2">YOUR-BONSAI-DOMAIN.COM</text>
 </svg>

@@ -15,7 +15,7 @@
 # Examples:
 #   # Verify a deployed instance accepts signed payloads (safe: no mutation)
 #   bash scripts/resend-inbound-smoke.sh \
-#     --url https://bonsai.firebaystudios.com \
+#     --url https://your-bonsai-domain.com \
 #     --secret whsec_xxx --debug-token devtoken --echo
 #
 #   # End-to-end smoke against local bun run serve (auto-seeds a thread)
