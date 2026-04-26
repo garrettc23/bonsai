@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.18.0] - 2026-04-26
+
+### Fixed
+- **Duplicate bill names get Finder-style "(1)" / "(2)" suffixes.** Auditing the same provider twice used to leave two indistinguishable rows on the Bills list and the Receipts hero. Render-time only — stored `provider_name` is untouched. Oldest entry keeps the bare name, newer dupes pick up suffixes. Case-insensitive grouping; trailing whitespace doesn't split groups; placeholders ("Unknown provider", null) are never suffixed.
+- **Delete bill is now instant.** Removing a bill no longer parks the row in a "waiting" state while the network roundtrip happens. The drawer closes and the row vanishes immediately; the server delete fires in the background. The server endpoint is also idempotent now — a missing pending record returns 200 instead of 404, so a race with another tab or a stale handle doesn't paint an error toast over a successful local delete.
+- **Discard-confirmation modal no longer fires for staged-but-not-yet-audited files.** `hasInFlightAuditWork()` was treating any file in the dropzone as in-flight work, so dropping a bill on the home page and clicking any other tab popped "Discard the bill you're about to upload?" — and the same check fired between "Accept and lower my bill" and the Bills view. Staged files are cheap to re-drop; the discard guard now only fires for the audit progress view, the review screen with a live audit, or a complaint draft. Inline highlight on the contact card for missing email/phone is unchanged (it's not a modal), and `showApproveBlocker` still surfaces the `email_not_configured` 503 (correct prod behavior — that fires when `RESEND_API_KEY` / `RESEND_FROM` aren't set).
+
+### Changed
+- `handleDeleteBill` logic moved out of `src/server.ts` into `src/lib/delete-bill.ts` with injected dependencies, so the new `test/delete-bill-completed.test.ts` exercises it without booting Bun.serve. Path-prefix guard on `bill_paths` unlinks is preserved and tested.
+
 ## [0.1.17.0] - 2026-04-26
 
 ### Changed
