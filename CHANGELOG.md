@@ -4,15 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.16.0] - 2026-04-26
+
+### Changed
+- **Hunting hero copy + live elapsed-time counter.** Body text now reads "Searching the web for cheaper providers to lower your recurring expenses. This usually takes 30–90 seconds. Xs elapsed" — was "...that match your recent audit." The "Xs elapsed" now ticks every second via a 1s `setInterval` that targets `.empty-hero.hunting .hunt-elapsed` directly. The interval self-clears when the hero leaves the DOM (chrome restored, user navigated away, hero replaced), so callers don't need explicit teardown.
+- **Hunt poll cap dropped from 5 minutes to 90 seconds, with a "You're with the best provider" empty state.** Real hunts that succeed almost always return inside 60s — keeping the spinner up for 5 minutes was a liveness lie. After 90s the page now flips to the regular Comparison chrome (banner hidden, "Recommended" / "All" filter chips) and renders a centered "You're with the best provider" card inside the grid: "Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill." A new offer-hunt run on a subsequent audit (or a "Switch for me" click) clears the timed-out flag and re-polls normally. The card reuses the `.empty-hero-card` visual language (1.5px ink-32% border, 12px radius, display font for the title) so the timed-out state and the idle "No alternatives yet" hero feel like the same family.
+
 ## [0.1.15.0] - 2026-04-26
 
 ### Fixed
 - **Comparison page no longer says "Comparison is in beta".** When the feature shipped in v0.1.13.0, `renderEarlyAccessHero` was left in place as the fallback for users with no offers cached — so a fresh user landing on Comparison still saw the old gating hero with "Sign up for early access". Replaced with `renderHeroEmptyView({title: "No alternatives yet", body: "Bonsai hunts for cheaper providers across your recurring costs every time you upload a bill. Drop one on the Home tab to kick off your first audit — Comparison populates automatically once it's done.", cta: "Go to Home"})`, which matches the empty-state pattern used on the Bills tab and routes the CTA to `/overview`.
 - **Polling spinner no longer destroys the offer-grid chrome.** The spinner branch in `renderOffers` was using `view.innerHTML = ...` which nuked `#offers-grid`, `#offers-banner`, and `#offers-filters`. Once that happened, the cards branch couldn't find those elements on the next render and silently no-op'd — so even when offers arrived after a poll cycle they never appeared on screen. New `renderComparisonHuntingHero` uses the same stash-and-swap pattern as `renderHeroEmptyView`, and `renderOffers` calls `restoreViewChildren(view)` before rendering cards to bring the chrome back from the stash.
-
-### Changed
-- **Hunting hero copy and live elapsed-time counter.** Body text now reads "Searching the web for cheaper providers to lower your recurring expenses. This usually takes 30–90 seconds. Xs elapsed" — the "Xs elapsed" updates every second via a 1s `setInterval` that targets `.empty-hero.hunting .hunt-elapsed` directly. The interval self-clears when the hero leaves the DOM (chrome restored, user navigated away, hero replaced) so callers don't need explicit teardown.
-- **Hunt poll cap dropped from 5 minutes to 90 seconds, with a "You're with the best provider" empty state.** Real hunts that succeed almost always return inside 60s — keeping the spinner up for 5 minutes was a liveness lie. After 90s the page now flips to the regular Comparison chrome (banner hidden, "Recommended" / "All" filter chips) and renders a centered "You're with the best provider" message inside the grid: "Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill." A new offer-hunt run on a subsequent audit (or a "Switch for me" click) clears the timed-out flag and re-polls normally.
 
 The `/api/early-access` endpoint and `users.early_access_at` column are left intact — users who opted in during the beta still have that record, even though the UI no longer surfaces a way to add new signups.
 
