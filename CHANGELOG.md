@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.28.0] - 2026-04-26
+
+### Added
+- **Curated alternatives ship with the sample bill.** New `fixtures/bill-001.offers.json` provides three vetted alternative-provider entries (MinuteClinic, RadiologyAssist, hospital financial-assistance program) instead of relying on a live agent run that could surface bill-negotiation competitors. `runOfferHuntsForRun` detects this fixture by `<fixture_name>.offers.json` and copies the entries straight into the user's offers dir with the run_id stamped — saves a managed-agent invocation on every "Try a sample" click and makes the demo deterministic.
+
+### Changed
+- **Comparison banner shows annual savings, capped to current annual spend.** "Annual savings if you switch to all recommended" now actually multiplies by 12 (it was rendering monthly previously) and groups recommended offers by baseline (provider + category) so multiple alternatives for the same bill don't double-count. The displayed figure is hard-capped at the cumulative annual amount the user is paying TODAY across the recommended baselines — Bonsai can't claim to save more than the user is spending.
+
 ## [0.1.27.0] - 2026-04-26
 
 ### Changed

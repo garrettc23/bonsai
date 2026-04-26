@@ -44,6 +44,7 @@ import {
   saveOfferHunt,
   offersDir,
   type Baseline,
+  type OfferHuntResult,
 } from "./offer-agent.ts";
 import { deriveOfferBaselines } from "./lib/derive-offer-baselines.ts";
 import { projectOfferHuntStatus, type OfferHuntStatusPayload } from "./lib/offer-hunt-status.ts";
@@ -1412,6 +1413,39 @@ async function handleApprove(req: Request): Promise<Response> {
 async function runOfferHuntsForRun(runId: string, baselines: Baseline[]): Promise<void> {
   const start = loadPending(runId);
   if (!start) return;
+
+  // Sample-bill fast path: if a curated `fixtures/<fixture_name>.offers.json`
+  // ships with the demo, copy those offers into the user's offers dir
+  // instead of burning a live agent run on a deterministic demo. The
+  // fixture is hand-vetted to avoid bill-negotiation competitors and to
+  // showcase realistic alternative providers — exactly what the live
+  // agent SHOULD return but doesn't always.
+  const fixtureOffersPath = join(FIXTURES_DIR, `${start.fixture_name}.offers.json`);
+  if (existsSync(fixtureOffersPath)) {
+    let fixtureOffers: OfferHuntResult[] = [];
+    try {
+      fixtureOffers = JSON.parse(readFileSync(fixtureOffersPath, "utf-8")) as OfferHuntResult[];
+    } catch (err) {
+      console.error(`[bg offer-hunt ${runId}] fixture offers parse failed`, err);
+    }
+    start.offer_hunt = {
+      baselines_total: fixtureOffers.length,
+      baselines_done: fixtureOffers.length,
+      started_at: Date.now(),
+      ended_at: Date.now(),
+      status: "done",
+    };
+    savePending(start);
+    for (const result of fixtureOffers) {
+      try {
+        saveOfferHunt({ ...result, run_id: runId });
+      } catch (err) {
+        console.error(`[bg offer-hunt ${runId}] save fixture entry failed`, err);
+      }
+    }
+    return;
+  }
+
   start.offer_hunt = {
     baselines_total: baselines.length,
     baselines_done: 0,
