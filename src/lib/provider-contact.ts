@@ -14,7 +14,20 @@ import { getDb } from "./db.ts";
 const MODEL = "claude-opus-4-7";
 const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
 
-export type ContactConfidence = "high" | "medium" | "low";
+// Hard cap on the web-search round trip. For obscure providers Claude can
+// hang on the search server tool — beyond this the user is better served by
+// pasting from their bill than by a longer wait. Tests override via env.
+const DEFAULT_LOOKUP_TIMEOUT_MS = 30_000;
+function lookupTimeoutMs(): number {
+  const raw = process.env.BONSAI_CONTACT_LOOKUP_TIMEOUT_MS;
+  if (!raw) return DEFAULT_LOOKUP_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_LOOKUP_TIMEOUT_MS;
+}
+
+export const CONTACT_TIMEOUT_NOTE = "lookup timed out, please paste contact";
+
+export type ContactConfidence = "high" | "medium" | "low" | "none";
 
 export interface ResolvedProviderContact {
   email: string | null;
@@ -185,17 +198,41 @@ export async function resolveProviderContact(
   // The web_search server tool runs entirely on Anthropic's side — we don't
   // dispatch tool calls. We just need to read the final tool_use back out.
   // Cap searches modestly so we don't burn 8 web hits on every audit.
-  const resp = await anthropic.messages.create({
-    model: MODEL,
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    tools: [
-      { type: WEB_SEARCH_TOOL_TYPE, name: "web_search", max_uses: 4 } as unknown as Anthropic.Tool,
-      REPORT_TOOL,
-    ],
-    tool_choice: { type: "tool", name: "report_provider_contact" },
-    messages: [{ role: "user", content: userMessage }],
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), lookupTimeoutMs());
+  let resp: Anthropic.Messages.Message;
+  try {
+    resp = await anthropic.messages.create(
+      {
+        model: MODEL,
+        max_tokens: 1024,
+        system: SYSTEM_PROMPT,
+        tools: [
+          { type: WEB_SEARCH_TOOL_TYPE, name: "web_search", max_uses: 4 } as unknown as Anthropic.Tool,
+          REPORT_TOOL,
+        ],
+        tool_choice: { type: "tool", name: "report_provider_contact" },
+        messages: [{ role: "user", content: userMessage }],
+      },
+      { signal: controller.signal },
+    );
+  } catch (err) {
+    if (controller.signal.aborted) {
+      // Don't cache — a transient hang shouldn't poison future runs.
+      return {
+        email: null,
+        phone: null,
+        source_urls: [],
+        confidence: "none",
+        notes: CONTACT_TIMEOUT_NOTE,
+        cache_key,
+        resolved_at: Date.now(),
+      };
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const toolBlock = resp.content.find(
     (b): b is Anthropic.Messages.ToolUseBlock =>
@@ -203,14 +240,15 @@ export async function resolveProviderContact(
   );
   if (!toolBlock) {
     // The model didn't return our reporting tool — record an unresolved row
-    // so we don't re-spend the search budget on the next call. Cache TTL can
-    // be added if we ever want to retry.
+    // so we don't re-spend the search budget on the next call. The UI
+    // collapses confidence:"none" into a paste-prompt, which is the right
+    // outcome here too.
     const empty = saveCache(cache_key, opts.provider_name, opts.provider_address ?? null, {
       email: null,
       phone: null,
       source_urls: [],
-      confidence: "low",
-      notes: "Resolver returned no structured result.",
+      confidence: "none",
+      notes: CONTACT_TIMEOUT_NOTE,
     });
     return empty;
   }
@@ -225,12 +263,23 @@ export async function resolveProviderContact(
   const urls = Array.isArray(input.source_urls)
     ? (input.source_urls.filter((u): u is string => typeof u === "string"))
     : [];
+  const email = typeof input.email === "string" && input.email.trim() ? input.email.trim() : null;
+  const phone = typeof input.phone === "string" && input.phone.trim() ? input.phone.trim() : null;
+  let confidence: ContactConfidence = (input.confidence ?? "low") as ContactConfidence;
+  let notes = typeof input.notes === "string" ? input.notes.trim() : "";
+  // "Low confidence with neither email nor phone" is functionally garbage —
+  // route it through the same paste-prompt UX as a timeout so the user
+  // isn't shown a "found nothing, but here's a vague note" state.
+  if (!email && !phone && (confidence === "low" || !input.confidence)) {
+    confidence = "none";
+    notes = CONTACT_TIMEOUT_NOTE;
+  }
   const cleaned = {
-    email: typeof input.email === "string" && input.email.trim() ? input.email.trim() : null,
-    phone: typeof input.phone === "string" && input.phone.trim() ? input.phone.trim() : null,
+    email,
+    phone,
     source_urls: urls,
-    confidence: (input.confidence ?? "low") as ContactConfidence,
-    notes: typeof input.notes === "string" ? input.notes.trim() : "",
+    confidence,
+    notes,
   };
   return saveCache(cache_key, opts.provider_name, opts.provider_address ?? null, cleaned);
 }

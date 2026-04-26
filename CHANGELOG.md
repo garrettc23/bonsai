@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.8.0] - 2026-04-25
+## [0.1.9.0] - 2026-04-25
 
 ### Added
 - **Rate limiting on public endpoints.** A stranger from Twitter can no longer drain the operator's Anthropic budget overnight or spam the password-reset mailer. New `src/lib/rate-limit.ts` is an in-process sliding-window counter (no Redis dep — fine for single-host beta) keyed by an arbitrary string. Three routes are gated:
@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - `POST /api/audit` — 20 audits per user per day, env-overridable via `BONSAI_AUDIT_DAILY_LIMIT`. Audit kicks off Opus 4.7 at ~$0.25–$1.00 per run; the env knob lets staging or paid tiers lift the cap without a rebuild. The 429 response says "Daily limit hit, upgrade to remove." so the future paywall message is already in place.
   - `POST /webhooks/resend-inbound` stays unlimited — svix-HMAC-verified, dropping a legitimate rep reply would look like Bonsai is dead.
 - Every 429 ships a `Retry-After` header plus `{ error, retry_after_sec }` JSON body so the SPA can surface the wait time inline.
+
+## [0.1.8.0] - 2026-04-25
+
+### Fixed
+- **Provider-contact lookup can no longer hang the plan-review tab.** `src/lib/provider-contact.ts` now wraps the web-search Claude call in a 30s `AbortController`. On timeout the resolver returns a no-cache `confidence: "none"` result with an explicit "lookup timed out, please paste contact" note, so a transient model hang doesn't poison future runs. Low-confidence results that come back with neither email nor phone collapse to the same `"none"` shape — the user always sees an explicit paste-to-proceed prompt instead of a vague "we found something, sort of" state. The contact card on the plan-review screen renders the new state with a tightened "We couldn't find this provider's billing email — paste it from your bill" copy and keeps the existing autosave-on-type / Approve auto-save flow intact, so a single paste plus Accept unblocks negotiation. The 30s ceiling is overridable in tests via `BONSAI_CONTACT_LOOKUP_TIMEOUT_MS`.
 
 ## [0.1.7.0] - 2026-04-25
 
