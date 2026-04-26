@@ -279,6 +279,26 @@ export function requireUser(req: Request): User | null {
   return getUserById(session.user_id);
 }
 
+export type RequireUserDiag =
+  | { user: User }
+  | { reason: "no_cookie" | "session_not_found" | "user_not_found" };
+
+/**
+ * Like `requireUser`, but discriminates between the three failure modes so
+ * the caller can log why a request was rejected without re-implementing the
+ * cookie/session/user chain. Never returns the cookie value or session token
+ * — only the failure category.
+ */
+export function requireUserDiag(req: Request): RequireUserDiag {
+  const token = readSessionCookie(req);
+  if (!token) return { reason: "no_cookie" };
+  const session = getSession(token);
+  if (!session) return { reason: "session_not_found" };
+  const user = getUserById(session.user_id);
+  if (!user) return { reason: "user_not_found" };
+  return { user };
+}
+
 // ─── Password reset ─────────────────────────────────────────────
 const RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
 

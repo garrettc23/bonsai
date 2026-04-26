@@ -56,6 +56,7 @@ import {
   getUserById,
   readSessionCookie,
   requireUser,
+  requireUserDiag,
   setSessionCookieHeader,
   verifyCredentials,
   type User,
@@ -286,15 +287,20 @@ function loadPending(runId: string): PendingRun | null {
   catch { return null; }
 }
 
+const AUDIT_DAILY_LIMIT_DEFAULT = 5;
+
 async function handleAudit(req: Request): Promise<Response> {
   // Per-user daily cap. Audit kicks off Opus 4.7 (operator-paid, ~$0.25–$1.00/run);
   // without a ceiling, one runaway user can drain the budget overnight.
   // Env-overridable so paid tiers / staging can lift it without a rebuild.
   const user = getCurrentUser();
-  const dailyMax = Number.parseInt(process.env.BONSAI_AUDIT_DAILY_LIMIT ?? "20", 10);
+  const dailyMax = Number.parseInt(
+    process.env.BONSAI_AUDIT_DAILY_LIMIT ?? String(AUDIT_DAILY_LIMIT_DEFAULT),
+    10,
+  );
   const rl = rateLimit({
     key: `audit:user:${user.id}`,
-    max: Number.isFinite(dailyMax) && dailyMax > 0 ? dailyMax : 20,
+    max: Number.isFinite(dailyMax) && dailyMax > 0 ? dailyMax : AUDIT_DAILY_LIMIT_DEFAULT,
     windowMs: 24 * 60 * 60 * 1000,
   });
   if (!rl.ok) {
@@ -2735,10 +2741,21 @@ const server = Bun.serve({
       if (PUBLIC_API_PATHS.has(url.pathname)) {
         return new Response("Not found", { status: 404 });
       }
-      const user = requireUser(req);
-      if (!user) {
+      const auth = requireUserDiag(req);
+      if ("reason" in auth) {
+        // Diagnostic-only: log the failure category + path so a 401 in
+        // production tells us which step of the chain failed (no cookie /
+        // unknown session / orphaned user). Never log the cookie value
+        // or session token — has_cookie is a boolean.
+        console.warn("[auth-fail]", {
+          reason: auth.reason,
+          path: url.pathname,
+          method: req.method,
+          has_cookie: req.headers.get("cookie") !== null,
+        });
         return Response.json({ error: "Authentication required" }, { status: 401 });
       }
+      const user = auth.user;
       // Make sure the user's tree exists (cheap, idempotent) — nothing
       // downstream will succeed without it.
       ensureUserDirs(userPaths(user.id));

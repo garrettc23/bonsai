@@ -28,6 +28,7 @@ import {
   getUserById,
   readSessionCookie,
   requireUser,
+  requireUserDiag,
   setSessionCookieHeader,
   verifyCredentials,
 } from "../src/lib/auth.ts";
@@ -222,6 +223,56 @@ describe("requireUser middleware (cookie-driven)", () => {
     expect(header).toContain("HttpOnly");
     expect(header).toContain("SameSite=Lax");
     expect(header).toMatch(/Max-Age=\d+/);
+  });
+});
+
+describe("requireUserDiag", () => {
+  test("returns { user } when the cookie is valid", async () => {
+    const u = await createUser("diag-ok@d.com", "supersecret", { acceptedTerms: true });
+    const sess = createSession(u.id);
+    const req = new Request("https://x.test/api/anything", {
+      headers: { cookie: `bonsai_session=${sess.id}` },
+    });
+    const got = requireUserDiag(req);
+    expect("user" in got).toBe(true);
+    if ("user" in got) {
+      expect(got.user.id).toBe(u.id);
+      expect(got.user.email).toBe("diag-ok@d.com");
+    }
+  });
+
+  test("returns { reason: 'no_cookie' } when no cookie header is present", () => {
+    const req = new Request("https://x.test/api/anything");
+    const got = requireUserDiag(req);
+    expect(got).toEqual({ reason: "no_cookie" });
+  });
+
+  test("returns { reason: 'session_not_found' } when the session token is bogus", () => {
+    const req = new Request("https://x.test/api/anything", {
+      headers: { cookie: "bonsai_session=not-a-real-token" },
+    });
+    const got = requireUserDiag(req);
+    expect(got).toEqual({ reason: "session_not_found" });
+  });
+
+  test("returns { reason: 'user_not_found' } when the session points at a missing user", async () => {
+    const u = await createUser("diag-orphan@d.com", "supersecret", { acceptedTerms: true });
+    const sess = createSession(u.id);
+    // FK + cascade-delete makes it impossible to leave a real orphan in
+    // the wild. Drop FKs for this one statement to synthesize the shape
+    // requireUserDiag has to handle if a row ever did survive cleanup.
+    const db = getDb();
+    db.exec("PRAGMA foreign_keys = OFF");
+    try {
+      db.query("UPDATE sessions SET user_id = ? WHERE id = ?").run("usr_nonexistent", sess.id);
+    } finally {
+      db.exec("PRAGMA foreign_keys = ON");
+    }
+    const req = new Request("https://x.test/api/anything", {
+      headers: { cookie: `bonsai_session=${sess.id}` },
+    });
+    const got = requireUserDiag(req);
+    expect(got).toEqual({ reason: "user_not_found" });
   });
 });
 
