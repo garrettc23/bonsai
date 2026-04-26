@@ -1845,11 +1845,16 @@ async function submitPlanMessage() {
     const { reply, strategy } = await res.json();
     thinking.querySelector(".qa-body").textContent = reply;
     if (strategy && reviewState.partial_report) {
-      // Store the new strategy on the report so approve() picks it up. The
-      // receipt + opportunities panels don't depend on channel choice, so
-      // no re-render is needed here.
+      // Store the new strategy on the report so approve() picks it up.
       reviewState.partial_report.strategy = strategy;
     }
+    // Re-fetch opportunities so the "Opportunities to lower this bill"
+    // panel reflects the user's directive. /api/opportunities reads
+    // run.plan_edits (which the chat just appended to), so the next call
+    // returns a tailored list. Show the skeleton during the re-fetch
+    // so the user sees the panel is updating, not stale.
+    renderOpportunitiesSkeleton();
+    void loadOpportunities(reviewState.partial_report);
   } catch (err) {
     thinking.querySelector(".qa-body").textContent = `Error: ${err.message ?? err}`;
     thinking.classList.add("error");

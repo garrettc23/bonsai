@@ -809,10 +809,12 @@ async function handleOpportunities(req: Request): Promise<Response> {
 
   // Fast path: ship a hand-curated opportunities list for any fixture
   // that has fixtures/<name>.opportunities.json next to its PDF. Skips a
-  // ~10s Opus call on the demo path. Real uploads still hit the live
-  // model below.
+  // ~10s Opus call on the demo path. Bypassed when the user has chatted
+  // with the plan (run.plan_edits set) — we want their directive to
+  // actually steer the opportunities list, not get ignored. Real uploads
+  // always hit the live model below.
   const cachedOppsPath = join(FIXTURES_DIR, `${run.fixture_name}.opportunities.json`);
-  if (existsSync(cachedOppsPath)) {
+  if (existsSync(cachedOppsPath) && !run.plan_edits?.trim()) {
     const cached = JSON.parse(readFileSync(cachedOppsPath, "utf-8")) as {
       opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
     };
