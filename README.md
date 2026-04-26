@@ -56,39 +56,118 @@ bun run serve               # web UI at http://localhost:3333
 ## Deploy to Railway
 
 Bonsai ships with a `Dockerfile` and `railway.json` that get you to a live
-HTTPS URL in a few minutes. Persistent volume holds SQLite + per-user
-files so signups + bills survive deploys.
+HTTPS URL in a few minutes. From a fresh `git clone` to first real audit
+should take under 30 minutes.
+
+### 1. Railway init
 
 ```bash
-# 1. Install the Railway CLI and log in (one-time)
 brew install railway          # or: npm i -g @railway/cli
 railway login
-
-# 2. From the repo root: create a project and push the current branch
 railway init                  # follow prompts; creates a new project
 railway up                    # uploads + builds via the Dockerfile
+```
 
-# 3. In the Railway dashboard for this service:
-#    → Variables: add ANTHROPIC_API_KEY  (required, operator-paid)
-#    → Variables: NODE_ENV=production    (cookie Secure flag, fail-closed webhook)
-#    → Variables: BONSAI_DATA_DIR=/app/data  (matches the Dockerfile volume)
-#    → Settings → Volumes: New Volume
-#         Mount path: /app/data
-#         Size: 1 GB (raise later if you grow)
-#    → Settings → Networking: Generate Domain  (gives you a *.up.railway.app URL)
+**What good looks like:** `railway up` exits 0. `railway status` shows
+the service flipping Building → Active. `railway domain` (or the
+dashboard) returns a `*.up.railway.app` URL. The URL will 502 until
+step 2's env vars are set — that's expected.
 
-# 4. Redeploy so the volume + new env vars are picked up
+### 2. Set 4 required env vars
+
+Via `railway variables --set 'KEY=value'` or the dashboard (Settings →
+Variables):
+
+| Var | Value | Why |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `sk-ant-...` | Operator-paid; every audit on Opus 4.7 runs ~$0.25-1.00 |
+| `NODE_ENV` | `production` | Flips cookie `Secure` flag; makes webhook fail-closed if signing secret missing |
+| `BONSAI_DATA_DIR` | `/app/data` | Matches the volume mount path in step 4 |
+| `RESEND_FROM` | `appeals@your-domain.com` | Must be a verified domain in Resend |
+
+**What good looks like:** `railway variables` lists all four. After the
+next `railway up`, `https://<your-domain>/healthz` returns `200 ok`.
+
+### 3. Set 4 optional env vars
+
+Add only what the operator needs. Any subset is fine for the first
+audit; the app degrades gracefully when these are missing.
+
+| Var | When to set it | Without it |
+|---|---|---|
+| `RESEND_API_KEY` | Any real outbound email | Email negotiation runs in mock mode (writes to `out/`, never sends) |
+| `RESEND_WEBHOOK_SECRET` | Inbound replies from providers | In `NODE_ENV=production` the inbound webhook returns 500 by design (fail-closed) |
+| `ELEVENLABS_API_KEY` + `ELEVENLABS_AGENT_ID` + `ELEVENLABS_WEBHOOK_BASE` + `ELEVENLABS_TWILIO_PHONE_NUMBER_ID` | Real outbound voice calls | Voice runs in simulator mode (dual-Claude, transcript labeled accordingly in `out/users/<id>/calls/`) |
+| `SENTRY_DSN` | Post-beta — not yet wired into the codebase | No-op today; reserved for future error tracking |
+
+For a full email round-trip, both `RESEND_API_KEY` and
+`RESEND_WEBHOOK_SECRET` must be set, and the inbound webhook must be
+configured in the Resend dashboard pointing at
+`https://<your-domain>/webhooks/resend-inbound`.
+
+**What good looks like:** the variables you chose are listed by
+`railway variables`. The app boots without warnings about missing
+required-for-mode vars.
+
+### 4. Mount the `/app/data` volume
+
+Dashboard → Settings → Volumes → **New Volume**:
+- Mount path: `/app/data`
+- Size: 1 GB (raise later if you grow)
+
+Then redeploy so the volume + env vars are picked up together:
+
+```bash
 railway up
 ```
 
-Health check: Railway hits `/healthz` automatically (already wired in
-`railway.json`). Once it passes, the public URL is live.
+**What good looks like:** signing up + uploading a bill, then running
+`railway up` again, preserves the user and the bill. SQLite at
+`/app/data/bonsai.db` and per-user directories at
+`/app/data/users/<id>/` (uploads, threads, calls, reports) survive
+across deploys.
 
-**Resend inbound webhook (optional but recommended).** After the domain
-is up, in your Resend dashboard set the inbound mailbox webhook to
-`https://<your-domain>/webhooks/resend-inbound` and copy the signing
-secret into Railway as `RESEND_WEBHOOK_SECRET`. With `NODE_ENV=production`
-Bonsai requires the secret — fail-closed by design.
+### 5. Verify Resend inbound
+
+Walk through the four-step **Resend post-deploy verification** runbook
+below before relying on the email loop. It signs a real svix payload,
+hits the deploy's read-only echo route, and confirms the inbound
+webhook routes a real reply end-to-end.
+
+**What good looks like:** all four steps in that section pass.
+
+### 6. Verify outbound voice — `bun run voice-smoke`
+
+Gated on the ElevenLabs vars from step 3. Dials the operator's own cell
+as a 30-second smoke test, verifies tool callbacks fire, and writes a
+transcript.
+
+```bash
+VOICE_SMOKE_TO=+15555550123 bun run voice-smoke
+```
+
+**What good looks like:** the phone rings, the agent reads the opening
+line, hangup writes a transcript to `out/users/<id>/calls/`. (This
+script ships with PR-2 — real ElevenLabs + Twilio wiring. Until then,
+voice runs in simulator mode for every audit and step 6 is a no-op:
+the simulator writes a labeled transcript without dialing.)
+
+### 7. Submit a real bill via the web UI
+
+Open the Railway domain in a browser, sign up, drop a real (non-fixture)
+bill PDF + EOB PDF, click **Audit**.
+
+**What good looks like:** the audit completes in 30-90s. Findings list
+verbatim `line_quote` rows from the uploaded bill. The defensible total
+renders in the dashboard hero. The bill drawer shows the
+agent-reasoning timeline. Image-only / scanned PDFs return a
+`SCANNED_PDF` error with a "paste rows or upload a text PDF" prompt —
+no silent OCR.
+
+---
+
+**Health check.** Railway hits `/healthz` automatically (wired in
+`railway.json`). Once it passes, the public URL is live.
 
 ### Resend post-deploy verification
 
@@ -363,13 +442,12 @@ test/                    # bun test
 
 Saved range: **$3,612 – $6,517 per bill** across the two fixtures.
 
-## Known follow-ups
+## Roadmap
 
-- Live PDF text extraction (currently uploaded PDFs require a matching
-  `fixtures/<name>.md` for ground-truth line_quote validation). Wire in
-  `unpdf` or similar.
+- ~~Live PDF text extraction (currently uploaded PDFs require a matching `fixtures/<name>.md` for ground-truth line_quote validation). Wire in `unpdf` or similar.~~ — shipped in 0.1.4.0: `src/lib/pdf-extract.ts` wraps `unpdf` and feeds the analyzer's verbatim `line_quote` validator with text pulled directly from the upload.
 - Real ElevenLabs + Twilio wiring for voice (simulator is complete; swap is
   one-env-var + webhook URL config).
+- ~~Real Resend inbound webhook handler for email replies in prod.~~ — shipped: svix-verified `POST /webhooks/resend-inbound` with replay-window dedupe and per-thread mutex. Post-deploy smoke runbook + `scripts/resend-inbound-smoke.sh` shipped in 0.1.5.0.
 - `out/` artifacts (reports, thread state, call transcripts) are file-based
   — fine for a single-user demo, not for multi-tenant.
 
