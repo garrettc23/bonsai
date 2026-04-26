@@ -14,7 +14,8 @@
     "serve": "bun run src/server.ts",
     "typecheck": "bunx --bun tsc --noEmit",
     "test": "bun test",
-    "make-pdfs": "bun run scripts/make-fixture-pdfs.ts"
+    "make-pdfs": "bun run scripts/make-fixture-pdfs.ts",
+    "test-resend": "bun run scripts/test-resend.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.0",
