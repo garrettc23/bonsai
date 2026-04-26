@@ -18,6 +18,7 @@ import type {
   SentEmail,
 } from "./email.ts";
 import { newId } from "./email.ts";
+import { stripMarkdown } from "../lib/strip-markdown.ts";
 
 /**
  * Build a display-name + address From line. The verified operator address
@@ -70,13 +71,18 @@ export class ResendEmailClient implements EmailClient {
     // user's identity in the From's display name so the rep sees
     // "Garrett Cahill (via Bonsai) <appeals@bonsai.firebaystudios.com>".
     const wireFrom = withDisplayName(this.fromEmail, msg.from);
+    // Defensive: even though the negotiator + humanizer prompts forbid
+    // markdown, run the body through stripMarkdown() before it hits the
+    // wire so any drift (e.g. a stray `**bold**`) doesn't render as
+    // literal asterisks in Gmail/Outlook.
+    const wireText = stripMarkdown(msg.body_text);
     const body: Record<string, unknown> = {
       from: wireFrom,
       to: [msg.to],
       subject: msg.subject,
       // Resend accepts either `html` or `text`. We send text; a markdown
       // renderer could be added later if we want to polish.
-      text: msg.body_markdown,
+      text: wireText,
       headers: {
         // Custom header used for thread correlation on inbound webhook.
         "X-Bonsai-Thread-Id": msg.thread_id,
@@ -108,7 +114,7 @@ export class ResendEmailClient implements EmailClient {
       to: msg.to,
       from: wireFrom,
       subject: msg.subject,
-      body_markdown: msg.body_markdown,
+      body_text: wireText,
       thread_id: msg.thread_id,
       in_reply_to: msg.in_reply_to,
       cc: msg.cc,

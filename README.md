@@ -127,20 +127,14 @@ railway up
 `/app/data/users/<id>/` (uploads, threads, calls, reports) survive
 across deploys.
 
-### 5. Verify Resend inbound — `bun run resend-inbound-smoke`
+### 5. Verify Resend inbound
 
-Locally, against the deployed URL, post a signed test payload to
-`https://<your-domain>/webhooks/resend-inbound` and assert that the
-correlated thread advances.
+Walk through the four-step **Resend post-deploy verification** runbook
+below before relying on the email loop. It signs a real svix payload,
+hits the deploy's read-only echo route, and confirms the inbound
+webhook routes a real reply end-to-end.
 
-```bash
-DEPLOY_URL=https://<your-domain> bun run resend-inbound-smoke
-```
-
-**What good looks like:** script exits 0; the dashboard shows the test
-thread updated within 5 seconds; the patient BCC arrives in the
-configured inbox. (This script ships in PR-5; until then, replicate by
-hand using the svix-signed `curl` recipe in `src/server/webhooks.ts`.)
+**What good looks like:** all four steps in that section pass.
 
 ### 6. Verify outbound voice — `bun run voice-smoke`
 
@@ -166,13 +160,55 @@ bill PDF + EOB PDF, click **Audit**.
 **What good looks like:** the audit completes in 30-90s. Findings list
 verbatim `line_quote` rows from the uploaded bill. The defensible total
 renders in the dashboard hero. The bill drawer shows the
-agent-reasoning timeline. (Real PDF extraction ships in PR-1; until
-then, only fixture-matched PDFs are accepted — bill-001, bill-002.)
+agent-reasoning timeline. Image-only / scanned PDFs return a
+`SCANNED_PDF` error with a "paste rows or upload a text PDF" prompt —
+no silent OCR.
 
 ---
 
 **Health check.** Railway hits `/healthz` automatically (wired in
 `railway.json`). Once it passes, the public URL is live.
+
+### Resend post-deploy verification
+
+After deploying to Railway and pointing Resend's inbound webhook at
+your domain, run this 4-step check before relying on the email loop.
+
+1. Set `BONSAI_WEBHOOK_DEBUG_TOKEN` on Railway to any random secret.
+   This unlocks the read-only echo route used in step 2
+   (`POST /webhooks/resend-inbound/echo`). With the env var unset,
+   the route is a hard 404 — no debug surface in production by default.
+
+2. From your laptop, smoke-test the deployed signature verifier
+   (read-only, no thread state mutation):
+
+   ```bash
+   bash scripts/resend-inbound-smoke.sh \
+     --url https://<your-domain> \
+     --secret "$RESEND_WEBHOOK_SECRET" \
+     --debug-token "$BONSAI_WEBHOOK_DEBUG_TOKEN" \
+     --echo
+   # expect: signature_valid:true, exit 0
+   ```
+
+   If `signature_valid:false`, your `RESEND_WEBHOOK_SECRET` on Railway
+   doesn't match the one configured in Resend's dashboard, or your
+   laptop's clock is more than 5 minutes off (svix replay window).
+
+3. Trigger a real email negotiation from the dashboard (any bill with a
+   finding). Confirm the outbound email shows up in the patient's
+   profile-email inbox (BCC'd) and lands in the rep's inbox.
+
+4. Reply to that email from any inbox addressed to
+   `appeals@<your-domain>`. Within 5 seconds:
+   - the bill drawer's email transcript shows the new reply,
+   - the patient's inbox shows the same thread (Bonsai forwards inbound
+     replies to the user's profile email), and
+   - the Railway logs show `[webhook]` entries for the inbound + a
+     follow-up `stepNegotiation`.
+
+If step 4 fails but step 2 passed, the inbound webhook URL is wrong in
+Resend's dashboard or the inbound mailbox isn't routing to it.
 
 **Cost shape.** Railway Hobby is $5/month and includes the volume.
 Anthropic API usage is operator-paid (every audit on Opus 4.7 runs
@@ -408,12 +444,10 @@ Saved range: **$3,612 – $6,517 per bill** across the two fixtures.
 
 ## Roadmap
 
-- Live PDF text extraction (currently uploaded PDFs require a matching
-  `fixtures/<name>.md` for ground-truth line_quote validation). Wire in
-  `unpdf` or similar.
+- ~~Live PDF text extraction (currently uploaded PDFs require a matching `fixtures/<name>.md` for ground-truth line_quote validation). Wire in `unpdf` or similar.~~ — shipped in 0.1.4.0: `src/lib/pdf-extract.ts` wraps `unpdf` and feeds the analyzer's verbatim `line_quote` validator with text pulled directly from the upload.
 - Real ElevenLabs + Twilio wiring for voice (simulator is complete; swap is
   one-env-var + webhook URL config).
-- ~~Real Resend inbound webhook handler for email replies in prod.~~ — shipped: svix-verified `POST /webhooks/resend-inbound` with replay-window dedupe and per-thread mutex.
+- ~~Real Resend inbound webhook handler for email replies in prod.~~ — shipped: svix-verified `POST /webhooks/resend-inbound` with replay-window dedupe and per-thread mutex. Post-deploy smoke runbook + `scripts/resend-inbound-smoke.sh` shipped in 0.1.5.0.
 - `out/` artifacts (reports, thread state, call transcripts) are file-based
   — fine for a single-user demo, not for multi-tenant.
 

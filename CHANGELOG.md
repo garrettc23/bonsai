@@ -4,14 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.1.6.0] - 2026-04-25
+
+### Changed
+- **Operator deploy runbook.** `Deploy to Railway` rewritten as a 7-step numbered checklist with "what good looks like" notes for each step, taking a friend from `git clone` to first real audit in under 30 minutes. Required vs optional env vars are split into two tables. Step 5 points at the dedicated "Resend post-deploy verification" runbook (shipped in 0.1.5.0); step 6 (`bun run voice-smoke`) stays gated on real ElevenLabs + Twilio wiring. `Known follow-ups` renamed to `Roadmap` with the now-shipped real Resend inbound webhook and live PDF text extraction items struck through.
+
+## [0.1.5.0] - 2026-04-25
+
+### Added
+- **Resend post-deploy verification.** Operators can now smoke-test a fresh Resend deploy without waiting for a rep's first reply. New `scripts/resend-inbound-smoke.sh` signs a real svix payload (echo or full mode), hits the deploy, and asserts the handler accepts and routes correctly. New `POST /webhooks/resend-inbound/echo?debug_token=<env>` route echoes svix signature validity + thread correlation method without mutating state — gated by `BONSAI_WEBHOOK_DEBUG_TOKEN` (route is a hard 404 when the env var is unset). README adds a 4-step post-deploy verification runbook in the Deploy section.
+
+## [0.1.4.0] - 2026-04-25
+
+### Added
+- **Real PDF text extraction on uploaded bills.** New `src/lib/pdf-extract.ts` wraps `unpdf` (Bun-friendly, no native deps) and exposes `extractPdfText(path)`. The `POST /api/run` upload route no longer rejects PDFs that lack a matching `fixtures/<name>.md`: it pulls text directly from the uploaded PDF and feeds it through the existing `groundTruthFromText`, so the analyzer's verbatim `line_quote` validator still anchors every finding to the actual bill. Image-only / scanned PDFs raise a `ScannedPdfError` that surfaces to the client as `{ code: "SCANNED_PDF" }` with a "this looks scanned, paste rows or upload a text PDF" message — no silent OCR, the grounding contract holds. Fixture demo path is unchanged; only the previously-unreachable rejection branch flips to live extraction.
 
 ## [0.1.3.0] - 2026-04-25
 
-### Changed
-- **Operator deploy runbook.** `Deploy to Railway` rewritten as a 7-step numbered checklist with "what good looks like" notes for each step, taking a friend from `git clone` to first real audit in under 30 minutes. Required vs optional env vars are split into two tables. Steps 5 and 6 reference forward-looking smoke scripts (`bun run resend-inbound-smoke` ships with the inbound webhook smoke PR; `bun run voice-smoke` ships with real ElevenLabs + Twilio wiring). `Known follow-ups` renamed to `Roadmap` with the shipped Resend inbound webhook bullet struck through.
+### Fixed
+- **Outbound emails no longer leak markdown punctuation.** Emails ship to Resend as the plain `text:` field, so `**bold**`, `## headings`, `> blockquotes`, and backticks were rendering as literal characters in Gmail and Outlook. The negotiator's `send_email` tool now asks for `body_text` (was `body_markdown`), the tool description and system prompt forbid markdown formatting with explicit do/don't examples, and the humanizer's system prompt picks up a matching rule. A new `stripMarkdown()` helper runs as a belt-and-braces last line of defense in both the Resend and Mock email clients — even if Claude drifts back into markdown habits, the wire payload is clean. Snake_case identifiers like `claim_number` and `account_number` are preserved verbatim. The appeal-letter PDF attachment intentionally stays markdown (it's an attachment, not the body).
 
-## [Unreleased — pre-0.1.3]
+### Changed
+- **`OutboundEmail.body_markdown` → `body_text`** on the email type (`src/clients/email.ts`) and every callsite (`src/negotiate-email.ts`, `src/negotiate-agent.ts`, `src/orchestrator.ts`, `scripts/day4-negotiate-email.ts`, both email clients, the webhook test fixture). Aligns with `InboundEmail.body_text` so both sides of the wire share the same field name and contract.
+
+## [Unreleased]
 
 ### Added
 - **Terms of Service + Privacy Policy gate on signup.** New `users.accepted_terms_at` column. `POST /api/auth/signup` now requires `accepted_terms: true` in the body — server returns `400 terms_not_accepted` otherwise. Auth screen renders a terms-acceptance checkbox in the foot of the card (signup mode only, sharing the same grid cell as the "Forgot password?" link in login mode so card height never changes between tabs). Links route to two new branded static pages (`public/terms.html`, `public/privacy.html`); `handleStatic` auto-maps extensionless URLs to `.html` so `/terms` and `/privacy` resolve.

@@ -21,6 +21,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   handleResendInbound,
+  handleResendInboundEcho,
   verifySvixSignature,
 } from "../src/server/webhooks.ts";
 import { loadThread, saveThread } from "../src/clients/email-mock.ts";
@@ -45,11 +46,13 @@ function svixSign(opts: {
 
 let originalSecret: string | undefined;
 let originalNodeEnv: string | undefined;
+let originalDebugToken: string | undefined;
 let scratchThreadIds: string[] = [];
 
 beforeEach(() => {
   originalSecret = process.env.RESEND_WEBHOOK_SECRET;
   originalNodeEnv = process.env.NODE_ENV;
+  originalDebugToken = process.env.BONSAI_WEBHOOK_DEBUG_TOKEN;
   scratchThreadIds = [];
 });
 
@@ -59,6 +62,8 @@ afterEach(() => {
   else process.env.RESEND_WEBHOOK_SECRET = originalSecret;
   if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = originalNodeEnv;
+  if (originalDebugToken === undefined) delete process.env.BONSAI_WEBHOOK_DEBUG_TOKEN;
+  else process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = originalDebugToken;
   // Clean up anything we wrote into the production threads dir.
   for (const tid of scratchThreadIds) {
     try {
@@ -91,7 +96,7 @@ function seedThread(thread_id: string, outboundMessageId?: string) {
               to: "billing@hospital.example",
               from: "patient@example.com",
               subject: "Appeal",
-              body_markdown: "...",
+              body_text: "...",
               thread_id,
             },
           ]
@@ -107,6 +112,19 @@ function makeRequest(opts: {
   headers?: Record<string, string>;
 }): Request {
   return new Request("http://localhost:3333/webhooks/resend-inbound", {
+    method: "POST",
+    headers: opts.headers,
+    body: opts.body,
+  });
+}
+
+function makeEchoRequest(opts: {
+  body: string;
+  headers?: Record<string, string>;
+  query?: string;
+}): Request {
+  const qs = opts.query ? `?${opts.query}` : "";
+  return new Request(`http://localhost:3333/webhooks/resend-inbound/echo${qs}`, {
     method: "POST",
     headers: opts.headers,
     body: opts.body,
@@ -330,5 +348,149 @@ describe("handleResendInbound", () => {
     expect(res.status).toBe(200);
     const t = loadThread(tid, PROD_THREADS_DIR);
     expect(t.inbound.length).toBe(1);
+  });
+});
+
+describe("handleResendInboundEcho", () => {
+  test("404 when BONSAI_WEBHOOK_DEBUG_TOKEN is unset (regardless of token)", async () => {
+    delete process.env.BONSAI_WEBHOOK_DEBUG_TOKEN;
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({ body: "{}", query: "debug_token=anything" }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("404 when token query param is missing", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({ body: "{}" }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("404 when token query param is wrong", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({ body: "{}", query: "debug_token=wrong" }),
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test("200 + signature_valid:true on a freshly-signed payload", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    process.env.RESEND_WEBHOOK_SECRET = "shh";
+    const body = JSON.stringify({
+      type: "email.received",
+      data: { from: "x@y", subject: "Re", text: "hi" },
+    });
+    const sv = svixSign({ secretRaw: "shh", body });
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({
+        body,
+        query: "debug_token=right",
+        headers: {
+          "svix-id": sv.id,
+          "svix-timestamp": sv.ts,
+          "svix-signature": sv.sig,
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      secret_configured: boolean;
+      signature_valid: boolean;
+      body_bytes: number;
+    };
+    expect(json.secret_configured).toBe(true);
+    expect(json.signature_valid).toBe(true);
+    expect(json.body_bytes).toBe(Buffer.byteLength(body, "utf8"));
+  });
+
+  test("200 + signature_valid:false on a tampered body (echo, no rejection)", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    process.env.RESEND_WEBHOOK_SECRET = "shh";
+    const body = JSON.stringify({ ok: true });
+    const sv = svixSign({ secretRaw: "shh", body });
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({
+        body: body + "x",
+        query: "debug_token=right",
+        headers: {
+          "svix-id": sv.id,
+          "svix-timestamp": sv.ts,
+          "svix-signature": sv.sig,
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { signature_valid: boolean };
+    expect(json.signature_valid).toBe(false);
+  });
+
+  test("reports thread_correlation.method='header' when X-Bonsai-Thread-Id is present", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    process.env.RESEND_WEBHOOK_SECRET = "shh";
+    const tid = `thread_echo_${Math.random().toString(36).slice(2, 8)}`;
+    const body = JSON.stringify({
+      type: "email.received",
+      data: {
+        from: "x@y",
+        subject: "Re",
+        text: "hi",
+        headers: [{ name: "X-Bonsai-Thread-Id", value: tid }],
+      },
+    });
+    const sv = svixSign({ secretRaw: "shh", body });
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({
+        body,
+        query: "debug_token=right",
+        headers: {
+          "svix-id": sv.id,
+          "svix-timestamp": sv.ts,
+          "svix-signature": sv.sig,
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      thread_correlation: { method: string | null; thread_id: string | null };
+    };
+    expect(json.thread_correlation.method).toBe("header");
+    expect(json.thread_correlation.thread_id).toBe(tid);
+  });
+
+  test("does not mutate an existing thread file", async () => {
+    process.env.BONSAI_WEBHOOK_DEBUG_TOKEN = "right";
+    process.env.RESEND_WEBHOOK_SECRET = "shh";
+    const tid = `thread_echo_nomut_${Math.random().toString(36).slice(2, 8)}`;
+    seedThread(tid);
+    const before = loadThread(tid, PROD_THREADS_DIR);
+    expect(before.inbound.length).toBe(0);
+    const body = JSON.stringify({
+      type: "email.received",
+      data: {
+        from: "x@y",
+        subject: "Re",
+        text: "hi",
+        message_id: "echo-no-mutate-001",
+        headers: [{ name: "X-Bonsai-Thread-Id", value: tid }],
+      },
+    });
+    const sv = svixSign({ secretRaw: "shh", body });
+    const res = await handleResendInboundEcho(
+      makeEchoRequest({
+        body,
+        query: "debug_token=right",
+        headers: {
+          "svix-id": sv.id,
+          "svix-timestamp": sv.ts,
+          "svix-signature": sv.sig,
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const after = loadThread(tid, PROD_THREADS_DIR);
+    expect(after.inbound.length).toBe(0);
   });
 });

@@ -81,7 +81,7 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
     provider_email: PROVIDER_EMAIL,
     user_email: PATIENT_EMAIL,
     reply_to_subject: latestSubject,
-    latest_outbound_body: latestOutbound?.body_markdown ?? "",
+    latest_outbound_body: latestOutbound?.body_text ?? "",
     client,
   });
   console.log(`[simulator] inbound reply:\n`);
@@ -97,8 +97,8 @@ for (let round = 1; round <= MAX_ROUNDS; round++) {
   if (newThread.outbound.length > (round === 1 ? 1 : round)) {
     const out = newThread.outbound[newThread.outbound.length - 1];
     console.log(`[negotiator] → sent reply. subject="${out.subject}"\n`);
-    for (const line of out.body_markdown.split("\n").slice(0, 18)) console.log(`  │ ${line}`);
-    if (out.body_markdown.split("\n").length > 18) console.log(`  │ ...`);
+    for (const line of out.body_text.split("\n").slice(0, 18)) console.log(`  │ ${line}`);
+    if (out.body_text.split("\n").length > 18) console.log(`  │ ...`);
   }
 
   if (state.outcome.status !== "in_progress") break;
