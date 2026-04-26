@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.10.0] - 2026-04-25
+
+### Changed
+- **Audit daily limit lowered from 20 to 5.** A solo curious user can no longer drain the operator's Opus 4.7 budget with a casual afternoon of clicking. Hoisted the literal into a single `AUDIT_DAILY_LIMIT_DEFAULT = 5` constant in `src/server.ts` so the env-var default and the safety fallback move together. `BONSAI_AUDIT_DAILY_LIMIT` still overrides for staging or future paid tiers.
+
+### Fixed
+- **Landing page now says "CC'd" instead of "BCC'd".** The third feature card on `public/landing.html` claimed users were BCC'd on every email, but `src/clients/email-resend.ts:95` has been threading a `cc:` field to Resend for a while. Copy now matches reality.
+
+### Added
+- **Diagnostic logging on `/api/*` 401s.** When a request hits the catch-all auth gate without a valid session, the server now `console.warn`s a structured `[auth-fail]` line with the failure category (`no_cookie` / `session_not_found` / `user_not_found`), the request path and method, and a boolean `has_cookie`. The next "why is the API 401-ing in prod" question is answerable from logs alone. The cookie value and session token are never logged. Implemented as a sibling export `requireUserDiag` in `src/lib/auth.ts` so the route handler stays a single conditional.
+- **Defensive `apiFetch` wrapper in the SPA.** `public/assets/app.js` now routes every `/api/*` call through a tiny wrapper that pins `credentials: "same-origin"`. Browsers default to that already, so this is belt-and-braces — if a future fetch override or polyfill ever shifts the default, the bonsai_session cookie still rides along. 38 call sites migrated; non-`/api` fetches are untouched.
+
 ## [0.1.9.0] - 2026-04-25
 
 ### Added

@@ -9,6 +9,16 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const FLOW_STAGES = ["Extract", "Audit", "Negotiate", "Finalize"];
 
 /**
+ * Defensive wrapper around `fetch` for same-origin /api/* calls. Modern
+ * browsers default credentials to "same-origin" already, so this is
+ * belt-and-braces: it guarantees the bonsai_session cookie rides along
+ * even if a future fetch override or polyfill changes the default.
+ */
+async function apiFetch(path, opts = {}) {
+  return fetch(path, { ...opts, credentials: "same-origin" });
+}
+
+/**
  * Clamp a "saved" amount to [0, cap]. Saving more than the user actually
  * owes is impossible and confusing. Display $0 for negative or invalid
  * inputs rather than a misleading negative number.
@@ -414,7 +424,7 @@ function stopTimeline() {
 
 async function fetchCurrentUser() {
   try {
-    const res = await fetch("/api/auth/me", { credentials: "same-origin" });
+    const res = await apiFetch("/api/auth/me");
     if (!res.ok) return null;
     const j = await res.json();
     return j.user ?? null;
@@ -633,7 +643,7 @@ function renderForgotView() {
     errEl.hidden = true;
     infoEl.hidden = true;
     try {
-      const res = await fetch("/api/auth/forgot", {
+      const res = await apiFetch("/api/auth/forgot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
@@ -688,7 +698,7 @@ function renderResetView(token) {
     submit.disabled = true;
     errEl.hidden = true;
     try {
-      const res = await fetch("/api/auth/reset", {
+      const res = await apiFetch("/api/auth/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token, password }),
@@ -718,7 +728,7 @@ function renderResetView(token) {
 let currentUser = null;
 
 async function logout() {
-  try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch {}
+  try { await apiFetch("/api/auth/logout", { method: "POST" }); } catch {}
   // Send the user to the marketing landing page after logout — reloading
   // the SPA shell would just bounce them straight back to the auth screen.
   window.location.href = "/";
@@ -769,7 +779,7 @@ async function init() {
   });
 
   // Fixture dropdown
-  const fixtures = await fetch("/api/fixtures").then((r) => r.json()).catch(() => ({ fixtures: [] }));
+  const fixtures = await apiFetch("/api/fixtures").then((r) => r.json()).catch(() => ({ fixtures: [] }));
   const sel = $("#fixture");
   sel.innerHTML = "";
   for (const f of fixtures.fixtures ?? []) {
@@ -847,7 +857,7 @@ async function init() {
       const form = new FormData();
       stagedFiles.forEach((f) => form.append("bill", f, f.name));
       form.set("channel", "persistent");
-      prefetchPromise = fetch("/api/audit", { method: "POST", body: form, signal: controller.signal })
+      prefetchPromise = apiFetch("/api/audit", { method: "POST", body: form, signal: controller.signal })
         .then(async (res) => {
           if (!res.ok) throw new Error(await res.text());
           return res.json();
@@ -870,7 +880,7 @@ async function init() {
     if (thumbnailCache.has(key)) return thumbnailCache.get(key);
     const form = new FormData();
     form.append("file", file, file.name);
-    const p = fetch("/api/thumbnail", { method: "POST", body: form })
+    const p = apiFetch("/api/thumbnail", { method: "POST", body: form })
       .then(async (res) => {
         if (!res.ok) return null;
         const blob = await res.blob();
@@ -1105,7 +1115,7 @@ async function init() {
 let receiptsCache = null;
 async function loadReceipts() {
   try {
-    receiptsCache = await fetch("/api/receipts").then((r) => r.json());
+    receiptsCache = await apiFetch("/api/receipts").then((r) => r.json());
   } catch {
     receiptsCache = { rows: [], total_saved: 0, count: 0 };
   }
@@ -1177,7 +1187,7 @@ function renderReceipts() {
 
 async function loadHistory() {
   try {
-    historyCache = await fetch("/api/history").then((r) => r.json());
+    historyCache = await apiFetch("/api/history").then((r) => r.json());
   } catch {
     historyCache = { audits: [], letters: [] };
   }
@@ -1384,7 +1394,7 @@ async function submitComplaintChat() {
   log.scrollTop = log.scrollHeight;
 
   try {
-    const res = await fetch("/api/complaint/chat", {
+    const res = await apiFetch("/api/complaint/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -1440,7 +1450,7 @@ async function submitComplaint() {
   // then drafts the letter and sends the email in the background. The user
   // is on Bills before any of that completes.
   try {
-    const res = await fetch("/api/complaint", {
+    const res = await apiFetch("/api/complaint", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -1484,7 +1494,7 @@ async function runPhasedFromSample(fixture, channel) {
   const startedAt = Date.now();
   const MIN_LOADING_MS = 1500;
   try {
-    const res = await fetch("/api/audit", {
+    const res = await apiFetch("/api/audit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fixture, channel }),
@@ -1514,7 +1524,7 @@ async function runPhasedFromUpload(formData) {
   });
   startTimeline();
   try {
-    const res = await fetch("/api/audit", { method: "POST", body: formData });
+    const res = await apiFetch("/api/audit", { method: "POST", body: formData });
     if (!res.ok) throw new Error(await res.text());
     const { run_id, report } = await res.json();
     stopTimeline();
@@ -1616,7 +1626,7 @@ async function pollContactStatus() {
   if (!runId) return;
   let data;
   try {
-    const res = await fetch(`/api/contact/${encodeURIComponent(runId)}`, { credentials: "same-origin" });
+    const res = await apiFetch(`/api/contact/${encodeURIComponent(runId)}`);
     if (!res.ok) return;
     data = await res.json();
   } catch { return; }
@@ -1721,7 +1731,7 @@ async function saveContactOverride() {
     status.className = "contact-save-status pending";
   }
   try {
-    const res = await fetch("/api/contact/override", {
+    const res = await apiFetch("/api/contact/override", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -1768,7 +1778,7 @@ async function loadOpportunities(report) {
   const runId = reviewState?.run_id;
   if (!runId) return;
   try {
-    const res = await fetch("/api/opportunities", {
+    const res = await apiFetch("/api/opportunities", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: runId }),
@@ -2035,7 +2045,7 @@ async function submitPlanMessage() {
   log.scrollTop = log.scrollHeight;
 
   try {
-    const res = await fetch("/api/plan-chat", {
+    const res = await apiFetch("/api/plan-chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: reviewState.run_id, message: msg }),
@@ -2093,7 +2103,7 @@ async function approveAndRun() {
   // here turns "type phone, click Accept" into the one-click flow the
   // user expects.
   try {
-    await fetch("/api/contact/override", {
+    await apiFetch("/api/contact/override", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -2110,7 +2120,7 @@ async function approveAndRun() {
   // off to the Bills view — updates will stream in as the bg job progresses
   // (polled via /api/history).
   try {
-    const res = await fetch("/api/approve", {
+    const res = await apiFetch("/api/approve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: reviewState.run_id }),
@@ -2549,7 +2559,7 @@ function renderEarlyAccessHero(view) {
     btn.disabled = true;
     btn.textContent = wasJoined ? "Removing…" : "Adding…";
     try {
-      const res = await fetch("/api/early-access", {
+      const res = await apiFetch("/api/early-access", {
         method: wasJoined ? "DELETE" : "POST",
         credentials: "same-origin",
       });
@@ -3371,7 +3381,7 @@ async function runOfferHuntForCard(offer, card) {
       </div>
     </div>`;
   try {
-    const res = await fetch("/api/offer-hunt", {
+    const res = await apiFetch("/api/offer-hunt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ baseline: offer.baseline, stop_on_first_win: false }),
@@ -3478,7 +3488,7 @@ function openDeleteAccountModal() {
     confirm.disabled = true;
     confirm.textContent = "Deleting…";
     try {
-      const res = await fetch("/api/account/delete", {
+      const res = await apiFetch("/api/account/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirm: "DELETE" }),
@@ -3546,7 +3556,7 @@ async function renderProfile() {
 
   let sdata;
   try {
-    sdata = await fetch("/api/settings").then((r) => r.json());
+    sdata = await apiFetch("/api/settings").then((r) => r.json());
   } catch {
     sdata = { profile: {} };
   }
@@ -3712,7 +3722,7 @@ function mkProfileCard(p) {
     status.textContent = "Saving…";
     status.className = "tg-save-status";
     try {
-      const res = await fetch("/api/settings/profile", {
+      const res = await apiFetch("/api/settings/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -3748,7 +3758,7 @@ async function renderSettings() {
 
   let sdata;
   try {
-    sdata = await fetch("/api/settings").then((r) => r.json());
+    sdata = await apiFetch("/api/settings").then((r) => r.json());
   } catch {
     sdata = { tune: {}, integrations: [], fixtures: { count: 0 }, port: 3333 };
   }
@@ -3803,7 +3813,7 @@ async function renderSettings() {
     const original = btn.textContent;
     btn.textContent = "Exporting…";
     try {
-      const res = await fetch("/api/export");
+      const res = await apiFetch("/api/export");
       if (!res.ok) throw new Error(await res.text());
       const blob = await res.blob();
       const cd = res.headers.get("Content-Disposition") ?? "";
@@ -3848,7 +3858,7 @@ async function renderSettings() {
     status.textContent = "Saving…";
     status.className = "tg-save-status";
     try {
-      const res = await fetch("/api/settings/tune", {
+      const res = await apiFetch("/api/settings/tune", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(tune.getValues()),
@@ -3931,7 +3941,7 @@ async function disconnectIntegration(intg) {
   const body = {};
   for (const f of intg.fields ?? []) body[f.name] = "";
   try {
-    const res = await fetch("/api/settings/integrations", {
+    const res = await apiFetch("/api/settings/integrations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -4020,7 +4030,7 @@ function openIntegrationModal(intg) {
     statusEl.textContent = "Saving…";
     statusEl.className = "intg-modal-status";
     try {
-      const res = await fetch("/api/settings/integrations", {
+      const res = await apiFetch("/api/settings/integrations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -4283,7 +4293,7 @@ async function openBillDrawer(row) {
     let report = reportCache.get(name);
     if (!report) {
       try {
-        const res = await fetch(`/api/report/${name}`);
+        const res = await apiFetch(`/api/report/${name}`);
         if (res.ok) {
           report = await res.json();
           reportCache.set(name, report);
@@ -4450,7 +4460,7 @@ async function loadFeedback(row) {
     return;
   }
   try {
-    const res = await fetch(`/api/feedback/${runId}`);
+    const res = await apiFetch(`/api/feedback/${runId}`);
     if (!res.ok) return;
     const { feedback } = await res.json();
     for (const m of feedback ?? []) {
@@ -4502,7 +4512,7 @@ async function sendFeedback() {
   $("#drawer-feedback-log").appendChild(thinking);
 
   try {
-    const res = await fetch("/api/feedback", {
+    const res = await apiFetch("/api/feedback", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: runId, message: msg }),
@@ -4543,7 +4553,7 @@ async function deleteBill() {
     return;
   }
   try {
-    const res = await fetch("/api/delete", {
+    const res = await apiFetch("/api/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: runId }),
@@ -4609,7 +4619,7 @@ async function resumeAgent(opts) {
   const runId = row?.audit?.run_id;
   if (!runId) return;
   try {
-    const res = await fetch("/api/resume", {
+    const res = await apiFetch("/api/resume", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: runId }),
@@ -4645,7 +4655,7 @@ async function stopAgent() {
   // operation only affects this specific run_id, so other bills keep
   // negotiating uninterrupted.
   try {
-    const res = await fetch("/api/stop", {
+    const res = await apiFetch("/api/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: runId }),
@@ -4732,7 +4742,7 @@ async function openBillViewer(runId) {
     modal.setAttribute("aria-hidden", "false");
   });
   try {
-    const res = await fetch(`/api/bill/${encodeURIComponent(runId)}`);
+    const res = await apiFetch(`/api/bill/${encodeURIComponent(runId)}`);
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     billViewerState = { runId, files: data.files || [], index: 0 };
@@ -5052,7 +5062,7 @@ async function saveDrawerContact(row) {
     status.className = "contact-status";
   }
   try {
-    const res = await fetch(`/api/bill/${encodeURIComponent(runId)}/contact`, {
+    const res = await apiFetch(`/api/bill/${encodeURIComponent(runId)}/contact`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -5338,7 +5348,7 @@ async function submitOutcomeVerification(row, verified, notes, opts) {
   const runId = row?.audit?.run_id;
   if (!runId) return;
   try {
-    const res = await fetch("/api/bills/verify-outcome", {
+    const res = await apiFetch("/api/bills/verify-outcome", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
