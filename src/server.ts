@@ -18,7 +18,7 @@ import "./env.ts";
 import { validateRequiredEnv } from "./env.ts";
 
 validateRequiredEnv();
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, readdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
@@ -1424,7 +1424,7 @@ async function runOfferHuntsForRun(runId: string, baselines: Baseline[]): Promis
 
   for (const baseline of baselines) {
     try {
-      const result = await runOfferHunt({ baseline });
+      const result = await runOfferHunt({ baseline, run_id: runId });
       saveOfferHunt(result);
     } catch (err) {
       console.error(`[bg offer-hunt ${runId}] ${baseline.label}`, err);
@@ -2344,7 +2344,22 @@ async function handleOfferHunt(req: Request): Promise<Response> {
 }
 
 async function handleOfferHistory(): Promise<Response> {
-  return Response.json({ offers: projectOfferHistory(offersDir()) });
+  // Comparison follows Negotiation: only show offers tied to a bill that
+  // still exists on this user's account. When all bills are deleted, the
+  // Comparison view goes empty. Files written before run_id tagging are
+  // legacy and project as before (projectOfferHistory's contract).
+  const activeRunIds = new Set<string>();
+  const dir = pendingDir();
+  if (existsSync(dir)) {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const run = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { run_id?: string };
+        if (run?.run_id) activeRunIds.add(run.run_id);
+      } catch { /* skip malformed */ }
+    }
+  }
+  return Response.json({ offers: projectOfferHistory(offersDir(), { activeRunIds }) });
 }
 
 async function handleOfferRun(file: string): Promise<Response> {

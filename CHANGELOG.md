@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.27.0] - 2026-04-26
+
+### Changed
+- **Comparison view follows Negotiation.** Offer-hunt files are now tagged with their owning `run_id`. When a bill is deleted, `delete-bill` sweeps every offer file belonging to that run (matching by filename fragment first, falling back to a JSON read for legacy files). At projection time, `projectOfferHistory` accepts an `activeRunIds` set and drops offers whose run no longer exists — so any orphan files missed by cleanup also disappear from the UI. When all bills are deleted, Comparison goes empty.
+- **Offer-hunt agent re-grounded on the goal.** System prompt now opens with "Find cheaper alternative providers of the same service the user is already buying" and explicitly enumerates what counts (other ISPs, other pharmacies, other insurers, etc.) versus what doesn't (bill-management, bill-negotiation, subscription-tracking apps — Bonsai itself). Block-list in the prompt expanded to BillTrim, BillCutterz, Hiatus, Buddy, Subby, Bobby, MoneyLion, Chime Bill Pay, Quicken Bills on top of the original eight.
+- **`COMPETITOR_BLOCKLIST` server-side check expanded** to the same set so the rejection at `coerceRecordOffer` time matches what the prompt asks for. `projectOfferHistory`'s competitor filter inherits this automatically — older offer files surfacing one of the new entries get hidden too.
+
 ## [0.1.26.0] - 2026-04-26
 
 ### Added
