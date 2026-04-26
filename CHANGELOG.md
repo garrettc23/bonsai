@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.21.1] - 2026-04-26
+
+### Fixed
+- **Contact-card poll no longer overwrites a typed billing-dept email (continued).** v0.1.12.0 patched the wipe-to-empty in `applyContactStatus`'s lookup-failed branch but missed the parallel hazard in the success branch — `if (document.activeElement !== emailEl) emailEl.value = c.email ?? ""` ran on every poll tick (every 2.5s) and clobbered the user's input the moment focus moved to the Accept button. So a user who pasted `edward@firebaystudios.com`, watched the "Manually entered by the user." note appear, and then clicked "Accept & lower my bill" could still hit the missing_contact warning if a poll fired in the focus-shift window. Same `!emailEl.value` guard now applies to both branches: empty fields populate from the polled contact, non-empty fields are left alone. Phone field gets the same treatment.
+- **`approveAndRun`'s pre-flight contact save now surfaces HTTP errors instead of swallowing them.** The save was wrapped in a try/catch that only handled network errors — a 4xx/5xx response from `/api/contact/override` would resolve normally, the code would proceed to `/api/approve` with stale `run.contact`, and the user would see the missing_contact warning even though the autosave "didn't fail" from the client's perspective. Now we check `saveRes.ok`, surface the server's error message in `#contact-save-status`, highlight the contact card, and abort before approve fires.
+
 ## [0.1.21.0] - 2026-04-26
 
 ### Removed
