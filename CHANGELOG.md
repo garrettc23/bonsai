@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.21.0] - 2026-04-26
+
+### Removed
+- **"Connected accounts" section in Settings is gone entirely.** v0.1.20.0 emptied the integrations array on `/api/settings`, but `mkIntegrationsCard` still rendered the section header + a "No integrations configured / Nothing to connect yet" empty-state row. Now `renderSettings` doesn't append the integrations card at all — the Settings page is just **Tune** and **Account**. Every integration (Anthropic, Resend, ElevenLabs) is operator-owned via Railway env vars; users have nothing to configure here, so showing them an empty section was confusing dead chrome.
+
+The `mkIntegrationsCard` function, the `intg-modal` HTML, the CSS classes, and the `/api/settings/integrations` write surface all stay on disk untouched — cheap insurance in case we ever want a per-user "Connect ..." UI back. They're just not surfaced.
+
 ## [0.1.20.0] - 2026-04-26
 
 ### Removed
