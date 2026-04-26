@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.11.0] - 2026-04-25
+
+### Changed
+- **"Opportunities to lower this bill" now ships only high-confidence angles.** Every opportunity must declare a `probability` (0.0–1.0) of actually reducing the charge, and anything below 0.5 is dropped before the user ever sees it. The OPPS_TOOL schema (`src/server.ts`) now requires `opp_id` + `probability` on every item, the system prompt explicitly instructs the model to skip speculative tactics ("better three high-confidence opportunities than seven mixed ones"), and a shared `filterByProbability` helper in `src/opps-filter.ts` gates all three response paths — the live Opus call, the cached complaint-flow opportunities, and the fixture fast-path. The client (`public/assets/app.js`) re-applies the same filter as belt-and-braces. The complaint-intake `COMPLAINT_TOOL` schema picked up the same fields so its drafted opportunities flow through the same gate. The shipped `fixtures/bill-001.opportunities.json` was regenerated with explicit `opp_id` slugs and probabilities (0.55–0.92).
+- **Headline savings now recalculates when the user dismisses a card.** Each opportunity card grew a `×` dismiss button; the "predicted to save" total is now derived from the visible (non-dismissed) opportunities instead of being baked once at render. Dismissals persist in `localStorage` keyed by `run_id` (`bonsai.opps.dismissed.${runId}`) so a hard refresh keeps the user's choices. A small "Show N dismissed" footer link clears the set and brings everything back, which means un-dismiss restores the dollar amount automatically — the total is always `clampSaved(sum-of-visible, maxSavingsCap(report))`. The synthetic fallback (`buildOpportunities`) tags items with stable `opp_id`s so dismissal works identically when the API fails.
+- **Synthetic fallback levers are now gated on bill context.** The synth path used to unconditionally append "Hunt for T&C loopholes" and "Leverage a competitor offer" to every bill — including dental and medical, where neither makes sense. Item 4 now only appears if the analyzer surfaced policy/T&C language in any error finding OR the `bill_kind` is one of `telecom | utility | subscription | insurance | financial`. Item 5 only appears for `telecom | utility | subscription | insurance` (multi-provider markets where a switch threat is plausible). When in doubt, skip — better silence than a dead-end suggestion.
+- **`OPPS_TOOL` is now exported from `src/opps-filter.ts`** so tests can import the schema without booting the live `Bun.serve()` listener in `src/server.ts`.
+
+### Tests
+- New `test/opportunities-filter.test.ts` covers schema shape (required fields, probability range), `filterByProbability` behavior across edge inputs (NaN, null, missing, boundary values), and that the shipped fixture passes the gate. Nine new tests, total suite 223/223.
+
 ## [0.1.10.1] - 2026-04-25
 
 ### Fixed
