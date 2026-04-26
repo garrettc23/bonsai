@@ -1,28 +1,36 @@
 {
   "opportunities": [
     {
+      "opp_id": "dispute-duplicate-cpt-71046",
       "title": "Dispute the duplicate CPT 71046 charge",
       "description": "The bill lists CPT 71046 (Chest X-ray) twice on 03/14/2026, but the EOB explicitly flags the second instance as a duplicate. The provider must reverse this $468 line.",
       "dollar_estimate": 468,
-      "icon": "shield"
+      "icon": "shield",
+      "probability": 0.92
     },
     {
+      "opp_id": "reverse-balance-billing",
       "title": "Reverse the balance-billing overage",
       "description": "EOB caps your responsibility at $2,759.50. The bill's $6,371.50 balance bills you $3,612 above that — prohibited under the No Surprises Act for an in-network provider. Demand the bill be corrected to the EOB amount.",
       "dollar_estimate": 3612,
-      "icon": "scan"
+      "icon": "scan",
+      "probability": 0.88
     },
     {
+      "opp_id": "negotiate-prompt-pay",
       "title": "Negotiate remaining balance for prompt-pay",
       "description": "After the disputed $3,612 is removed, the legitimate $2,759.50 balance is often eligible for a 10-20% prompt-pay discount if you offer to settle in full within 30 days.",
       "dollar_estimate": 412,
-      "icon": "pulse"
+      "icon": "pulse",
+      "probability": 0.65
     },
     {
+      "opp_id": "apply-charity-care",
       "title": "Apply for charity-care / financial hardship",
       "description": "Most non-profit hospitals have a financial assistance program (FAP) that further reduces the patient's out-of-pocket. Ask St. Synthetic Regional for their FAP application — it can stack with the corrections above.",
       "dollar_estimate": 200,
-      "icon": "hospital"
+      "icon": "hospital",
+      "probability": 0.55
     }
   ]
 }
