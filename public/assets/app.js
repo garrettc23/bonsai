@@ -1821,9 +1821,15 @@ function applyContactStatus(data) {
   titleEl.textContent = data.provider_name
     ? `${data.provider_name} — ${role}`
     : `${role.charAt(0).toUpperCase()}${role.slice(1)} contact`;
-  // Don't blow away the user's typing if they're already editing.
-  if (document.activeElement !== emailEl) emailEl.value = c.email ?? "";
-  if (document.activeElement !== phoneEl) phoneEl.value = c.phone ?? "";
+  // Populate empty fields from the polled / saved contact, but never
+  // overwrite a value the user has already typed. Focus alone isn't
+  // enough — the poll runs every 2.5s and can land between a keystroke
+  // and the user clicking the Accept button (focus has already moved
+  // away by then), wiping their input. The autosave debounce is 700ms,
+  // so for ~2s after typing the polled `c.email` may still be the AI's
+  // null/stale value while the field correctly holds the user's input.
+  if (document.activeElement !== emailEl && !emailEl.value) emailEl.value = c.email ?? "";
+  if (document.activeElement !== phoneEl && !phoneEl.value) phoneEl.value = c.phone ?? "";
   notesEl.textContent = c.notes ?? "";
   srcEl.innerHTML = "";
   for (const url of (c.source_urls ?? []).slice(0, 4)) {
@@ -2293,9 +2299,14 @@ async function approveAndRun() {
   // would land on the server's missing_contact gate — the server reads
   // the persisted `run.contact`, not the live DOM input. Auto-saving
   // here turns "type phone, click Accept" into the one-click flow the
-  // user expects.
+  // user expects. If the save HTTP-fails (4xx/5xx), surface the error
+  // and bail — proceeding to /api/approve with stale `run.contact` is
+  // exactly what shows up to the user as "I entered an email but the
+  // warning fired anyway." Network errors fall through (legacy
+  // tolerance) — the existing autosave debounce may have already saved
+  // a previous value the server can use.
   try {
-    await apiFetch("/api/contact/override", {
+    const saveRes = await apiFetch("/api/contact/override", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
@@ -2305,6 +2316,20 @@ async function approveAndRun() {
         phone: livePhone,
       }),
     });
+    if (!saveRes.ok) {
+      const j = await saveRes.json().catch(() => ({}));
+      const card = document.getElementById("contact-card");
+      const status = $("#contact-save-status");
+      if (status) {
+        status.textContent = `Couldn't save: ${j?.error ?? "try again"}`;
+        status.className = "contact-save-status err";
+      }
+      if (card) {
+        card.classList.add("needs-input");
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return;
+    }
   } catch (err) {
     console.warn("[approve] contact auto-save failed", err);
   }
