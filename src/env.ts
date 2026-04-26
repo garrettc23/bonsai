@@ -35,3 +35,29 @@ if (existsSync(ENV_PATH)) {
     }
   }
 }
+
+/**
+ * Fail fast on entry-point boot if a required env var is missing.
+ *
+ * Called explicitly from each entry point (server.ts, run-bonsai.ts,
+ * scripts/day*.ts) — NOT from this file's import side-effect, so tests
+ * that import modules transitively don't need keys set.
+ */
+export function validateRequiredEnv(): void {
+  const missing: string[] = [];
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+    missing.push(
+      "ANTHROPIC_API_KEY — sign up at https://console.anthropic.com and add the key to .env (Opus 4.7 requires a paid plan)",
+    );
+  }
+  if (!process.env.BONSAI_PUBLIC_DOMAIN?.trim()) {
+    missing.push(
+      "BONSAI_PUBLIC_DOMAIN — set to your deployed domain, e.g. bonsai.example.com",
+    );
+  }
+  if (missing.length === 0) return;
+  console.error("\nBonsai cannot start — missing required environment variables:\n");
+  for (const m of missing) console.error("  - " + m);
+  console.error("\nCopy .env.example to .env and fill in the required keys, then try again.\n");
+  process.exit(1);
+}

@@ -9,10 +9,13 @@
  * Persona (optional): the simulated billing-dept persona for the chosen channel.
  */
 import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runBonsai, type Channel } from "../src/orchestrator.ts";
+
+validateRequiredEnv();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");

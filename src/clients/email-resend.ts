@@ -22,11 +22,11 @@ import { stripMarkdown } from "../lib/strip-markdown.ts";
 
 /**
  * Build a display-name + address From line. The verified operator address
- * (`appeals@bonsai.firebaystudios.com`) is the wire sender; the user's
- * email is woven into the display name so the rep sees who Bonsai is
- * acting for. Examples:
- *   verified = "Bonsai <appeals@x.com>", user = "garrett@gmail.com"
- *     → "Bonsai (for garrett@gmail.com) <appeals@x.com>"
+ * (`appeals@your-domain.com`) is the wire sender; the user's email is
+ * woven into the display name so the rep sees who Bonsai is acting for.
+ * Examples:
+ *   verified = "Bonsai <appeals@x.com>", user = "alex@example.com"
+ *     → "Bonsai (for alex@example.com) <appeals@x.com>"
  *   verified = "appeals@x.com", user undefined
  *     → "appeals@x.com"
  * Falls back to the verified address alone when the user email isn't
@@ -69,7 +69,7 @@ export class ResendEmailClient implements EmailClient {
     // sender. `msg.from` (the user's account email) gets ignored for the
     // wire — we keep it on SentEmail purely for display, and surface the
     // user's identity in the From's display name so the rep sees
-    // "Garrett Cahill (via Bonsai) <appeals@bonsai.firebaystudios.com>".
+    // "Bonsai Operator (via Bonsai) <appeals@your-domain.com>".
     const wireFrom = withDisplayName(this.fromEmail, msg.from);
     // Defensive: even though the negotiator + humanizer prompts forbid
     // markdown, run the body through stripMarkdown() before it hits the
@@ -134,6 +134,8 @@ export class ResendEmailClient implements EmailClient {
   }
 }
 
+let warnedMockMode = false;
+
 /** Factory: returns ResendEmailClient if env is set, else MockEmailClient.
  * `threadsDir` overrides the per-user default — used by the webhook
  * handler, which is unauthenticated and resolves the dir from the on-disk
@@ -142,6 +144,13 @@ export async function autoEmailClient(threadsDir?: string): Promise<EmailClient>
   const fromEmail = process.env.RESEND_FROM ?? process.env.RESEND_FROM_EMAIL;
   if (process.env.RESEND_API_KEY && fromEmail) {
     return new ResendEmailClient({ threadsDir, fromEmail });
+  }
+  if (!warnedMockMode) {
+    console.warn(
+      "[email] RESEND_API_KEY or RESEND_FROM unset — using MockEmailClient (no real outbound). " +
+        "Set both in .env to enable real email delivery.",
+    );
+    warnedMockMode = true;
   }
   const { MockEmailClient } = await import("./email-mock.ts");
   return new MockEmailClient(threadsDir);

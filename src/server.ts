@@ -15,6 +15,9 @@
  * request at a time. For a hackathon demo / local dogfood.
  */
 import "./env.ts";
+import { validateRequiredEnv } from "./env.ts";
+
+validateRequiredEnv();
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";

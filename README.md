@@ -1,235 +1,207 @@
 # Bonsai 🌿
 
-**Medical bill audit + negotiation, end-to-end.** Upload an itemized hospital
-bill and the matching EOB, and Bonsai finds errors, drafts a grounded appeal
-letter, and negotiates a correction — by email or by phone.
+**Agents to manage personal bills.**
 
-Hackathon build for Devpost — deadline Tue 2026-04-28 12:00 PT.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Bun ≥ 1.1](https://img.shields.io/badge/Bun-%E2%89%A5%201.1-black)](https://bun.sh)
 
-```
-Bill PDF + EOB PDF
-       │
-       ▼
-  ┌─────────────┐
-  │  Analyzer   │  Claude Opus 4.7, tool-use loop, grounding contract
-  │  (src/      │  → every finding quotes a verbatim bill line
-  │   analyzer) │  → overlap-aware totals (balance_billing is an envelope)
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐
-  │   Appeal    │  Deterministic markdown. No 2nd LLM → no drift.
-  │   Letter    │  NSA + FCRA clauses added when grounded.
-  │   (src/     │  Null metadata fields render as [BRACKETED PLACEHOLDERS].
-  │   appeal-   │
-  │   letter)   │
-  └──────┬──────┘
-         │
-         ▼
-  ┌─────────────┐   auto: balance-billing ≥ $1,500 → voice, else email
-  │  Strategy   │
-  └──────┬──────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌──────────┐
-│ Email  │ │  Voice   │  ElevenLabs Conversational AI config + server_tools
-│ thread │ │   call   │  Simulator: dual-Claude (agent + role-playing rep)
-│ loop   │ │  loop    │  Real tool dispatch → floor enforcement
-└────────┘ └──────────┘
-         │
-         ▼
-   BonsaiReport  — findings, letter, transcript/thread, summary $ saved
-```
+People leak money constantly across insurance, rent, lines of credit, taxes, medical bills, utilities, and dozens of other recurring costs. In most cases nobody is actively managing these expenses because the savings on any single line item don't justify the time. But in aggregate, the waste is real. The tools that exist today require a human to initiate each comparison or negotiation, which means it mostly doesn't happen — bills go unexamined and contracts auto-renew at whatever rate the vendor set.
+
+Bonsai is a self-hostable set of agents that runs in the background and continuously looks for savings across every category of spend. Not a dashboard that tells you where you're overpaying — agents that actually renegotiate the electric bill, find a cheaper insurance policy, or flag when a credit line's terms are no longer competitive. The wedge is a general-purpose cost optimization agent for people that quietly saves them money while they sleep.
+
+## Why this exists
+
+- **Agents that act, not dashboards that report.** Bonsai writes the appeal, drafts the email, dials the rep. You approve every move; the agents do the work.
+- **Grounding contract.** Every dispute quotes the source verbatim. Every dollar amount traces back to a line on the bill or a clause in the EOB. Hallucinations don't ship.
+- **You own your data.** Bring your own keys, deploy your own instance. Bonsai never phones home and there is no operator-paid default that could route your traffic through someone else's account.
 
 ## Quickstart
 
 ```bash
+git clone https://github.com/<your-fork>/bonsai.git
+cd bonsai
 bun install
-cp .env.example .env        # set ANTHROPIC_API_KEY
-bun run make-pdfs           # fixtures/*.md → fixtures/*.pdf
-bun run test                # 33 tests, <100ms
-bun run bonsai              # end-to-end CLI on bill-001, auto channel
-bun run serve               # web UI at http://localhost:3333
+cp .env.example .env       # fill in ANTHROPIC_API_KEY + BONSAI_PUBLIC_DOMAIN
+bun run make-pdfs          # synthetic fixture PDFs
+bun run serve              # http://localhost:3333
 ```
 
-## Deploy to Railway
+Bonsai refuses to start until the required env vars are set — see `src/env.ts:validateRequiredEnv`.
 
-Bonsai ships with a `Dockerfile` and `railway.json` that get you to a live
-HTTPS URL in a few minutes. From a fresh `git clone` to first real audit
-should take under 30 minutes.
+## The five agents
 
-### 1. Railway init
+```
+Bill / contract / statement
+       │
+       ▼
+  ┌───────────┐
+  │  Analyzer │   Reads any bill, finds errors and overcharges,
+  │           │   quotes the offending lines verbatim.
+  └─────┬─────┘
+        │
+        ▼
+  ┌───────────┐
+  │   Appeal  │   Drafts a grounded letter that cites the source.
+  │           │   No second LLM, no drift. NSA + FCRA clauses where applicable.
+  └─────┬─────┘
+        │
+        ▼
+  ┌───────────┐
+  │  Contact  │   Resolves the right department + channel for the merchant.
+  │ Resolver  │   Web search via Anthropic managed agents.
+  └─────┬─────┘
+        │
+        ▼
+  ┌───────────┐   email when the dispute lives in writing,
+  │Negotiation│   voice when a rep needs to clear a write-off live.
+  │ (email +  │   Holds to a `final_acceptable_floor`. Escalates after
+  │   voice)  │   N flat denials.
+  └─────┬─────┘
+        │
+        ▼
+  ┌───────────┐   When negotiation isn't the right path: surveys cheaper
+  │Comparison │   alternatives (insurance, telecom, utilities, credit) and
+  │           │   gates them on switch-probability before showing them.
+  └─────┬─────┘
+        │
+        ▼
+   BonsaiReport — findings, letter, transcript/thread, summary $ saved
+```
+
+**Analyzer.** Claude Opus 4.7 with a tool-use loop. Reads the bill PDF (text-extracted) plus any supporting docs (EOB, contract, statement) and emits structured `BillingError` rows. Every row carries a verbatim `line_quote`, a 1-indexed `page_number`, a confidence tier, and the supporting evidence. Findings that fail the grounding check are rejected and the model retries.
+
+**Appeal.** A deterministic markdown generator. Reads the analyzer's findings and produces a letter the user can send. No LLM in this step — placeholders are bracketed, NSA / FCRA clauses are added when grounded, and missing metadata renders as `[BRACKETED PLACEHOLDERS]` instead of being silently invented.
+
+**Contact resolver.** Locates the right billing-department email + phone for the merchant on the bill. Backed by web search via Anthropic managed agents. Returns a confidence tier so the orchestrator can fall back to user-supplied contact info when the resolver is uncertain.
+
+**Negotiation.** A two-channel loop:
+- **Email** (`src/negotiate-email.ts`) — Claude drafts replies using only facts from grounded findings, has 3 tools (`send_email`, `mark_resolved`, `escalate_human`), and holds to a configurable floor. State persists in `out/threads/{thread_id}.state.json`.
+- **Voice** (`src/voice/`) — generates an ElevenLabs Conversational AI agent config with 5 server tools. Real outbound calls go through ElevenLabs + Twilio when the env is wired; otherwise a dual-Claude simulator role-plays both sides so day-to-day dev never burns minutes.
+
+**Comparison.** When the cheaper move is to switch providers (insurance, telecom, utilities, credit), the comparison agent surveys alternatives via Anthropic managed agents and gates them on switch-probability before surfacing. The probability floor is configurable per category.
+
+## Channel strategy
+
+```
+balance_billing finding + HIGH ≥ $1,500  → voice
+anything else                            → email
+explicit email/voice                     → honored verbatim
+```
+
+Voice gets used when a rep needs to clear a write-off live. Below that threshold, email is cheaper, leaves a paper trail, and is harder for the merchant to wave away.
+
+## Grounding contract
+
+Every finding the analyzer reports must:
+
+1. Quote a verbatim row from the bill (`line_quote`). If the quote doesn't appear in the source ground-truth, the tool call is **rejected** with `is_error: true` and Claude retries. See `src/lib/ground-truth.ts`.
+2. Name a 1-indexed `page_number`.
+3. Commit to a `confidence` tier. Only the canonical HIGH set ships to merchants; everything else is `worth_reviewing` and never leaves the dashboard.
+4. Justify itself with `evidence` from the matching reference doc (EOB for medical, contract for telecom/utilities, etc.).
+
+The grounding contract is the difference between "LLM reads a bill" and "agent a person can hand to their insurer / utility / telecom." Hallucinated line quotes don't make it into outbound mail.
+
+## Overlap-aware totals
+
+The #1 arithmetic mistake when scoring a bill is summing a `balance_billing` finding with the line items it already subsumes (e.g. balance-billing of $3,812 is caused by 5 denied lines totaling $3,590; summing = $7,402 is wrong, the real defensible total is $3,812).
+
+```
+defensibleTotal =
+  no balance_billing  → sum(HIGH)
+  has balance_billing → max( max(balance_billing), sum(HIGH ∖ balance_billing) )
+```
+
+`src/analyzer.ts:computeDefensibleTotal` implements this and is unit-tested. The analyzer also auto-repairs Claude's reported summary if it violates the rule (look for `auto-corrected` in the headline).
+
+## What works
+
+| Layer | Status |
+|---|---|
+| Analyzer | Live. Grounded, two-tier confidence, overlap-aware totals. |
+| Appeal letter | Live. Deterministic, placeholder-aware, NSA + FCRA clauses where applicable. |
+| Contact resolver | Live. Web search via Anthropic managed agents. |
+| Email negotiation | Live (Resend). Real outbound + svix-verified inbound webhook. Mock fallback for local dev. |
+| Voice negotiation | Live (ElevenLabs + Twilio). Simulator runs when any voice env var is unset. |
+| Comparison | Live. Probability-gated. Anthropic managed agents survey alternatives. |
+| Web UI | Live. Upload, audit, dashboard with receipts, agent-reasoning timeline. |
+
+## Self-host on Railway
+
+Bonsai ships with a `Dockerfile` and `railway.json` that get you to a live HTTPS URL in a few minutes. From a fresh clone to the first real audit should take under 30 minutes.
+
+### 1. Initialize
 
 ```bash
 brew install railway          # or: npm i -g @railway/cli
 railway login
-railway init                  # follow prompts; creates a new project
+railway init                  # creates a new project
 railway up                    # uploads + builds via the Dockerfile
 ```
 
-**What good looks like:** `railway up` exits 0. `railway status` shows
-the service flipping Building → Active. `railway domain` (or the
-dashboard) returns a `*.up.railway.app` URL. The URL will 502 until
-step 2's env vars are set — that's expected.
+The URL will 502 until step 2's env vars are set.
 
-### 2. Set 4 required env vars
+### 2. Set required env vars
 
-Via `railway variables --set 'KEY=value'` or the dashboard (Settings →
-Variables):
+| Var | Value |
+|---|---|
+| `ANTHROPIC_API_KEY` | `sk-ant-...` from console.anthropic.com (Opus 4.7 requires a paid plan) |
+| `BONSAI_PUBLIC_DOMAIN` | your deployed domain, e.g. `bonsai.example.com` |
+| `NODE_ENV` | `production` (flips cookie `Secure` flag + webhook fail-closed) |
+| `BONSAI_DATA_DIR` | `/app/data` (matches the volume mount in step 4) |
 
-| Var | Value | Why |
+### 3. Set the optional env vars you need
+
+Add only what you'll use. Each integration degrades gracefully when its keys are missing — no operator-paid fallback ever runs.
+
+| Var(s) | Enables | Without it |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `sk-ant-...` | Operator-paid; every audit on Opus 4.7 runs ~$0.25-1.00 |
-| `NODE_ENV` | `production` | Flips cookie `Secure` flag; makes webhook fail-closed if signing secret missing |
-| `BONSAI_DATA_DIR` | `/app/data` | Matches the volume mount path in step 4 |
-| `RESEND_FROM` | `appeals@your-domain.com` | Must be a verified domain in Resend |
-
-**What good looks like:** `railway variables` lists all four. After the
-next `railway up`, `https://<your-domain>/healthz` returns `200 ok`.
-
-### 3. Set 4 optional env vars
-
-Add only what the operator needs. Any subset is fine for the first
-audit; the app degrades gracefully when these are missing.
-
-| Var | When to set it | Without it |
-|---|---|---|
-| `RESEND_API_KEY` | Any real outbound email | Email negotiation runs in mock mode (writes to `out/`, never sends) |
-| `RESEND_WEBHOOK_SECRET` | Inbound replies from providers | In `NODE_ENV=production` the inbound webhook returns 500 by design (fail-closed) |
-| `ELEVENLABS_API_KEY` + `ELEVENLABS_AGENT_ID` + `ELEVENLABS_WEBHOOK_BASE` + `ELEVENLABS_TWILIO_PHONE_NUMBER_ID` | Real outbound voice calls | Voice runs in simulator mode (dual-Claude, transcript labeled accordingly in `out/users/<id>/calls/`) |
-| `SENTRY_DSN` | Post-beta — not yet wired into the codebase | No-op today; reserved for future error tracking |
-
-For a full email round-trip, both `RESEND_API_KEY` and
-`RESEND_WEBHOOK_SECRET` must be set, and the inbound webhook must be
-configured in the Resend dashboard pointing at
-`https://<your-domain>/webhooks/resend-inbound`.
-
-**What good looks like:** the variables you chose are listed by
-`railway variables`. The app boots without warnings about missing
-required-for-mode vars.
+| `RESEND_API_KEY` + `RESEND_FROM` | Real outbound email | Email loop runs in mock mode (writes to `out/`, never sends) |
+| `RESEND_WEBHOOK_SECRET` | Inbound replies from merchants | In `NODE_ENV=production` the inbound webhook returns 500 (fail-closed) |
+| All four `ELEVENLABS_*` vars | Real outbound voice calls | Voice runs in dual-Claude simulator |
+| `SENTRY_DSN` | (reserved) | No-op today |
 
 ### 4. Mount the `/app/data` volume
 
-Dashboard → Settings → Volumes → **New Volume**:
+Dashboard → Settings → Volumes → New Volume:
 - Mount path: `/app/data`
-- Size: 1 GB (raise later if you grow)
+- Size: 1 GB
 
-Then redeploy so the volume + env vars are picked up together:
-
-```bash
-railway up
-```
-
-**What good looks like:** signing up + uploading a bill, then running
-`railway up` again, preserves the user and the bill. SQLite at
-`/app/data/bonsai.db` and per-user directories at
-`/app/data/users/<id>/` (uploads, threads, calls, reports) survive
-across deploys.
+Then `railway up` once more so the volume + env vars are picked up together. Signups, bills, threads, and call transcripts now survive deploys.
 
 ### 5. Verify Resend inbound
 
-Walk through the four-step **Resend post-deploy verification** runbook
-below before relying on the email loop. It signs a real svix payload,
-hits the deploy's read-only echo route, and confirms the inbound
-webhook routes a real reply end-to-end.
-
-**What good looks like:** all four steps in that section pass.
-
-### 6. Verify outbound voice — `bun run voice-smoke`
-
-Gated on the ElevenLabs vars from step 3. Dials the operator's own cell
-as a 30-second smoke test, verifies tool callbacks fire, and writes a
-transcript.
+After pointing Resend's inbound webhook at `https://<your-domain>/webhooks/resend-inbound`:
 
 ```bash
-VOICE_SMOKE_TO=+15555550123 bun run voice-smoke
+bash scripts/resend-inbound-smoke.sh \
+  --url https://<your-domain> \
+  --secret "$RESEND_WEBHOOK_SECRET" \
+  --debug-token "$BONSAI_WEBHOOK_DEBUG_TOKEN" \
+  --echo
+# expect: signature_valid:true, exit 0
 ```
 
-**What good looks like:** the phone rings, the agent reads the opening
-line, hangup writes a transcript to `out/users/<id>/calls/`. (This
-script ships with PR-2 — real ElevenLabs + Twilio wiring. Until then,
-voice runs in simulator mode for every audit and step 6 is a no-op:
-the simulator writes a labeled transcript without dialing.)
+If `signature_valid:false`, the secret on Railway doesn't match the one in Resend's dashboard, or your laptop's clock is more than 5 minutes off (svix replay window).
 
-### 7. Submit a real bill via the web UI
+### 6. Verify outbound voice
 
-Open the Railway domain in a browser, sign up, drop a real (non-fixture)
-bill PDF + EOB PDF, click **Audit**.
+Gated on the four `ELEVENLABS_*` env vars. Dials a number you own as a 30-second smoke test:
 
-**What good looks like:** the audit completes in 30-90s. Findings list
-verbatim `line_quote` rows from the uploaded bill. The defensible total
-renders in the dashboard hero. The bill drawer shows the
-agent-reasoning timeline. Image-only / scanned PDFs return a
-`SCANNED_PDF` error with a "paste rows or upload a text PDF" prompt —
-no silent OCR.
+```bash
+BONSAI_VOICE_SMOKE_TO=+15555550123 \
+BONSAI_VOICE_SMOKE_USER_EMAIL=you@example.com \
+bun run scripts/voice-smoke.ts
+```
 
----
-
-**Health check.** Railway hits `/healthz` automatically (wired in
-`railway.json`). Once it passes, the public URL is live.
-
-### Resend post-deploy verification
-
-After deploying to Railway and pointing Resend's inbound webhook at
-your domain, run this 4-step check before relying on the email loop.
-
-1. Set `BONSAI_WEBHOOK_DEBUG_TOKEN` on Railway to any random secret.
-   This unlocks the read-only echo route used in step 2
-   (`POST /webhooks/resend-inbound/echo`). With the env var unset,
-   the route is a hard 404 — no debug surface in production by default.
-
-2. From your laptop, smoke-test the deployed signature verifier
-   (read-only, no thread state mutation):
-
-   ```bash
-   bash scripts/resend-inbound-smoke.sh \
-     --url https://<your-domain> \
-     --secret "$RESEND_WEBHOOK_SECRET" \
-     --debug-token "$BONSAI_WEBHOOK_DEBUG_TOKEN" \
-     --echo
-   # expect: signature_valid:true, exit 0
-   ```
-
-   If `signature_valid:false`, your `RESEND_WEBHOOK_SECRET` on Railway
-   doesn't match the one configured in Resend's dashboard, or your
-   laptop's clock is more than 5 minutes off (svix replay window).
-
-3. Trigger a real email negotiation from the dashboard (any bill with a
-   finding). Confirm the outbound email shows up in the patient's
-   profile-email inbox (BCC'd) and lands in the rep's inbox.
-
-4. Reply to that email from any inbox addressed to
-   `appeals@<your-domain>`. Within 5 seconds:
-   - the bill drawer's email transcript shows the new reply,
-   - the patient's inbox shows the same thread (Bonsai forwards inbound
-     replies to the user's profile email), and
-   - the Railway logs show `[webhook]` entries for the inbound + a
-     follow-up `stepNegotiation`.
-
-If step 4 fails but step 2 passed, the inbound webhook URL is wrong in
-Resend's dashboard or the inbound mailbox isn't routing to it.
-
-**Cost shape.** Railway Hobby is $5/month and includes the volume.
-Anthropic API usage is operator-paid (every audit on Opus 4.7 runs
-~$0.25-1.00 in tokens). Each user supplies their own Resend +
-ElevenLabs keys via Settings → Integrations, so those costs don't
-land on the operator.
+The phone rings, the agent reads the opening line, hangup writes a transcript to `out/users/<id>/calls/`.
 
 ## Backups
 
-Railway's volume isn't snapshotted by default — one disk fault loses every
-user's SQLite, threads, transcripts, and uploaded bills. The server can
-push a nightly tarball of `BONSAI_DATA_DIR` to any S3-compatible object
-store. Backups are **opt-in**: with the four env vars below unset, the
-server boots and logs `[backup] disabled` — nothing else happens.
+Railway's volume isn't snapshotted by default — one disk fault loses every user's SQLite, threads, transcripts, and uploaded bills. The server can push a nightly tarball of `BONSAI_DATA_DIR` to any S3-compatible object store. Backups are **opt-in**: with the four env vars below unset, the server boots and logs `[backup] disabled` — nothing else happens.
 
-Recommended: [Backblaze B2](https://www.backblaze.com/cloud-storage)
-(S3-compatible, ~6× cheaper than S3 for storage, cheap egress). Cloudflare
-R2, AWS S3, and self-hosted MinIO all work too — same env vars.
+Recommended: [Backblaze B2](https://www.backblaze.com/cloud-storage) (S3-compatible, ~6× cheaper than S3 for storage, cheap egress). Cloudflare R2, AWS S3, and self-hosted MinIO all work too — same env vars.
 
 ```bash
-# Set in Railway → Variables (or your .env locally):
 BACKUP_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com
 BACKUP_S3_BUCKET=bonsai-backups
 BACKUP_S3_ACCESS_KEY_ID=...
@@ -238,230 +210,82 @@ BACKUP_S3_SECRET_ACCESS_KEY=...
 
 What happens after the next deploy:
 
-- On boot, if no successful backup is recorded — or the last one is more
-  than 25 hours old — the server fires a catch-up run immediately.
-- Every 24 hours after that, the same job tars `BONSAI_DATA_DIR`,
-  streams it to `bonsai-backups/YYYY-MM-DD.tar.gz` in your bucket, and
-  prunes anything older than 30 days.
-- Backup failures are non-fatal — they log `[backup] FAILED` and the
-  next nightly run retries.
+- On boot, if no successful backup is recorded — or the last one is more than 25 hours old — the server fires a catch-up run immediately.
+- Every 24 hours, the same job tars `BONSAI_DATA_DIR`, streams it to `bonsai-backups/YYYY-MM-DD.tar.gz`, and prunes anything older than 30 days.
+- Backup failures are non-fatal — they log `[backup] FAILED` and the next run retries.
 
 To verify a backup is recoverable:
 
 ```bash
 bun run scripts/restore-backup.ts latest
-# Validates the tar's contents and prints the exact `tar -xzf` command
-# to run for an actual restore. Never auto-extracts (restore is
-# destructive).
+# Validates the tar contents and prints the exact tar -xzf command to run.
+# Never auto-extracts (restore is destructive).
 ```
 
-Cost note: at typical beta scale (tens of MB per user × ~100 users × 30
-days retention) this runs single-digit dollars per month on B2.
+Cost note: at typical beta scale (tens of MB per user × hundreds of users × 30-day retention) this runs single-digit dollars per month on B2.
 
-## What works
+## Configuration
 
-| Layer | Command | Status |
+Every env var, in one place. See `.env.example` for the canonical reference.
+
+| Var | Required? | What it does |
 |---|---|---|
-| Analyzer | `bun run day2 bill-001 eob-001` | Grounded, 2-tier confidence, overlap-aware totals |
-| Appeal letter | `bun run day3 bill-001 eob-001` | Deterministic, placeholder-aware, NSA + FCRA |
-| Email negotiation | `bun run day4 bill-001 stall_then_concede` | Full loop, Resend-or-Mock outbound, **live Resend inbound webhook** + replay fallback, BCC the patient, 4 rep personas |
-| Voice negotiation | `bun run day5 bill-001 stall_then_concede` | ElevenLabs config ready, simulator validates tools |
-| Full pipeline CLI | `bun run bonsai bill-001 eob-001 auto` | Analyzer → letter → strategy → negotiate → report |
-| Web UI | `bun run serve` | Upload or fixture, tabs: findings / letter / conversation / raw, receipts hero on Home, agent-reasoning timeline in the bill drawer |
+| `ANTHROPIC_API_KEY` | **yes** | Opus 4.7 access for analysis, appeal, negotiation, comparison |
+| `BONSAI_PUBLIC_DOMAIN` | **yes** | Your deployed domain — forcing function so a fork doesn't ship someone else's URL |
+| `RESEND_API_KEY` | optional | Real outbound email |
+| `RESEND_FROM` | optional | Verified sender, e.g. `Bonsai Appeals <appeals@your-domain.com>` |
+| `RESEND_WEBHOOK_SECRET` | optional (req. in prod) | Svix signing secret for inbound webhook |
+| `BONSAI_WEBHOOK_DEBUG_TOKEN` | optional | Unlocks the read-only echo route on the inbound webhook |
+| `ELEVENLABS_API_KEY` | optional | Real outbound voice |
+| `ELEVENLABS_TWILIO_PHONE_NUMBER_ID` | optional | ElevenLabs ID for the imported Twilio number |
+| `ELEVENLABS_WEBHOOK_BASE` | optional | Public root for ElevenLabs server-tool callbacks |
+| `ELEVENLABS_WEBHOOK_SECRET` | optional | Bearer secret for inbound voice tool callbacks |
+| `NODE_ENV` | optional | `production` flips cookie `Secure` + webhook fail-closed |
+| `BONSAI_DATA_DIR` | optional | Persistent data dir; defaults to `<repo>/out` |
+| `PORT` | optional | HTTP port for the web UI; default 3333 |
+| `SENTRY_DSN` | optional | Reserved |
+| `BONSAI_AUDIT_DAILY_LIMIT` | optional | Per-user daily audit cap; default 5 |
+| `BONSAI_VOICE_DAILY_LIMIT` | optional | Per-user daily call cap; default 5 |
+| `BONSAI_VOICE_DAILY_BUDGET_USD` | optional | Operator-wide daily voice budget; default 50 |
+| `VOICE_DRY_RUN` | optional | `true` logs the call we'd place without dialing |
+| `BONSAI_SUPPORT_EMAIL` | optional | Public support address for the SPA + landing footer (via `/api/public-config`) |
+| `BACKUP_S3_ENDPOINT` | optional | S3-compatible endpoint for nightly volume backup (B2, R2, S3, MinIO) |
+| `BACKUP_S3_BUCKET` | optional | Bucket name for nightly backups |
+| `BACKUP_S3_ACCESS_KEY_ID` | optional | Access key for the backup bucket |
+| `BACKUP_S3_SECRET_ACCESS_KEY` | optional | Secret key for the backup bucket |
 
 ## Commands
 
 ```bash
 # Development
-bun run typecheck         # tsc --noEmit (via bun for dyld reasons)
-bun run test              # bun test — 33 tests
+bun run typecheck         # tsc --noEmit
+bun run test              # bun test
 bun run make-pdfs         # regenerate fixture PDFs after editing .md
 
 # Per-stage CLIs (debugging)
-bun run day2 <bill> <eob>                    # analyzer only
-bun run day3 <bill> <eob>                    # analyzer → letter
-bun run day4 <bill> [persona]                # email loop, one fixture
-bun run day5 <bill> [persona]                # voice simulator, one fixture
+bun run day1 ... day5     # stage-by-stage harnesses; see scripts/
 
 # Full pipeline
 bun run bonsai [bill] [eob] [channel] [persona]
-#   bill:    fixture name, default bill-001
-#   eob:     fixture name, default eob-001
-#   channel: auto | email | voice, default auto
+#   channel: auto | email | voice (default auto)
 #   persona: stall_then_concede | hostile | quick_concede | cooperative | voicemail | outright_deny
 
 # Web server
 PORT=3333 bun run serve
 ```
 
-## Grounding contract
-
-Every finding the analyzer reports must:
-
-1. Quote a verbatim row from the bill (`line_quote`). If the quote doesn't
-   appear in the bill markdown ground-truth, the tool call is **rejected**
-   with `is_error: true` and Claude retries. See `src/lib/ground-truth.ts`.
-2. Name a 1-indexed `page_number`.
-3. Commit to a `confidence` tier. Only the 2-tier set can be HIGH:
-   `duplicate`, `denied_service`, `balance_billing`. Everything else is
-   `worth_reviewing` and never ships to billing departments.
-4. Justify itself with EOB `evidence`.
-
-The grounding contract is the difference between "LLM reads a bill" and
-"agent a patient can hand to their insurer." A hallucinated line quote
-would be caught before it lands in an appeal letter.
-
-## Overlap-aware totals
-
-The #1 arithmetic mistake when scoring a bill is summing a `balance_billing`
-finding with the line items it already subsumes (e.g. balance-billing of
-$3,812 is caused by 5 denied lines totaling $3,590; summing = $7,402 is wrong,
-the real defensible total is $3,812).
-
-Rule:
-
-```
-defensibleTotal =
-  no balance_billing  → sum(HIGH)
-  has balance_billing → max( max(balance_billing), sum(HIGH ∖ balance_billing) )
-```
-
-`src/analyzer.ts:computeDefensibleTotal` implements this and is unit-tested
-(`test/compute-defensible-total.test.ts`). The analyzer also auto-repairs
-Claude's reported summary if it violates this rule (look for
-`auto-corrected` in the headline).
-
-## Channel strategy
-
-```
-auto + balance_billing finding + HIGH ≥ $1,500  → voice
-auto + anything else                             → email
-explicit email/voice                             → honored verbatim
-```
-
-Rationale: balance-billing disputes above $1,500 almost always need a rep
-on the phone to remove the write-off from the account. Below that threshold,
-email is cheaper and leaves a paper trail.
-
-## Voice setup (real ElevenLabs)
-
-When all four `ELEVENLABS_*` env vars below are set, the orchestrator
-routes the voice channel to a real ElevenLabs Conversational AI call
-(via the linked Twilio trunk) instead of the dual-Claude simulator. With
-any one missing, the simulator path stays in effect — the simulator
-exists precisely so day-to-day dev never depends on Twilio minutes.
-
-```
-ELEVENLABS_API_KEY=...                  # xi-api-key (Settings → API Keys)
-ELEVENLABS_TWILIO_PHONE_NUMBER_ID=...   # see one-time setup below
-ELEVENLABS_WEBHOOK_BASE=https://bonsai.example.com   # public root; agent posts back to <base>/webhooks/voice/<tool>
-ELEVENLABS_WEBHOOK_SECRET=...           # Bearer secret embedded in the agent's webhook headers
-```
-
-Optional cost-control knobs:
-
-```
-BONSAI_VOICE_DAILY_LIMIT=5              # per-user daily call cap (default 5)
-BONSAI_VOICE_DAILY_BUDGET_USD=50        # operator-wide daily ceiling (default $50)
-VOICE_DRY_RUN=true                      # log the call we WOULD place, return a synthetic conversation_id
-```
-
-One-time provisioning:
-
-1. **Provision a Twilio number.** Twilio console → Phone Numbers → Buy a Number.
-2. **Import it into ElevenLabs.** Dashboard → Phone Numbers → Import number → From Twilio. Paste your Twilio account SID + auth token + the number. Bonsai never holds Twilio credentials; ElevenLabs proxies all carrier traffic.
-3. **Look up the `phone_number_id`.** ElevenLabs maintains its own ID for the imported number. Get it with:
-   ```
-   curl -H "xi-api-key: $ELEVENLABS_API_KEY" https://api.elevenlabs.io/v1/convai/twilio/phone-numbers
-   ```
-   Set the matching entry's `id` as `ELEVENLABS_TWILIO_PHONE_NUMBER_ID` in Railway.
-4. **Smoke-test end-to-end.** `bun run scripts/voice-smoke.ts` against a number you own:
-   ```
-   BONSAI_VOICE_SMOKE_TO=+15551234567 \
-   BONSAI_VOICE_SMOKE_USER_EMAIL=you@example.com \
-   bun run scripts/voice-smoke.ts
-   ```
-   The script dials, then polls the per-user transcript file under
-   `out/users/<id>/calls/<conversation_id>.json` until the agent's
-   `end_call` server-tool fires, and prints the final state.
-
-A single ElevenLabs imported number serves all per-user agents — agent
-binding happens at call time via `agent_id` + `agent_phone_number_id` on
-the outbound-call request, not at agent-creation time.
-
-## Negotiation loops
-
-**Email (`src/negotiate-email.ts`).** Claude drafts a reply using only facts
-from the analyzer's grounded findings, has 3 tools (`send_email`, `mark_resolved`,
-`escalate_human`), and holds to a `final_acceptable_floor` (defaults to EOB
-patient responsibility). Escalates after 3 flat denials. State is persisted
-in `out/threads/{thread_id}.state.json`.
-
-**Voice (`src/voice/`).** Generates an ElevenLabs Conversational AI agent
-config with 5 server_tools (`get_disputed_line`, `confirm_eob_amount`,
-`record_negotiated_amount`, `request_human_handoff`, `end_call`). The
-simulator (`src/voice/simulator.ts`) uses dual-Claude — one plays our agent
-(using the real agent config), another role-plays a billing-dept rep with
-one of 4 personas. Tool calls dispatch to the real handlers
-(`src/voice/tool-handlers.ts`), so when we swap in real ElevenLabs the same
-tool code runs.
-
-**Simulator personas.**
-
-- `cooperative` — rep acknowledges errors after 1-2 rounds
-- `stall_then_concede` — rep stalls twice, then gives in (default)
-- `hostile` — rep denies everything, tests escalation logic
-- `quick_concede` / `outright_deny` — email-specific
-- `voicemail` — voice-specific, tests voicemail handoff
-
-## Grounding in real life (what's simulated vs real)
-
-| Integration | Status | To go real |
-|---|---|---|
-| Claude API | **real** | Already using `@anthropic-ai/sdk` |
-| Email send | **mock by default, Resend if env set** | Set `RESEND_API_KEY` + `RESEND_FROM` |
-| Email inbound | **real Resend webhook + replay fallback** | `POST /webhooks/resend-inbound` verifies svix, dedupes by `message_id`, steps the agent. Set `RESEND_WEBHOOK_SECRET`. Replay mode (`src/replay.ts`) covers the demo case where the tunnel is unreachable. |
-| Voice call | **full simulator** (no real dial yet) | Create ElevenLabs + Twilio accounts, wire webhook |
-| OCR on uploaded PDFs | requires matching fixture .md | Add `unpdf` or vendor LLM OCR — noted in `server.ts` |
-
-All fixtures are synthetic. No real PHI. This is a hackathon prototype and
-is not medical, legal, or financial advice.
-
 ## HTTP endpoints
 
-The web server (`bun run serve`) exposes:
-
-- `POST /webhooks/resend-inbound` — Resend posts parsed inbound email here
-  signed with svix. Handler verifies the signature against
-  `RESEND_WEBHOOK_SECRET` (constant-time HMAC, 5-minute replay window),
-  correlates the message to a thread (`X-Bonsai-Thread-Id` header → `In-Reply-To`
-  → `References`), appends to `out/threads/{thread_id}.json` deduplicated by
-  `message_id`, and kicks one `stepNegotiation` so the dashboard updates without
-  polling. Returns `401` on bad signature, `202` if no thread correlation,
-  `200` (idempotent) on duplicate message ids. In production, missing
-  `RESEND_WEBHOOK_SECRET` returns `500` (fail-closed); in dev it accepts unsigned
-  payloads with a console warning.
-- `GET /api/receipts` — projects completed `out/report-*.json` files into per-bill
-  rows (`provider`, `original`, `final`, `saved`, `outcome`, `source line_quote`)
-  plus a cumulative savings total. The Home page renders a green hero counter and
-  the three most recent receipts above the dropzone.
-
-On boot the server also runs `seedReceipts()` (`src/seed-receipts.ts`), which
-copies `fixtures/seed-receipts/*.json` into `out/report-*.json` if the
-destination doesn't already exist. Idempotent; never overwrites a real run.
+- `POST /webhooks/resend-inbound` — Resend posts parsed inbound mail here, signed via svix. Handler verifies the signature against `RESEND_WEBHOOK_SECRET` (constant-time HMAC, 5-minute replay window), correlates to a thread (`X-Bonsai-Thread-Id` → `In-Reply-To` → `References`), appends to `out/threads/{thread_id}.json` deduplicated by `message_id`, and kicks one `stepNegotiation`. Returns `401` on bad signature, `202` if no thread correlation, `200` (idempotent) on duplicate message ids.
+- `GET /api/receipts` — projects completed `out/report-*.json` files into per-bill rows plus a cumulative savings total. The Home page renders a green hero counter and the three most recent receipts above the dropzone.
 
 ## Tests
 
 ```bash
-bun test
+bun run test
 ```
 
-- `test/compute-defensible-total.test.ts` — overlap math
-- `test/appeal-letter.test.ts` — placeholders, NSA clause gating, verbatim quote preservation
-- `test/choose-channel.test.ts` — routing heuristic
-- `test/types.test.ts` — BillingError + BillMetadata schema guardrails
-- `test/negotiate-email.test.ts` — tool dispatch, termination, idempotency, MAX_TURNS exhaustion, BCC threading
-- `test/webhook-resend-inbound.test.ts` — svix verify (valid + tampered + replay), 401/202/200 paths, In-Reply-To correlation, message_id dedupe
+No API keys required. Tests exercise the analyzer's grounding, the appeal letter's placeholder logic, the channel routing heuristic, the email negotiation tool dispatch, and the inbound webhook's svix verify + correlation paths.
 
 ## Layout
 
@@ -469,78 +293,50 @@ bun test
 src/
   analyzer.ts            # PDF → errors + metadata via tool-use loop
   appeal-letter.ts       # deterministic markdown generator
-  negotiate-email.ts     # Claude-driven email negotiation loop (mutex + MAX_TURNS escalation + BCC)
+  negotiate-email.ts     # email negotiation loop (mutex + MAX_TURNS escalation + BCC)
+  negotiate-agent.ts     # negotiation orchestration helpers
+  offer-agent.ts         # comparison agent (managed-agent-backed)
+  opps-filter.ts         # opportunity probability gate
   simulate-reply.ts      # role-playing rep for email simulator
-  replay.ts              # scripted-inbound demo fallback when Resend webhook is unreachable
-  seed-receipts.ts       # cold-start: copies fixtures/seed-receipts/*.json → out/report-*.json
+  replay.ts              # scripted-inbound demo fallback when webhook unreachable
   orchestrator.ts        # runBonsai() — single end-to-end entry
   server.ts              # Bun.serve HTTP + upload + fixture API + receipts + webhook router
-  server/
-    webhooks.ts          # POST /webhooks/resend-inbound — svix verify, correlate, dedupe, step
-  env.ts                 # explicit .env loader (bun sandbox quirk)
+  env.ts                 # explicit .env loader + validateRequiredEnv()
   types.ts               # BillingError / BillMetadata / AnalyzerResult
-  clients/
-    email.ts             # EmailClient interface (now carries optional bcc)
-    email-mock.ts        # in-memory thread state for simulator
-    email-resend.ts      # real client + autoEmailClient() factory
-  tools/
-    record-metadata.ts
-    record-error.ts      # enforces grounding contract
-    finalize.ts
-  voice/
-    agent-config.ts      # generates ElevenLabs agent system prompt + server_tools
-    client.ts            # POST /v1/convai/*
-    simulator.ts         # dual-Claude: agent + persona-driven rep
-    tool-handlers.ts     # real dispatch used by both webhook + simulator
-  lib/
-    ground-truth.ts      # line_quote verbatim validator
-    thread-store.ts      # withThreadLock() + appendInboundIdempotent() — per-thread mutex over out/threads/{id}.json
-
-scripts/
-  day1-poc.ts            # prose-output POC (stage reference)
-  day2-analyzer.ts       # analyzer CLI
-  day3-appeal.ts         # letter CLI
-  day4-negotiate-email.ts
-  day5-voice-call.ts
-  run-bonsai.ts          # full pipeline CLI (bun run bonsai)
-  make-fixture-pdfs.ts   # headless chrome md → pdf
-
-fixtures/
-  bill-001.md / .pdf, eob-001.md / .pdf     # ER visit, 6 errors
-  bill-002.md / .pdf, eob-002.md / .pdf     # outpatient arthroscopy, 7 errors
-  seed-receipts/                            # cold-start receipts for the dashboard
-    seed-memorial-1842.json                 # balance-billing save
-    seed-sierra-947.json                    # coding correction
-    seed-university-3612.json               # NSA + duplicate CPT
-
-public/                  # static web UI
-  index.html
-  assets/app.css
-  assets/app.js
-
+  clients/               # email + email-resend + email-mock
+  server/                # webhooks (resend inbound + voice dial/webhooks)
+  tools/                 # record-metadata, record-error (grounding contract), finalize
+  voice/                 # agent-config, client, simulator, tool-handlers
+  lib/                   # ground-truth, thread-store, provider-contact, pdf-extract,
+                         # auth, db, backup, rate-limit, user-settings, etc.
+scripts/                 # day1-poc, day2..5, run-bonsai, voice-smoke, resend-inbound-smoke
+fixtures/                # synthetic bill + EOB markdown + generated PDFs
+public/                  # static web UI (index, landing, terms, privacy)
 test/                    # bun test
 ```
 
-## Two fixtures validated end-to-end
-
-| Fixture | Original balance | Defensible | Voice final | Email final | Channel heuristic |
-|---|---:|---:|---:|---:|---|
-| bill-001 | $6,371.50 | $3,612 | $2,759.50 | $2,559.50 | voice (BB ≥ $1,500) |
-| bill-002 | $7,149.00 | $6,517 | $632.00 | — | voice (BB ≥ $1,500) |
-
-Saved range: **$3,612 – $6,517 per bill** across the two fixtures.
-
 ## Roadmap
 
-- ~~Live PDF text extraction (currently uploaded PDFs require a matching `fixtures/<name>.md` for ground-truth line_quote validation). Wire in `unpdf` or similar.~~ — shipped in 0.1.4.0: `src/lib/pdf-extract.ts` wraps `unpdf` and feeds the analyzer's verbatim `line_quote` validator with text pulled directly from the upload.
-- Real ElevenLabs + Twilio wiring for voice (simulator is complete; swap is
-  one-env-var + webhook URL config).
-- ~~Real Resend inbound webhook handler for email replies in prod.~~ — shipped: svix-verified `POST /webhooks/resend-inbound` with replay-window dedupe and per-thread mutex. Post-deploy smoke runbook + `scripts/resend-inbound-smoke.sh` shipped in 0.1.5.0.
-- `out/` artifacts (reports, thread state, call transcripts) are file-based
-  — fine for a single-user demo, not for multi-tenant.
+What's next:
+
+- More analyzer rule packs per bill category (rent, taxes, subscriptions).
+- IVR navigation improvements for the voice agent.
+- Multi-tenant state (current `out/` artifacts are file-based; fine for self-host, not for shared deploys).
+
+Explicitly out of scope without a design doc:
+
+- Changes to the grounding contract.
+- Model swaps below Opus 4.7 (negotiation + appeal loops are tuned for that capability tier and silently degrade on smaller models).
+- Architectural rewrites of the five-agent orchestration.
+
+## License
+
+[MIT](LICENSE) © 2026 Bonsai contributors.
+
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Code of conduct: [Contributor Covenant 2.1](CODE_OF_CONDUCT.md).
 
 ## Disclaimer
 
-Bonsai is grounded in the EOB. Every disputed finding quotes a verbatim
-line from the bill or EOB. Dollar totals are overlap-aware. Still: this
-is a hackathon prototype. Not medical, legal, or financial advice.
+Bonsai is grounded in the source documents. Every disputed finding quotes a verbatim line from the bill, contract, or statement. Dollar totals are overlap-aware. Still: this is a prototype. Not medical, legal, or financial advice. All shipped fixtures are synthetic.

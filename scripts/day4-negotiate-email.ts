@@ -16,6 +16,9 @@
  *   bun run day4 bill-001 eob-001 hostile # forces escalation
  */
 import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
+
+validateRequiredEnv();
 import { analyze } from "../src/analyzer.ts";
 import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 import { MockEmailClient, loadThread } from "../src/clients/email-mock.ts";

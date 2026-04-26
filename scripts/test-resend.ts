@@ -9,13 +9,13 @@
  * → approve → negotiation. Sends a real email — pick a real recipient.
  *
  * Usage:
- *   bun run test-resend gcahill@firebaystudios.com
- *   bun run test-resend gcahill@firebaystudios.com garrett@cointracker.com
- *                       └── to (billing dept)         └── cc (account email)
+ *   bun run test-resend you@example.com
+ *   bun run test-resend billing@example.com you@example.com
+ *                       └── to (billing dept)   └── cc (account email)
  *
  * Env required:
  *   RESEND_API_KEY  — re_... key from resend.com/api-keys
- *   RESEND_FROM     — verified sender, e.g. "Bonsai <appeals@yourdomain.com>"
+ *   RESEND_FROM     — verified sender, e.g. "Bonsai <appeals@your-domain.com>"
  *
  * What to check:
  *   - The Resend dashboard (resend.com/emails) shows the message as
@@ -24,7 +24,7 @@
  *     not promotions. If it lands in spam, the verified domain's SPF or
  *     DKIM is misconfigured, or the sender reputation is too low.
  *   - The From line on the received email reads:
- *       "Bonsai (for <recipient-or-cc>) <appeals@yourdomain.com>"
+ *       "Bonsai (for <recipient-or-cc>) <appeals@your-domain.com>"
  *     If it shows the raw verified address only, the display-name wrap
  *     isn't firing — bug in withDisplayName().
  */
@@ -35,7 +35,7 @@ const ccArg = process.argv[3];
 
 if (!recipient) {
   console.error("Usage: bun run test-resend <recipient-email> [<cc-email>]");
-  console.error("Example: bun run test-resend gcahill@firebaystudios.com");
+  console.error("Example: bun run test-resend you@example.com");
   process.exit(2);
 }
 
@@ -48,7 +48,7 @@ if (!apiKey) {
 }
 if (!fromEmail) {
   console.error("RESEND_FROM is not set. Add it to .env or your shell.");
-  console.error("Example: RESEND_FROM='Bonsai <appeals@yourdomain.com>'");
+  console.error("Example: RESEND_FROM='Bonsai <appeals@your-domain.com>'");
   process.exit(2);
 }
 
