@@ -1064,6 +1064,27 @@ async function init() {
 
   // Review view: approve, ask, view-bill
   $("#review-approve-btn")?.addEventListener("click", approveAndRun);
+  // Delegated dismiss + restore handlers for the opportunities list.
+  // List items are rebuilt on every render, so we bind to the static <ul>.
+  $("#opps-list")?.addEventListener("click", (ev) => {
+    if (!oppsState) return;
+    const dismissBtn = ev.target.closest(".opp-dismiss");
+    if (dismissBtn) {
+      const li = dismissBtn.closest(".opp-item");
+      const oppId = li?.dataset?.oppId;
+      if (!oppId) return;
+      oppsState.dismissed.add(oppId);
+      saveDismissedOpps(oppsState.runId, oppsState.dismissed);
+      renderOpportunities();
+      return;
+    }
+    const restoreBtn = ev.target.closest(".opp-restore");
+    if (restoreBtn) {
+      oppsState.dismissed.clear();
+      saveDismissedOpps(oppsState.runId, oppsState.dismissed);
+      renderOpportunities();
+    }
+  });
   // The review view has a single unified chat panel (plan-chat). Q&A is
   // folded into it — the routing brain figures out whether the message is
   // a question or a plan edit. We bind both `submit` (Enter key + button
@@ -1327,6 +1348,29 @@ async function runAndRender(fn) {
 // ─── Phased run: audit → review → approve → negotiate ────────────
 
 let reviewState = null; // { run_id, partial_report }
+
+// Opportunities panel state. Total "predicted to save" is derived from
+// `all` minus `dismissed` so the headline tracks the user's choices.
+// { runId, all, cap, dismissed: Set<oppId>, report }
+let oppsState = null;
+
+const OPPS_PROBABILITY_FLOOR = 0.5;
+const oppsDismissKey = (runId) => `bonsai.opps.dismissed.${runId}`;
+const passesOppProbability = (o) =>
+  typeof o.probability === "number" && Number.isFinite(o.probability) && o.probability >= OPPS_PROBABILITY_FLOOR;
+
+function loadDismissedOpps(runId) {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(oppsDismissKey(runId)) ?? "[]"));
+  } catch {
+    return new Set();
+  }
+}
+function saveDismissedOpps(runId, set) {
+  try {
+    localStorage.setItem(oppsDismissKey(runId), JSON.stringify([...set]));
+  } catch {}
+}
 
 // Complaint chat history for the right-column advisory chat. Lives only in
 // memory because no PendingRun exists yet — we send the full history on
@@ -1787,37 +1831,35 @@ async function loadOpportunities(report) {
     const { opportunities } = await res.json();
     // Guard: if the current reviewState has moved on, bail.
     if (reviewState?.run_id !== runId) return;
-    const normalized = (opportunities ?? []).map((o) => ({
+    // Belt-and-braces: server already gates by probability, but if a
+    // stray low-probability item slips through we still drop it here.
+    const gated = (opportunities ?? []).filter(passesOppProbability);
+    const normalized = gated.map((o, i) => ({
+      opp_id: typeof o.opp_id === "string" && o.opp_id.length > 0 ? o.opp_id : `opp-${i}`,
       icon: ICONS[o.icon] ?? ICONS.pulse,
       title: o.title,
       desc: o.description,
       estimate: Number(o.dollar_estimate) || 0,
+      probability: o.probability,
     }));
-    const rawTotal = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
-    // Opportunity estimates may overlap (the model proposes 5 strategies
-    // that all chip away at the same defensible amount), and "what you
-    // can save" cannot exceed "what you owe" (the EOB patient
-    // responsibility for medical bills, the bill total otherwise). Clamp
-    // the headline so the user never sees a savings figure above their
-    // actual obligation. Per-opportunity rows keep their own numbers
-    // since they're each an upper-bound estimate.
-    const total = clampSaved(rawTotal, maxSavingsCap(report));
-    const provider = report.analyzer?.metadata?.provider_name ?? "the provider";
-    $("#review-title").textContent = total > 0
-      ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
-      : "Bill reviewed — a few angles to try.";
-    $("#review-sub").textContent = `${provider}. Original ${fmt$2(report.summary.original_balance ?? 0)}. Accept the plan or chat with Bonsai below to customize.`;
-    renderOpportunities(normalized, total);
+    initOppsState(runId, normalized, report);
+    renderOpportunities();
   } catch (err) {
     console.warn("[opps] falling back to synthesized", err);
     const fallback = buildOpportunities(report);
-    const rawTotal = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
-    const total = clampSaved(rawTotal, maxSavingsCap(report));
-    $("#review-title").textContent = total > 0
-      ? `We think we can save you ${fmt$(total)} on this bill.`
-      : "Bill reviewed — a few angles to try.";
-    renderOpportunities(fallback, total);
+    initOppsState(runId, fallback, report);
+    renderOpportunities();
   }
+}
+
+function initOppsState(runId, all, report) {
+  oppsState = {
+    runId,
+    all,
+    cap: maxSavingsCap(report),
+    dismissed: loadDismissedOpps(runId),
+    report,
+  };
 }
 
 function providerKindLabel() {
@@ -1927,36 +1969,94 @@ function deriveReceiptItems(report) {
 
 /* ─── Opportunities (right panel) ──────────────────────────────────── */
 
-function renderOpportunities(opps, total) {
+function renderOpportunities() {
+  if (!oppsState) return;
+  const { all, cap, dismissed, report } = oppsState;
+  const visible = all.filter((o) => !dismissed.has(o.opp_id));
+  // Estimates may overlap (multiple strategies all chip at the same
+  // defensible amount), and savings can't exceed what the user owes.
+  // Clamp to the cap so the headline never goes north of their bill.
+  const rawTotal = visible.reduce((s, o) => s + (o.estimate ?? 0), 0);
+  const total = clampSaved(rawTotal, cap);
+
   $("#opps-total").textContent = total > 0 ? fmt$(total) : "—";
+
+  const provider = report?.analyzer?.metadata?.provider_name ?? "the provider";
+  const titleEl = $("#review-title");
+  if (titleEl) {
+    titleEl.textContent = total > 0
+      ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
+      : "Bill reviewed — a few angles to try.";
+  }
+  const subEl = $("#review-sub");
+  if (subEl && report) {
+    subEl.textContent = `${provider}. Original ${fmt$2(report.summary?.original_balance ?? 0)}. Accept the plan or chat with Bonsai below to customize.`;
+  }
+
   const ul = $("#opps-list");
   ul.innerHTML = "";
-  if (opps.length === 0) {
+  if (visible.length === 0) {
     const li = document.createElement("li");
     li.className = "opp-empty";
-    li.textContent = "No clear savings angles on this one — the provider seems to be charging fairly. We'll still try a prompt-pay ask.";
+    li.textContent = dismissed.size > 0
+      ? "All opportunities dismissed."
+      : "No clear savings angles on this one — the provider seems to be charging fairly. We'll still try a prompt-pay ask.";
     ul.appendChild(li);
-    return;
+  } else {
+    for (const o of visible) {
+      const li = document.createElement("li");
+      li.className = "opp-item";
+      li.dataset.oppId = o.opp_id;
+      li.innerHTML = `
+        <div class="opp-icon">${o.icon ?? ICONS.pulse}</div>
+        <div class="opp-body">
+          <div class="opp-title">${escapeHtml(o.title)}</div>
+          <div class="opp-desc">${escapeHtml(o.desc)}</div>
+        </div>
+        <div class="opp-amount">${o.estimate > 0 ? fmt$(o.estimate) : "—"}</div>
+        <button type="button" class="opp-dismiss" aria-label="Dismiss opportunity">×</button>`;
+      ul.appendChild(li);
+    }
   }
-  for (const o of opps) {
+
+  if (dismissed.size > 0) {
     const li = document.createElement("li");
-    li.className = "opp-item";
-    li.innerHTML = `
-      <div class="opp-icon">${o.icon ?? ICONS.pulse}</div>
-      <div class="opp-body">
-        <div class="opp-title">${escapeHtml(o.title)}</div>
-        <div class="opp-desc">${escapeHtml(o.desc)}</div>
-      </div>
-      <div class="opp-amount">${o.estimate > 0 ? fmt$(o.estimate) : "—"}</div>`;
+    li.className = "opp-undo";
+    li.innerHTML = `<button type="button" class="opp-restore">Show ${dismissed.size} dismissed</button>`;
     ul.appendChild(li);
   }
+}
+
+// Bill kinds where T&C language tends to be a meaningful negotiation
+// surface (statements with explicit policy text, late-fee schedules,
+// good-faith estimates, etc.).
+const TNC_BILL_KINDS = new Set(["telecom", "utility", "subscription", "insurance", "financial"]);
+// Bill kinds where a competing provider exists and a switch threat is
+// plausible. Medical/financial/legal are typically single-provider per
+// encounter — a "competitor offer" lever is meaningless there.
+const COMPETITOR_BILL_KINDS = new Set(["telecom", "utility", "subscription", "insurance"]);
+
+const TNC_LANGUAGE_RE = /\b(policy|terms|late\s*fee|good[\s-]faith|charity\s*care|itemization|surcharge|waiver|liable|indemnif)/i;
+
+function shouldShowTncLever(report) {
+  const billKind = report?.analyzer?.metadata?.bill_kind;
+  if (TNC_BILL_KINDS.has(billKind)) return true;
+  // Otherwise, only include if the analyzer surfaced policy/T&C language
+  // in any of its findings. "When in doubt, skip."
+  const errors = report?.analyzer?.errors ?? [];
+  return errors.some((e) => TNC_LANGUAGE_RE.test(`${e.evidence ?? ""} ${e.line_quote ?? ""}`));
+}
+
+function shouldShowCompetitorLever(report) {
+  return COMPETITOR_BILL_KINDS.has(report?.analyzer?.metadata?.bill_kind);
 }
 
 /**
  * Synthesize a list of strategies to lower this bill with dollar estimates.
  * Pulls from analyzer findings where available, then layers on universal
  * levers (prompt-pay, competitor threat, financial hardship) so the user
- * always sees multiple angles — not just billing errors.
+ * always sees multiple angles — not just billing errors. Each item carries
+ * a probability so it travels through the same gate as server-sourced opps.
  */
 function buildOpportunities(report) {
   const out = [];
@@ -1971,10 +2071,12 @@ function buildOpportunities(report) {
   // 1. Grounded billing errors (highest-signal)
   if (high.length > 0 && defensible > 0) {
     out.push({
+      opp_id: "dispute-high-confidence-errors",
       icon: ICONS.shield,
       title: `Dispute ${high.length} billing error${high.length === 1 ? "" : "s"}`,
       desc: "Grounded citations against the bill. Duplicates, denied services, and balance-billing overlap all defensible on paper.",
       estimate: defensible,
+      probability: 0.85,
     });
   }
 
@@ -1982,10 +2084,12 @@ function buildOpportunities(report) {
   if (worth.length > 0) {
     const worthTotal = worth.reduce((s, e) => s + (e.dollar_impact ?? 0), 0);
     out.push({
+      opp_id: "challenge-worth-reviewing",
       icon: ICONS.scan,
       title: `Challenge ${worth.length} questionable charge${worth.length === 1 ? "" : "s"}`,
       desc: "Unbundling, markup, and other soft flags. Lower win rate, but often negotiable.",
       estimate: Math.round(worthTotal * 0.5),
+      probability: 0.55,
     });
   }
 
@@ -1993,28 +2097,41 @@ function buildOpportunities(report) {
   if (remainingAfterDispute > 200) {
     const estimate = Math.round(remainingAfterDispute * 0.15);
     out.push({
+      opp_id: "negotiate-prompt-pay",
       icon: ICONS.pulse,
       title: "Negotiate the remaining balance",
       desc: "Ask for a prompt-pay discount (10–20% is typical) and a single-settlement write-off on whatever's left.",
       estimate,
+      probability: 0.7,
     });
   }
 
-  // 4. Terms & loopholes
-  out.push({
-    icon: ICONS.doc,
-    title: "Hunt for T&C loopholes",
-    desc: "Review the provider's own policy — late-fee caps, good-faith-estimate discrepancies (No Surprises Act), charity care thresholds, or hidden itemization rules.",
-    estimate: Math.round(original * 0.05),
-  });
+  // 4. Terms & loopholes — only when the bill has visible T&C language or
+  // is a category whose statements typically expose negotiable policy.
+  if (shouldShowTncLever(report)) {
+    out.push({
+      opp_id: "hunt-tnc-loopholes",
+      icon: ICONS.doc,
+      title: "Hunt for T&C loopholes",
+      desc: "Review the provider's own policy — late-fee caps, good-faith-estimate discrepancies (No Surprises Act), charity care thresholds, or hidden itemization rules.",
+      estimate: Math.round(original * 0.05),
+      probability: 0.55,
+    });
+  }
 
-  // 5. Competitor leverage / threat to cancel
-  out.push({
-    icon: ICONS.phone,
-    title: "Leverage a competitor offer",
-    desc: "If there's a cheaper provider or a cancel-threat angle (subscriptions, utilities, pet insurance), we use it.",
-    estimate: Math.round(original * 0.08),
-  });
+  // 5. Competitor leverage — only for bill kinds where a switch threat is
+  // real (telecom / utility / subscription / insurance). Skips medical
+  // and one-off bills where there's no competing provider to switch to.
+  if (shouldShowCompetitorLever(report)) {
+    out.push({
+      opp_id: "leverage-competitor-offer",
+      icon: ICONS.phone,
+      title: "Leverage a competitor offer",
+      desc: "If there's a cheaper provider or a cancel-threat angle (subscriptions, utilities, pet insurance), we use it.",
+      estimate: Math.round(original * 0.08),
+      probability: 0.6,
+    });
+  }
 
   return out;
 }
