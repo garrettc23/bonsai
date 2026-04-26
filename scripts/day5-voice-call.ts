@@ -14,9 +14,12 @@
  *   bun run day5 bill-001 eob-001 voicemail
  */
 import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
 import { analyze } from "../src/analyzer.ts";
 import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
 import { simulateCall, type RepPersona } from "../src/voice/simulator.ts";
+
+validateRequiredEnv();
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";

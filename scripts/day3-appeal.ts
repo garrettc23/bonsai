@@ -11,12 +11,15 @@
  *   bun run day3 bill-002 eob-002
  */
 import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyze } from "../src/analyzer.ts";
 import { generateAppealLetter } from "../src/appeal-letter.ts";
 import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
+
+validateRequiredEnv();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");

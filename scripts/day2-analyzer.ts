@@ -8,8 +8,11 @@
  *   bun run day2 bill-002 eob-002      # override fixture names
  */
 import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
 import { analyze } from "../src/analyzer.ts";
 import { loadFixtureAnalyzeInput } from "../src/lib/fixture-audit.ts";
+
+validateRequiredEnv();
 
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";

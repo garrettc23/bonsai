@@ -9,10 +9,14 @@
  * Usage:
  *   bun run day1   (or:  npx tsx scripts/day1-poc.ts)
  */
+import "../src/env.ts";
+import { validateRequiredEnv } from "../src/env.ts";
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+
+validateRequiredEnv();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(__dirname, "..", "fixtures");
