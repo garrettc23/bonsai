@@ -4819,3 +4819,61 @@ body.legal-page { background: var(--bg); }
 @media (max-width: 900px) {
   .complaint-split { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Branded 404 / 500 pages — full-bleed centered card with brand chrome.
+ * Reuses .card, .btn, .wordmark + the shared color tokens so future
+ * theme changes flow through without touching the error pages. */
+.error-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--bg);
+}
+.error-page .error-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  max-width: 480px;
+  width: 100%;
+  padding: 40px;
+  text-align: center;
+  box-shadow: 0 1px 0 rgba(14, 14, 12, 0.02);
+}
+.error-page .wordmark {
+  font-size: 48px;
+  margin-bottom: 24px;
+  display: inline-block;
+}
+.error-page h1 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 1.15;
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-weight: 400;
+}
+.error-page p {
+  color: var(--ink-soft);
+  margin: 0 0 24px;
+  font-size: 15px;
+}
+.error-page .actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.error-page footer {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-mute);
+}
+.error-page footer a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

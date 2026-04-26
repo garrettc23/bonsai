@@ -216,6 +216,48 @@ Anthropic API usage is operator-paid (every audit on Opus 4.7 runs
 ElevenLabs keys via Settings → Integrations, so those costs don't
 land on the operator.
 
+## Backups
+
+Railway's volume isn't snapshotted by default — one disk fault loses every
+user's SQLite, threads, transcripts, and uploaded bills. The server can
+push a nightly tarball of `BONSAI_DATA_DIR` to any S3-compatible object
+store. Backups are **opt-in**: with the four env vars below unset, the
+server boots and logs `[backup] disabled` — nothing else happens.
+
+Recommended: [Backblaze B2](https://www.backblaze.com/cloud-storage)
+(S3-compatible, ~6× cheaper than S3 for storage, cheap egress). Cloudflare
+R2, AWS S3, and self-hosted MinIO all work too — same env vars.
+
+```bash
+# Set in Railway → Variables (or your .env locally):
+BACKUP_S3_ENDPOINT=https://s3.us-west-002.backblazeb2.com
+BACKUP_S3_BUCKET=bonsai-backups
+BACKUP_S3_ACCESS_KEY_ID=...
+BACKUP_S3_SECRET_ACCESS_KEY=...
+```
+
+What happens after the next deploy:
+
+- On boot, if no successful backup is recorded — or the last one is more
+  than 25 hours old — the server fires a catch-up run immediately.
+- Every 24 hours after that, the same job tars `BONSAI_DATA_DIR`,
+  streams it to `bonsai-backups/YYYY-MM-DD.tar.gz` in your bucket, and
+  prunes anything older than 30 days.
+- Backup failures are non-fatal — they log `[backup] FAILED` and the
+  next nightly run retries.
+
+To verify a backup is recoverable:
+
+```bash
+bun run scripts/restore-backup.ts latest
+# Validates the tar's contents and prints the exact `tar -xzf` command
+# to run for an actual restore. Never auto-extracts (restore is
+# destructive).
+```
+
+Cost note: at typical beta scale (tens of MB per user × ~100 users × 30
+days retention) this runs single-digit dollars per month on B2.
+
 ## What works
 
 | Layer | Command | Status |
