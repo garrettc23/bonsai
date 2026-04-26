@@ -4451,6 +4451,21 @@ body.legal-page { background: var(--bg); }
 }
 .contact-retry:disabled,
 .contact-save:disabled { opacity: 0.6; cursor: progress; }
+
+/* Inline auto-save indicator for the contact card. Replaces the
+   explicit Save button — typing IS the save now, so this just
+   confirms what's happening. */
+.contact-save-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink-mute);
+  transition: color 0.18s, opacity 0.18s;
+  min-height: 1.2em;
+}
+.contact-save-status.pending { color: var(--ink-mute); }
+.contact-save-status.ok { color: var(--green); }
+.contact-save-status.err { color: var(--red); }
 .contact-sources {
   margin-top: 10px;
   display: flex;

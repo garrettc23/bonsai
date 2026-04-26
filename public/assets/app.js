@@ -1014,8 +1014,24 @@ async function init() {
   $("#review-approve-btn")?.addEventListener("click", approveAndRun);
   // The review view has a single unified chat panel (plan-chat). Q&A is
   // folded into it — the routing brain figures out whether the message is
-  // a question or a plan edit.
+  // a question or a plan edit. We bind both `submit` (Enter key + button
+  // click) AND a direct click on the send button as a safety net — some
+  // browsers (and form-fill extensions) intercept submit events and our
+  // chat would silently no-op.
   $("#review-plan-chat-form")?.addEventListener("submit", (ev) => { ev.preventDefault(); submitPlanMessage(); });
+  $("#review-plan-chat-form button")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    submitPlanMessage();
+  });
+  // Belt-and-suspenders: also fire on Enter in the input. Modern browsers
+  // already do this via form-submit, but if the form's submit event is
+  // ever blocked, the keypress fallback keeps the chat usable.
+  $("#review-plan-chat-input")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      submitPlanMessage();
+    }
+  });
   $("#review-view-bill-btn")?.addEventListener("click", () => {
     if (reviewState?.run_id) openBillViewer(reviewState.run_id);
   });
@@ -1385,12 +1401,17 @@ function initContactCard() {
   // the live reviewState run_id at click time, not at bind time.
   if (!card.dataset.bound) {
     card.dataset.bound = "1";
-    $("#contact-save").addEventListener("click", saveContactOverride);
-    // Clear the "needs input" highlight as soon as the user starts typing
-    // either field — feedback that their action was registered.
-    const clearHighlight = () => card.classList.remove("needs-input");
-    $("#contact-email")?.addEventListener("input", clearHighlight);
-    $("#contact-phone")?.addEventListener("input", clearHighlight);
+    // Save button still works for users who explicitly want to confirm,
+    // but typing now auto-saves so most won't need it.
+    $("#contact-save")?.addEventListener("click", saveContactOverride);
+    const onEdit = () => {
+      // Clear the "needs input" highlight on first keystroke.
+      card.classList.remove("needs-input");
+      // Schedule a debounced save — typing IS the save.
+      scheduleContactAutosave();
+    };
+    $("#contact-email")?.addEventListener("input", onEdit);
+    $("#contact-phone")?.addEventListener("input", onEdit);
   }
   pollContactStatus();
   contactPollTimer = setInterval(pollContactStatus, 2500);
@@ -1492,8 +1513,14 @@ async function saveContactOverride() {
   if (!runId) return;
   const email = $("#contact-email").value.trim();
   const phone = $("#contact-phone").value.trim();
-  const btn = $("#contact-save");
-  btn.disabled = true;
+  // No-op when both fields are empty — avoids POSTing nulls on every
+  // backspace once the user clears the inputs to retype.
+  if (!email && !phone) return;
+  const status = $("#contact-save-status");
+  if (status) {
+    status.textContent = "Saving…";
+    status.className = "contact-save-status pending";
+  }
   try {
     const res = await fetch("/api/contact/override", {
       method: "POST",
@@ -1504,11 +1531,38 @@ async function saveContactOverride() {
     if (!res.ok) throw new Error(await res.text());
     const j = await res.json();
     applyContactStatus({ status: "resolved", contact: j.contact, provider_name: reviewState?.provider_name ?? null });
+    if (status) {
+      status.textContent = "Saved ✓";
+      status.className = "contact-save-status ok";
+      setTimeout(() => {
+        if (status.textContent === "Saved ✓") {
+          status.textContent = "";
+          status.className = "contact-save-status";
+        }
+      }, 2500);
+    }
   } catch (err) {
     console.warn("[contact] save failed", err);
-  } finally {
-    btn.disabled = false;
+    if (status) {
+      status.textContent = "Couldn't save — try again";
+      status.className = "contact-save-status err";
+    }
   }
+}
+
+/**
+ * Debounced auto-save for the contact card. Fires ~700ms after the user
+ * stops typing. The user no longer needs to hit "Save" — typing IS the
+ * save action. We still keep saveContactOverride callable explicitly
+ * (e.g., on Approve auto-save) because the debounce is async-safe.
+ */
+let contactAutosaveTimer = null;
+function scheduleContactAutosave() {
+  if (contactAutosaveTimer) clearTimeout(contactAutosaveTimer);
+  contactAutosaveTimer = setTimeout(() => {
+    contactAutosaveTimer = null;
+    void saveContactOverride();
+  }, 700);
 }
 
 async function loadOpportunities(report) {
@@ -1758,9 +1812,12 @@ function buildOpportunities(report) {
 
 
 async function submitPlanMessage() {
-  if (!reviewState) return;
+  if (!reviewState) {
+    console.warn("[plan-chat] no reviewState — chat fired before audit completed?");
+    return;
+  }
   const input = $("#review-plan-chat-input");
-  const msg = input.value.trim();
+  const msg = input?.value?.trim() ?? "";
   if (!msg) return;
   const log = $("#review-plan-chat-log");
   const qDiv = document.createElement("div");
