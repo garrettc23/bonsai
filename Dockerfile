@@ -34,10 +34,14 @@ ENV NODE_ENV=production
 # server falls back to 3333 (see src/server.ts).
 EXPOSE 3333
 
-# Drop to a non-root user so a vulnerability in any dependency can't
-# scribble outside /app. The `bun` image already ships a `bun` user
-# with a writable home, but /app/data needs explicit ownership.
+# Run as root inside the container. Railway mounts the persistent volume
+# at /app/data at runtime — that volume's ownership is root, and the
+# build-time `chown -R bun:bun /app` doesn't survive the mount. With
+# `USER bun` the bun process can't write the SQLite DB or per-user file
+# tree, and every signup / audit returns 500. The Railway container is
+# already isolated from the host; running as root here is the same risk
+# surface most Node/Bun images take. A future hardening PR can re-introduce
+# the bun user via an entrypoint script that chowns /app/data on startup.
 RUN chown -R bun:bun /app
-USER bun
 
 CMD ["bun", "run", "src/server.ts"]
