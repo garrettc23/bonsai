@@ -96,7 +96,7 @@ function seedThread(thread_id: string, outboundMessageId?: string) {
               to: "billing@hospital.example",
               from: "patient@example.com",
               subject: "Appeal",
-              body_markdown: "...",
+              body_text: "...",
               thread_id,
             },
           ]

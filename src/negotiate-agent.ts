@@ -156,7 +156,7 @@ async function runEmailAttempt(opts: {
         provider_email: opts.provider_email,
         user_email: opts.user_email,
         reply_to_subject: latest?.subject ?? "Appeal",
-        latest_outbound_body: latest?.body_markdown ?? "",
+        latest_outbound_body: latest?.body_text ?? "",
         client: client as MockEmailClient,
         anthropic: opts.anthropic,
       });
@@ -170,7 +170,7 @@ async function runEmailAttempt(opts: {
   // (src/server/webhooks.ts) catches a rep reply and calls stepNegotiation.
   const finalThread = loadThread(thread_id);
   const messages = [
-    ...finalThread.outbound.map((m) => ({ role: "outbound" as const, subject: m.subject, body: m.body_markdown, ts: m.sent_at })),
+    ...finalThread.outbound.map((m) => ({ role: "outbound" as const, subject: m.subject, body: m.body_text, ts: m.sent_at })),
     ...finalThread.inbound.map((m) => ({ role: "inbound" as const, subject: m.subject, body: m.body_text, ts: m.received_at })),
   ].sort((a, b) => a.ts.localeCompare(b.ts));
 

@@ -293,7 +293,7 @@ export async function runNegotiationPhase(
           provider_email: providerEmail,
           user_email: patientEmail,
           reply_to_subject: latest?.subject ?? report.appeal.subject,
-          latest_outbound_body: latest?.body_markdown ?? "",
+          latest_outbound_body: latest?.body_text ?? "",
           client: client as MockEmailClient,
         });
         state = await stepNegotiation({ state, client });
@@ -305,7 +305,7 @@ export async function runNegotiationPhase(
     const final = loadThread(thread_id);
     const messages: ThreadMessage[] = [];
     for (const m of final.outbound) {
-      messages.push({ role: "outbound", subject: m.subject, body: m.body_markdown, ts: m.sent_at });
+      messages.push({ role: "outbound", subject: m.subject, body: m.body_text, ts: m.sent_at });
     }
     for (const m of final.inbound) {
       messages.push({ role: "inbound", subject: m.subject, body: m.body_text, ts: m.received_at });

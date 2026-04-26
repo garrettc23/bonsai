@@ -194,7 +194,7 @@ describe("stepNegotiation — tool dispatch", () => {
             name: "send_email",
             input: {
               subject: "Re: Re: Appeal",
-              body_markdown:
+              body_text:
                 "Thank you for confirming receipt. Per our initial appeal dated last week, the EOB clearly states patient responsibility of $100. Please reduce the balance accordingly. We expect a response within 14 days.",
             },
           },
@@ -285,6 +285,55 @@ describe("stepNegotiation — tool dispatch", () => {
   });
 });
 
+describe("stepNegotiation — no markdown leaks to wire", () => {
+  test("persisted outbound body_text has zero ** runs even when Claude returns markdown", async () => {
+    // Bypass the humanizer (it would also try to strip markdown, but we
+    // want to prove the wire-side stripper catches drift on its own).
+    process.env.BONSAI_DISABLE_HUMANIZER = "1";
+    try {
+      const { state, client } = await makeStartedState();
+      await client.ingestInbound({
+        from: "billing@hospital.example",
+        to: "patient@example.com",
+        subject: "Re: Appeal",
+        body_text: "We received your appeal.",
+        thread_id: state.thread_id,
+      });
+      const { client: anth } = mockAnthropic([
+        {
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "send_email",
+              input: {
+                subject: "Re: Re: Appeal",
+                body_text:
+                  "Hello,\n\n**We are disputing** the `$900` balance-billing charge on _claim_number_ CLM-001. ## Background — per the EOB, patient responsibility is $100. We expect a written response within 14 days.\n\n> The EOB clearly states in-network status.\n\n* Per the No Surprises Act\n\nThanks,\nPatient",
+              },
+            },
+          ],
+        },
+      ]);
+      await stepNegotiation({ state, client, anthropic: anth, threadsDir: tmpDir });
+      const { loadThread } = await import("../src/clients/email-mock.ts");
+      const t = loadThread(state.thread_id, tmpDir);
+      expect(t.outbound.length).toBe(2);
+      const persisted = t.outbound[1].body_text;
+      expect(persisted).not.toContain("**");
+      expect(persisted).not.toMatch(/^#+\s/m);
+      expect(persisted).not.toMatch(/^>\s/m);
+      expect(persisted).not.toMatch(/^\*\s/m);
+      expect(persisted).not.toContain("`");
+      // Snake_case identifier survives.
+      expect(persisted).toContain("claim_number CLM-001");
+    } finally {
+      delete process.env.BONSAI_DISABLE_HUMANIZER;
+    }
+  });
+});
+
 describe("stepNegotiation — idempotency advance", () => {
   test("last_seen_inbound_ts advances to the newest inbound timestamp", async () => {
     const { state, client } = await makeStartedState();
@@ -317,7 +366,7 @@ describe("stepNegotiation — idempotency advance", () => {
             name: "send_email",
             input: {
               subject: "Re: Re: Appeal",
-              body_markdown:
+              body_text:
                 "Thanks for the update. Per the EOB, please confirm balance has been adjusted to the patient responsibility of $100. Awaiting written confirmation within 14 days.",
             },
           },
@@ -412,7 +461,7 @@ describe("cc threading — user stays in the loop", () => {
             name: "send_email",
             input: {
               subject: "Re: Re: Appeal",
-              body_markdown:
+              body_text:
                 "Per our prior appeal, EOB patient responsibility is $100. We expect a written response within 14 days confirming the balance has been adjusted accordingly to comply with the No Surprises Act.",
             },
           },
