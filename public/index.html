@@ -623,6 +623,16 @@
       </div>
       <div class="cmp-body">
         <ol class="switch-steps" id="switch-steps"></ol>
+        <div class="switch-fields">
+          <label class="switch-field">
+            <span class="switch-field-label">Which bill is this switch for?</span>
+            <select id="switch-bill-select" class="switch-select"></select>
+          </label>
+          <label class="switch-field">
+            <span class="switch-field-label">New monthly amount (USD)</span>
+            <input type="number" inputmode="decimal" min="0" step="0.01" id="switch-amount-input" class="switch-input" placeholder="59.99" />
+          </label>
+        </div>
         <div class="switch-note" id="switch-note"></div>
         <div class="switch-amount-error" id="switch-amount-error" hidden></div>
       </div>

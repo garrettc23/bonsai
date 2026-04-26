@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.31.0] - 2026-04-26
+
+### Fixed
+- **Comparison didn't refresh after deleting bills.** The optimistic-delete path updated the local bills cache + re-rendered the Bills list, but never touched `offersCache`. If the user was on the Comparison tab when they deleted the last bill, the offers stayed visible until the next page nav. Now the post-delete handler also calls `loadOffers()` and re-renders the Comparison view if it's currently active. v0.1.27.0's strict-filter does the heavy lifting on the server side; this is just the SPA wire-up that was missing.
+
+### Changed
+- **Switch modal now picks which bill the switch is for.** The previous flow read `drawerState.row.audit.run_id`, which only worked if the user had a bill drawer open. Clicking Switch from the top-level Comparison nav (the most common entry) hit a "Couldn't find the bill this offer belongs to" error. New flow:
+  - Bill dropdown populated from `historyCache.audits`, defaulting to the open drawer row → analyzer-provider match → first bill.
+  - Editable monthly-amount input pre-filled with the offer's recommended price (the user can override if their actual signup price differs).
+  - Single primary "Switch completed" button. On submit, posts the chosen `run_id` + new amount + provider to `/api/switch-complete`.
+- **Bills list reflects the latest completed switch.** After a switch is recorded, the row's vendor + balance read from `completed_switches[-1].new_provider` / `.new_amount` so the Negotiation tab shows what the user is actually paying now, not the stale pre-switch values. Audit-time data is still preserved on the report — display layer only.
+
 ## [0.1.30.0] - 2026-04-26
 
 ### Changed

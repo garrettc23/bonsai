@@ -42,30 +42,39 @@ describe("/api/switch-complete server handler", () => {
   });
 });
 
-describe("Switch modal — single 'Switch completed' button (FIX N)", () => {
-  test("modal markup has exactly one primary action button", () => {
+describe("Switch modal — bill picker + amount input (FIX Q)", () => {
+  test("modal markup has bill dropdown, amount input, and the primary button", () => {
     const html = readFileSync(join(__dirname, "..", "public", "index.html"), "utf-8");
     expect(html).toContain('id="switch-complete"');
     expect(html).toContain(">Switch completed<");
-    // The two-step flow's secondary buttons are gone
-    expect(html).not.toContain('id="switch-dismiss"');
-    expect(html).not.toContain('id="switch-amount-input"');
-    expect(html).not.toContain('id="switch-amount-cancel"');
-    expect(html).not.toContain('id="switch-amount-submit"');
+    expect(html).toContain('id="switch-bill-select"');
+    expect(html).toContain('id="switch-amount-input"');
   });
 
-  test("openSwitchModal posts to /api/switch-complete on click", () => {
+  test("openSwitchModal posts to /api/switch-complete with the chosen run_id and amount", () => {
     expect(APP_JS).toContain("/api/switch-complete");
+    expect(APP_JS).toMatch(/run_id:\s*chosenRunId/);
+    expect(APP_JS).toMatch(/new_amount:\s*amount/);
     expect(APP_JS).toMatch(/new_provider:\s*recommendedName/);
   });
 
-  test("new_amount uses the offer's recommended price (no user input)", () => {
-    // The user signed up for the recommended plan; that price IS the new
-    // amount. Asking them to re-type it after they just read it on the
-    // card is busywork.
+  test("dropdown is populated from historyCache.audits", () => {
     const fnStart = APP_JS.indexOf("function openSwitchModal");
-    const fnSlice = APP_JS.slice(fnStart, fnStart + 5000);
-    expect(fnSlice).toMatch(/new_amount:\s*Number\(offer\.offered/);
+    const fnSlice = APP_JS.slice(fnStart, fnStart + 6000);
+    expect(fnSlice).toMatch(/historyCache\?\.audits/);
+    expect(fnSlice).toContain("switch-bill-select");
+  });
+
+  test("amount input defaults to the offer's recommended price (editable)", () => {
+    const fnStart = APP_JS.indexOf("function openSwitchModal");
+    const fnSlice = APP_JS.slice(fnStart, fnStart + 6000);
+    expect(fnSlice).toMatch(/offer\.offered/);
+    expect(fnSlice).toMatch(/amountInput\.value/);
+  });
+
+  test("validation message replaces the old 'Couldn't find the bill' error", () => {
+    expect(APP_JS).not.toContain("Couldn't find the bill this offer belongs to");
+    expect(APP_JS).toContain("Pick which bill this switch is for.");
   });
 
   test("activity timeline renders completed_switches entries", () => {
@@ -73,6 +82,31 @@ describe("Switch modal — single 'Switch completed' button (FIX N)", () => {
     const fnSlice = APP_JS.slice(fnStart, fnStart + 8000);
     expect(fnSlice).toContain("completed_switches");
     expect(fnSlice).toContain("Switched provider");
+  });
+});
+
+describe("Bills list reflects the latest completed switch (FIX Q)", () => {
+  test("vendor + balance read from completed_switches[-1] when present", () => {
+    // After the user records a switch, the row's vendor and balance
+    // should reflect the new provider + new monthly amount instead of
+    // the stale audit-time values.
+    const idx = APP_JS.indexOf("latestSwitch");
+    expect(idx).toBeGreaterThan(-1);
+    const slice = APP_JS.slice(idx, idx + 600);
+    expect(slice).toContain("completed_switches");
+    expect(slice).toMatch(/new_provider/);
+    expect(slice).toMatch(/new_amount/);
+    expect(slice).toMatch(/switchedVendor\s*\?\?/);
+    expect(slice).toMatch(/switchedBalance\s*\?\?/);
+  });
+});
+
+describe("Delete refreshes the Comparison cache (FIX P)", () => {
+  test("deleteBill calls loadOffers + re-renders Comparison if visible", () => {
+    const fnStart = APP_JS.indexOf("async function deleteBill");
+    const fnSlice = APP_JS.slice(fnStart, fnStart + 3000);
+    expect(fnSlice).toMatch(/await loadOffers\(\)/);
+    expect(fnSlice).toMatch(/currentNav === "offers".*renderOffers/s);
   });
 });
 
