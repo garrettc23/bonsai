@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.16.0] - 2026-04-26
+
+### Changed
+- **Hunting hero copy + live elapsed-time counter.** Body text now reads "Searching the web for cheaper providers to lower your recurring expenses. This usually takes under 30 seconds. Xs elapsed" — was "...that match your recent audit." The "Xs elapsed" now ticks every second via a 1s `setInterval` that targets `.empty-hero.hunting .hunt-elapsed` directly. The interval self-clears when the hero leaves the DOM (chrome restored, user navigated away, hero replaced), so callers don't need explicit teardown.
+- **Hunt poll cap dropped from 5 minutes to 30 seconds, with a "You're with the best provider" empty state.** Real hunts that succeed almost always return inside 30s — keeping the spinner up for 5 minutes was a liveness lie. After 30s the page now flips to the regular Comparison chrome (banner hidden, "Recommended" / "All" filter chips) and renders a centered "You're with the best provider" card inside the grid: "Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill." A new offer-hunt run on a subsequent audit (or a "Switch for me" click) clears the timed-out flag and re-polls normally. The card reuses the `.empty-hero-card` visual language (1.5px ink-32% border, 12px radius, display font for the title) so the timed-out state and the idle "No alternatives yet" hero feel like the same family.
+
 ## [0.1.15.0] - 2026-04-26
 
 ### Fixed
