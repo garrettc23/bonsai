@@ -48,6 +48,21 @@ export interface NegotiationState {
   final_acceptable_floor: number;
   /** History of message ids seen, to drive loop termination. */
   last_seen_inbound_ts: string;
+  /** ISO timestamp of the most recent outbound email we sent. Used by the
+   * persistent-mode advance pass to compute working-hours-elapsed since
+   * the last contact attempt. */
+  email_outbound_sent_at?: string;
+  /** ISO timestamp of the most recent inbound reply observed. Distinct
+   * from `last_seen_inbound_ts` (which only advances after a successful
+   * step) — this is the raw "did we hear back at all" signal. */
+  last_inbound_received_at?: string | null;
+  /** PendingRun id this thread belongs to. Set by persistent-mode kickoff
+   * so the advance pass can look up provider phone + contact when
+   * escalating to voice. Undefined for stand-alone CLI runs. */
+  run_id?: string;
+  /** ISO timestamp set when the advance pass dialed voice for this thread.
+   * Idempotent gate — once set, advance does not redial. */
+  escalated_to_voice_at?: string;
   outcome: NegotiationOutcome;
   /** Free-form user directives from the feedback drawer (e.g. "only email, no
    * calls", "don't mention hardship yet"). Prepended to the system prompt on
@@ -303,6 +318,10 @@ export interface StartOpts {
   /** CC recipients (typically the user's email) copied on every outbound.
    * Persisted on NegotiationState so follow-ups reuse the list. */
   cc?: string[];
+  /** PendingRun id this thread belongs to. Persisted on NegotiationState
+   * so the persistent-mode advance pass can look up provider_phone +
+   * contact for voice escalation without scanning every run on disk. */
+  run_id?: string;
   /** Optional Anthropic client. Tests inject a mock; production callers
    * leave undefined and a fresh client is created. Forwarded to the
    * humanizer so its outbound rewrite reuses the same mock. */
@@ -360,11 +379,14 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     provider_email,
     final_acceptable_floor: floor,
     last_seen_inbound_ts: new Date(0).toISOString(),
+    email_outbound_sent_at: new Date().toISOString(),
+    last_inbound_received_at: null,
     outcome: { status: "in_progress" },
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
     prior_attempts_summary: opts.prior_attempts_summary,
     cc: opts.cc,
+    run_id: opts.run_id,
   };
   return { thread_id, sent, state };
 }
@@ -415,6 +437,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
 
   let newOutcome: NegotiationOutcome = { status: "in_progress" };
   let terminatedCleanly = false;
+  let outboundSentAt: string | undefined;
 
   for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
     const response = await anthropic.messages.create({
@@ -462,6 +485,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
           cc: state.cc,
         };
         const sent = await client.send(out);
+        outboundSentAt = sent.sent_at ?? new Date().toISOString();
         toolResults.push({
           type: "tool_result",
           tool_use_id: block.id,
@@ -519,6 +543,8 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
   const nextState: NegotiationState = {
     ...state,
     last_seen_inbound_ts: latestTs,
+    last_inbound_received_at: latestTs,
+    email_outbound_sent_at: outboundSentAt ?? state.email_outbound_sent_at,
     outcome: newOutcome,
   };
   return nextState;

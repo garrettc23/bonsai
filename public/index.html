@@ -273,7 +273,10 @@
                     <div class="eyebrow">Opportunities to lower this bill</div>
                     <div class="opps-title">We think we can save you</div>
                   </div>
-                  <div class="opps-total" id="opps-total">—</div>
+                  <div class="opps-total-wrap">
+                    <div class="opps-total" id="opps-total">—</div>
+                    <div class="opps-total-qualifier" id="opps-total-qualifier" hidden>estimated</div>
+                  </div>
                 </div>
                 <ul class="opps-list" id="opps-list"></ul>
               </section>
@@ -601,7 +604,30 @@
       </div>
       <div class="confirm-actions">
         <button type="button" class="btn btn-ghost" id="cmp-dismiss">Dismiss</button>
-        <button type="button" class="btn btn-primary" id="cmp-switch">Switch for me</button>
+        <button type="button" class="btn btn-primary" id="cmp-switch">Switch</button>
+      </div>
+    </div>
+
+    <!-- Switch instructions modal (opened from Switch button on offer cards
+         and inside the Compare modal). Static how-to — Bonsai doesn't sign
+         users up; we hand them the steps. -->
+    <div class="confirm-scrim" id="switch-scrim" hidden></div>
+    <div class="confirm-modal cmp-modal" id="switch-modal" hidden role="dialog" aria-labelledby="switch-title">
+      <div class="cmp-head">
+        <div>
+          <div class="eyebrow" id="switch-category">—</div>
+          <h3 class="confirm-title" id="switch-title">How to switch</h3>
+        </div>
+        <button type="button" class="drawer-close" id="switch-close" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+      <div class="cmp-body">
+        <ol class="switch-steps" id="switch-steps"></ol>
+        <div class="switch-note" id="switch-note"></div>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-primary" id="switch-ok">Got it</button>
       </div>
     </div>
 

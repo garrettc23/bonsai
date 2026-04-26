@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.25.0] - 2026-04-26
+
+### Fixed
+- **Dismissing an opportunity now drops the headline savings figure 1:1.** The opportunity total was being clamped to the bill's max-savings cap, so dismissing a $200 opp off a $7,000 raw total kept showing $5,000 (the cap) until raw fell below cap — users perceived the dismiss as broken. The headline now shows the raw sum of visible opportunity estimates with a small "estimated" qualifier next to it. The post-resolution Receipts page keeps its per-receipt clamp since real-world saved can't exceed the bill amount.
+- **Phone-only contacts now route to voice instead of email.** Falls out of the new chooseChannel rules; covered by a regression test.
+
+### Changed
+- **"Switch for me" button → "Switch" + instructions modal.** The card-level Switch button (and the matching button inside the Compare modal) used to re-fire the offer-hunt agent on click — wrong, because Bonsai doesn't actually sign users up for new services. Both buttons now open a static three-step instructions modal: sign up at the recommended provider, match your current plan tier, cancel the existing service after the new one is active. Step copy adapts to the offer category (Rx, insurance, internet/telecom, utility/energy).
+- **Channel routing is now contact-aware, not amount-aware.** The old rule (`balance_billing && total ≥ $1500 → voice`) was a medical-only relic from the v0.1.x era. New auto rules: email-only contact → email, phone-only → voice, both on file → persistent (email first, escalate to voice after 24 working hours of no reply). The choice is re-evaluated at approve time so contact edits between audit and approve actually take effect.
+
+### Added
+- **24-working-hour voice escalation in persistent mode.** When both email and phone are on file, Bonsai now sends the appeal via email and waits for a reply. If the rep goes silent for 24 working hours (Mon-Fri 9-17 in `America/Los_Angeles` by default), the next `/api/history` poll triggers a real ElevenLabs call to the same provider. New helper `src/lib/business-hours.ts` (`workingHoursElapsed`) handles tz-correct idle math; new `src/server/persistent-advance.ts` is the idempotent escalation pass with a per-user 5-minute throttle hooked into `handleHistory`.
+- **Persistent-mode `NegotiationState` carries `email_outbound_sent_at`, `last_inbound_received_at`, `escalated_to_voice_at`, and `run_id`** so the advance pass can correlate stale email threads back to their bill run for voice dialing without scanning every run on disk.
+
 ## [0.1.24.0] - 2026-04-26
 
 ### Added

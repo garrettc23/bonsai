@@ -897,12 +897,25 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink-soft);
   margin-top: 6px;
 }
+.opps-total-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
 .opps-total {
   font-family: var(--font-display);
   font-size: 30px;
   letter-spacing: -0.02em;
   color: var(--green);
   line-height: 1;
+}
+.opps-total-qualifier {
+  font-family: var(--font-display);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
 }
 .opps-list {
   list-style: none;
@@ -2735,6 +2748,32 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   transform: scale(0.96);
   transition: opacity 180ms ease, transform 180ms ease;
   pointer-events: none;
+}
+.switch-steps {
+  margin: 0;
+  padding: 0 0 0 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--ink);
+  line-height: 1.5;
+}
+.switch-steps li::marker {
+  color: var(--green);
+  font-weight: 600;
+}
+.switch-steps a {
+  color: var(--green);
+  text-decoration: underline;
+}
+.switch-note {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.5;
 }
 @media (max-width: 720px) {
   .confirm-modal.cmp-modal { width: calc(100vw - 24px); }
