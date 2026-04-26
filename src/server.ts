@@ -34,6 +34,7 @@ import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
 import type { RepPersona as VoicePersona } from "./voice/simulator.ts";
 import { BillContact, BillKind, hasContactChannel, type BillContact as BillContactT } from "./types.ts";
+import { filterByProbability, PROBABILITY_FLOOR, OPPS_TOOL } from "./opps-filter.ts";
 import {
   runOfferHunt,
   saveOfferHunt,
@@ -239,10 +240,12 @@ interface PendingRun {
    * them without a second Opus call.
    */
   complaint_opportunities?: Array<{
+    opp_id: string;
     title: string;
     description: string;
     dollar_estimate: number;
     icon: string;
+    probability: number;
   }>;
 }
 
@@ -689,7 +692,8 @@ async function draftComplaintAndKickoff(
     "  - Closes with a deadline + escalation path.",
     "Tone: firm, professional, never threatening. 200-350 words. No prose outside the tool call.",
     "",
-    "Also propose 3-5 strategy opportunities — specific tactics the user could pursue. Each gets a short title + 1-2 sentence description + an upper-bound dollar estimate (or 0 if money isn't the point).",
+    "Also propose 3-5 strategy opportunities — specific tactics the user could pursue. Each gets a short stable opp_id slug, a title, a 1-2 sentence description, an upper-bound dollar estimate (or 0 if money isn't the point), an icon, and a probability (0.0-1.0) of actually working.",
+    "Only emit opportunities with probability >= 0.5. Skip speculative angles — better three high-confidence opportunities than five mixed.",
   ].join("\n");
 
   const userMsg = [
@@ -714,14 +718,21 @@ async function draftComplaintAndKickoff(
           maxItems: 5,
           items: {
             type: "object",
-            required: ["title", "description", "dollar_estimate", "icon"],
+            required: ["opp_id", "title", "description", "dollar_estimate", "icon", "probability"],
             properties: {
+              opp_id: { type: "string", description: "Short stable slug, e.g. 'demand-refund' or 'escalate-bbb'." },
               title: { type: "string" },
               description: { type: "string" },
               dollar_estimate: { type: "number", minimum: 0 },
               icon: {
                 type: "string",
                 enum: ["shield", "scan", "pulse", "doc", "phone", "mail", "sparkle", "check"],
+              },
+              probability: {
+                type: "number",
+                minimum: 0,
+                maximum: 1,
+                description: "Likelihood this tactic actually works for the user (0.0-1.0). Only emit >= 0.5.",
               },
             },
           },
@@ -747,7 +758,14 @@ async function draftComplaintAndKickoff(
     subject: string;
     letter_markdown: string;
     headline: string;
-    opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+    opportunities: Array<{
+      opp_id: string;
+      title: string;
+      description: string;
+      dollar_estimate: number;
+      icon: string;
+      probability: number;
+    }>;
   };
 
   const run = loadPending(runId);
@@ -756,7 +774,7 @@ async function draftComplaintAndKickoff(
   run.partial_report.appeal.subject = drafted.subject;
   run.partial_report.analyzer.summary.headline = drafted.headline;
   run.partial_report.summary.outcome_detail = "Negotiation in progress.";
-  run.complaint_opportunities = drafted.opportunities;
+  run.complaint_opportunities = filterByProbability(drafted.opportunities);
   savePending(run);
 
   await kickoffNegotiation(runId);
@@ -1156,7 +1174,9 @@ async function handleThumbnail(req: Request): Promise<Response> {
  * Bill-specific negotiation strategies. Runs Opus on the audit report and
  * asks it to propose 3-6 strategies that actually apply to THIS bill —
  * no generic "get a competitor quote" on a dental bill, no "charity care"
- * on a subscription. Each strategy has a grounded dollar estimate.
+ * on a subscription. Each strategy has a grounded dollar estimate and a
+ * probability of working; we filter out anything below PROBABILITY_FLOOR
+ * before the user ever sees it.
  */
 async function handleOpportunities(req: Request): Promise<Response> {
   const body = (await req.json()) as { run_id?: string };
@@ -1167,7 +1187,7 @@ async function handleOpportunities(req: Request): Promise<Response> {
   // Complaint flow: opportunities were drafted at intake time and stashed
   // on the run. Just return them — no second Opus call.
   if (run.complaint_opportunities && !run.plan_edits?.trim()) {
-    return Response.json({ opportunities: run.complaint_opportunities });
+    return Response.json({ opportunities: filterByProbability(run.complaint_opportunities) });
   }
   // Fast path: ship a hand-curated opportunities list for any fixture
   // that has fixtures/<name>.opportunities.json next to its PDF. Skips a
@@ -1178,9 +1198,16 @@ async function handleOpportunities(req: Request): Promise<Response> {
   const cachedOppsPath = join(FIXTURES_DIR, `${run.fixture_name}.opportunities.json`);
   if (existsSync(cachedOppsPath) && !run.plan_edits?.trim()) {
     const cached = JSON.parse(readFileSync(cachedOppsPath, "utf-8")) as {
-      opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+      opportunities: Array<{
+        opp_id: string;
+        title: string;
+        description: string;
+        dollar_estimate: number;
+        icon: string;
+        probability: number;
+      }>;
     };
-    return Response.json({ opportunities: cached.opportunities });
+    return Response.json({ opportunities: filterByProbability(cached.opportunities) });
   }
 
   const r = run.partial_report;
@@ -1203,6 +1230,8 @@ async function handleOpportunities(req: Request): Promise<Response> {
     "- Dollar estimates should be grounded: billing-error disputes = defensible amount. Negotiation of remaining balance = realistic percentage (typically 5-25%). Loophole/discount = specific policy-based amount if inferrable, else a modest %.",
     "- Titles are 2-6 words, imperative voice ('Dispute billing errors', 'Apply for charity care', 'Demand retention credit').",
     "- Descriptions are 1-2 sentences, concrete, reference the actual bill (provider name, line items) when it sharpens the point.",
+    `- Every opportunity MUST have a probability >= ${PROBABILITY_FLOOR} of actually reducing this charge. Skip speculative angles — better three high-confidence opportunities than seven mixed ones.`,
+    "- Each opp_id is a short stable slug describing the strategy (e.g. 'dispute-duplicate-cpt', 'apply-charity-care', 'negotiate-prompt-pay').",
     "- Do not include prose commentary outside the tool call.",
   ].join("\n");
 
@@ -1217,36 +1246,6 @@ async function handleOpportunities(req: Request): Promise<Response> {
     findingsText,
     run.plan_edits ? `\nUser directives: ${run.plan_edits}` : "",
   ].filter(Boolean).join("\n");
-
-  const OPPS_TOOL: Anthropic.Tool = {
-    name: "propose_opportunities",
-    description: "Return 3-6 bill-specific strategies to lower this bill.",
-    input_schema: {
-      type: "object",
-      required: ["opportunities"],
-      properties: {
-        opportunities: {
-          type: "array",
-          minItems: 3,
-          maxItems: 6,
-          items: {
-            type: "object",
-            required: ["title", "description", "dollar_estimate", "icon"],
-            properties: {
-              title: { type: "string", description: "2-6 words, imperative." },
-              description: { type: "string", description: "1-2 sentences, concrete, references the bill when helpful." },
-              dollar_estimate: { type: "number", minimum: 0, description: "Realistic savings in dollars. 0 if truly unknown." },
-              icon: {
-                type: "string",
-                enum: ["shield", "scan", "pulse", "doc", "phone", "mail", "pill", "hospital", "sparkle", "check"],
-                description: "Pick the icon that best matches the strategy's vibe.",
-              },
-            },
-          },
-        },
-      },
-    },
-  };
 
   try {
     const anthropic = new Anthropic();
@@ -1263,9 +1262,16 @@ async function handleOpportunities(req: Request): Promise<Response> {
     );
     if (!tool) return Response.json({ error: "Model did not return opportunities" }, { status: 502 });
     const { opportunities } = tool.input as {
-      opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+      opportunities: Array<{
+        opp_id: string;
+        title: string;
+        description: string;
+        dollar_estimate: number;
+        icon: string;
+        probability: number;
+      }>;
     };
-    return Response.json({ opportunities });
+    return Response.json({ opportunities: filterByProbability(opportunities) });
   } catch (err) {
     return Response.json({ error: (err as Error).message }, { status: 500 });
   }
