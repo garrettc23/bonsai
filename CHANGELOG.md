@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.24.0] - 2026-04-26
+
+### Added
+- **MIT license + governance scaffolding for OSS launch.** Adds `LICENSE` (MIT, copyright "Bonsai contributors"), `CONTRIBUTING.md` (prerequisites, local setup, PR style, what's welcome, what's out-of-scope without a design doc), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 by reference), and `.github/{ISSUE_TEMPLATE/{bug,feature}.md, PULL_REQUEST_TEMPLATE.md}`. `package.json` gains `"license": "MIT"`.
+- **`validateRequiredEnv()` on startup.** New exported helper in `src/env.ts` that exits 1 with a readable error if `ANTHROPIC_API_KEY` or `BONSAI_PUBLIC_DOMAIN` is missing or empty. Wired into `src/server.ts`, `scripts/run-bonsai.ts`, and each of `scripts/day1-poc.ts` through `day5-voice-call.ts`. Tests skip the call (passive `.env` loader is unchanged), so `bun run test` continues to work without keys set. Verified: `env -i bun run scripts/run-bonsai.ts` exits 1 with the readable error, no stack trace.
+- **Mock-mode warning when Resend env is unset.** `autoEmailClient()` now logs a one-time `console.warn` when `RESEND_API_KEY`/`RESEND_FROM` aren't configured, so a fork operator notices they're in `MockEmailClient` mode instead of silently writing threads to disk forever.
+
+### Changed
+- **README repositioned for general-purpose framing.** Drops the medical-only hero ("Medical bill audit + negotiation, end-to-end" + Devpost line) and leads with **"Agents to manage personal bills."** New "Why this exists" + "The five agents" sections cover the canonical product vocabulary: analyzer / appeal / contact resolver / negotiation / comparison. Adds MIT + Bun version badges, a Configuration table for every env var, and Contributing pointers. Backups section preserved from 0.1.23.0.
+- **`.env.example` restructured into REQUIRED + OPTIONAL sections.** `BONSAI_PUBLIC_DOMAIN` is now REQUIRED — a forcing function so a fresh fork can't accidentally ship with the original operator's domain in any rendered URL. Documents `BONSAI_AUDIT_DAILY_LIMIT` (verified wired in `src/server.ts`), `SENTRY_DSN` (reserved), and the `BACKUP_S3_*` vars introduced in 0.1.23.0.
+- **`package.json` description.** Replaced "Agent that finds errors in medical bills and drafts appeal letters" with the v0.1.24 framing covering insurance, utilities, medical, credit, and subscription costs.
+
+### Fixed
+- **Operator personal info scrubbed from public assets and code comments.** Replaced every occurrence of `bonsai.firebaystudios.com`, `gcahill@firebaystudios.com`, `garrett@cointracker.com`, and the operator's name in OG meta blocks (`public/{index,landing,terms,privacy}.html`), the OG image SVG footer, the landing-page footer mailto, `scripts/resend-inbound-smoke.sh`, `scripts/test-resend.ts` JSDoc + example error messages, and `src/clients/email-resend.ts` comments. Test fixtures using the IETF-reserved `@example.com` TLD are intentionally untouched.
+- **Hardcoded `https://bonsai.app/` removed from inbound-reply user notifications.** `src/server/webhooks.ts:133` now reads `BONSAI_PUBLIC_DOMAIN` (with a `your-bonsai-domain.com` fallback string) so a fork operator's reply emails point at their own domain instead of an unrelated host.
+
 ## [0.1.23.0] - 2026-04-26
 
 ### Added
