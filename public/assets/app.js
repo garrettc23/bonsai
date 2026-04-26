@@ -3427,11 +3427,23 @@ function renderOffers() {
   const grid = $("#offers-grid");
   if (grid) {
     grid.innerHTML = "";
-    let visible;
-    if (offersFilter === "All") visible = offersCache;
-    else if (offersFilter === "Recommended") visible = offersCache.filter((o) => o.recommended);
-    else visible = offersCache.filter((o) => o.category === offersFilter);
-    for (const o of visible) grid.appendChild(buildOfferCard(o));
+    if (offersCache.length === 0 && offersPollTimedOut) {
+      // 90s hunt completed without recording any offers. Tell the user
+      // they're already on the best provider rather than leaving an
+      // unexplained empty grid sitting under the chrome.
+      const msg = document.createElement("div");
+      msg.className = "offers-best-provider";
+      msg.innerHTML = `
+        <h2 class="offers-best-provider-title">You're with the best provider</h2>
+        <p class="offers-best-provider-body">Bonsai searched the web for cheaper alternatives and didn't find one. We'll check again the next time you upload a bill.</p>`;
+      grid.appendChild(msg);
+    } else {
+      let visible;
+      if (offersFilter === "All") visible = offersCache;
+      else if (offersFilter === "Recommended") visible = offersCache.filter((o) => o.recommended);
+      else visible = offersCache.filter((o) => o.category === offersFilter);
+      for (const o of visible) grid.appendChild(buildOfferCard(o));
+    }
   }
 
   // Accept-all: run hunts for every recommended offer that has a baseline.
