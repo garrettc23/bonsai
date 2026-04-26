@@ -2670,7 +2670,7 @@ function renderComparisonHuntingHero(view) {
   hero.innerHTML = `
     <div class="empty-hero-card">
       <h2 class="empty-hero-title">Bonsai is hunting alternatives…</h2>
-      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes 30–90 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
+      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes under 30 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
       <div class="hunt-status" style="justify-content:center"><span class="pulse-dot"></span> Searching…</div>
     </div>`;
 
@@ -2902,10 +2902,10 @@ let offersPollStartedAt = 0;
 let offersPollTimedOut = false;
 let offersHuntTickerId = null;
 
-// 90s cap matches the user-facing "30–90 seconds" copy. Past that we give
-// up and surface the empty Comparison page instead of leaving the spinner
-// turning forever — most hunts that beat the cap return ≤60s.
-const OFFERS_POLL_CAP_MS = 90 * 1000;
+// 30s cap matches the user-facing "under 30 seconds" copy. Past that we
+// give up and surface the empty Comparison page instead of leaving the
+// spinner turning forever.
+const OFFERS_POLL_CAP_MS = 30 * 1000;
 
 async function loadOffers() {
   try {
