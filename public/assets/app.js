@@ -175,11 +175,6 @@ function clearUnsavedGuard() { unsavedGuard = null; }
  */
 let stagedFilesRef = null;
 function setStagedFilesRef(getter) { stagedFilesRef = getter; }
-// Companion setter so success-path code (e.g. approveAndRun) can drop the
-// staged files when the workflow finishes — without it, the discard guard
-// thinks there's still a pending upload and pops a confirmation modal.
-let clearStagingRef = () => {};
-function setClearStagingRef(fn) { clearStagingRef = typeof fn === "function" ? fn : (() => {}); }
 
 // Group bills by normalized provider_name and assign Finder-style suffixes:
 // "Memorial Hospital", "Memorial Hospital (1)", "Memorial Hospital (2)".
@@ -292,13 +287,18 @@ function setWorkflowView(view) {
 /**
  * True when the user is mid-flow inside the Overview tab — has audited a
  * bill but not yet accepted, OR is staring at the audit progress view,
- * OR has staged files. Leaving any of these states drops the work.
+ * OR is mid-typing a complaint. Leaving any of these states drops work
+ * the user can't easily recreate (Claude tokens already spent on the
+ * audit, draft text typed by hand).
+ *
+ * Staged-but-not-yet-audited files are intentionally NOT counted here —
+ * those are cheap to re-drop and warning on every nav-away while there's
+ * a file in the dropzone is just noise.
  */
 function hasInFlightAuditWork() {
   if (currentWorkflowView === "progress") return true;
   if (currentWorkflowView === "review" && reviewState != null) return true;
   if (currentWorkflowView === "complaint" && hasComplaintInProgress()) return true;
-  if (hasStagedUpload()) return true;
   return false;
 }
 
@@ -963,10 +963,6 @@ async function init() {
     cancelPrefetch();
     renderStaging();
   }
-  // Expose to outside callers (approveAndRun) so they can drop staged
-  // files when the workflow finishes — otherwise hasStagedUpload() still
-  // reports true and showNav() pops a discard-confirmation modal.
-  setClearStagingRef(clearStaging);
 
   function flashStagingMessage(msg) {
     const grid = $("#dz-staging-grid");
@@ -2337,14 +2333,7 @@ async function approveAndRun() {
       throw new Error(j?.message ?? j?.error ?? (await res.text()));
     }
     await res.json();
-    // Clean up workflow state BEFORE navigating. Without this the
-    // navigation guard in showNav() (which inspects reviewState +
-    // currentWorkflowView + stagedFiles) would think the user has
-    // unfinished upload work and pop a discard-confirmation modal —
-    // exactly between "click Accept" and "land in Bills".
     reviewState = null;
-    clearStagingRef();
-    setWorkflowView("overview");
     await loadHistory();
     updateNavCounts();
     await showNav("bills");

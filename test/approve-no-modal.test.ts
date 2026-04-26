@@ -1,21 +1,20 @@
 /**
- * Structural contract test for approveAndRun in public/assets/app.js.
+ * Structural contract test guarding the "click Accept → land in Bills"
+ * flow against the discard-confirmation modal regression.
  *
- * The user reports that clicking "Accept and lower my bill" pops a modal
- * before navigating to Bills. Root cause was confirmDiscardUnsaved firing
- * inside showNav("bills") because workflow state (reviewState,
- * currentWorkflowView, stagedFiles) wasn't cleaned up first. Fix in
- * approveAndRun's success path: reviewState=null + clearStagingRef() +
- * setWorkflowView("overview") BEFORE showNav("bills").
+ * Two angles, same root cause:
+ *   1. approveAndRun's success path must not call confirmModal /
+ *      showApproveBlocker between the API success and the navigation.
+ *   2. hasInFlightAuditWork() must not key off staged files. Staged
+ *      uploads on the home page are cheap to re-drop — gating the
+ *      discard prompt on them was what fired the modal between click
+ *      and Bills view, and also what made dropping a file on home
+ *      pop a modal as soon as the user clicked any nav tab.
  *
- * This test asserts the success path of approveAndRun:
- *   - calls clearStagingRef(), setWorkflowView("overview"), reviewState=null
- *     before showNav
- *   - has zero confirmModal( calls
- *   - has zero showApproveBlocker( calls
- *
- * Catches a regression where someone re-introduces a modal between click
- * and navigate without requiring a real DOM (no jsdom in this repo).
+ * No jsdom in this repo, so this is a source-level structural check —
+ * cheap, fast, and catches the most likely regression (someone wiring
+ * the staging guard back in, or someone adding a confirmModal to the
+ * approve success path).
  *
  * Run: bun test test/approve-no-modal.test.ts
  */
@@ -30,8 +29,6 @@ const APP_JS = join(__dirname, "..", "public", "assets", "app.js");
 function extractFunction(source: string, header: string): string {
   const start = source.indexOf(header);
   if (start === -1) throw new Error(`Could not find function: ${header}`);
-  // Naïve brace matcher — fine for app.js where function bodies don't
-  // contain unbalanced braces inside string literals at the relevant scope.
   let depth = 0;
   let i = source.indexOf("{", start);
   if (i === -1) throw new Error(`No opening brace after: ${header}`);
@@ -48,50 +45,53 @@ function extractFunction(source: string, header: string): string {
 }
 
 const source = readFileSync(APP_JS, "utf-8");
-const body = extractFunction(source, "async function approveAndRun");
 
-// Success path = everything AFTER the `if (!res.ok) { ... throw ... }`
-// guard finishes — i.e. after the throw statement that ends the error
-// branch — up to the catch block. Anchoring on `throw new Error(j?.message`
-// is unique to the error tail; anything after runs only on success.
-const errorThrow = body.indexOf("throw new Error(j?.message");
+// Success path of approveAndRun = everything after the error-branch throw
+// through the catch block. Anchoring on `throw new Error(j?.message` is
+// unique to the error tail; anything after runs only on success.
+const approveBody = extractFunction(source, "async function approveAndRun");
+const errorThrow = approveBody.indexOf("throw new Error(j?.message");
 if (errorThrow === -1) throw new Error("Could not find error-branch throw");
-const successStart = body.indexOf("\n", errorThrow) + 1;
-const catchStart = body.indexOf("} catch (err)", successStart);
-if (catchStart === -1) throw new Error("Could not find catch block in approveAndRun");
-const successPath = body.slice(successStart, catchStart);
+const successStart = approveBody.indexOf("\n", errorThrow) + 1;
+const catchStart = approveBody.indexOf("} catch (err)", successStart);
+if (catchStart === -1) throw new Error("Could not find catch block");
+const approveSuccess = approveBody.slice(successStart, catchStart);
+
+const inFlightBody = extractFunction(source, "function hasInFlightAuditWork");
 
 describe("approveAndRun success path", () => {
   test("clears reviewState before navigating", () => {
-    expect(successPath).toContain("reviewState = null");
-  });
-
-  test("clears staged upload files (so the discard guard sees a clean state)", () => {
-    expect(successPath).toContain("clearStagingRef(");
-  });
-
-  test("resets the workflow view to overview", () => {
-    expect(successPath).toContain('setWorkflowView("overview")');
+    expect(approveSuccess).toContain("reviewState = null");
   });
 
   test("calls showNav('bills') exactly once", () => {
-    const matches = successPath.match(/showNav\("bills"\)/g) ?? [];
+    const matches = approveSuccess.match(/showNav\("bills"\)/g) ?? [];
     expect(matches.length).toBe(1);
   });
 
   test("has NO confirmModal calls", () => {
-    expect(successPath).not.toContain("confirmModal(");
+    expect(approveSuccess).not.toContain("confirmModal(");
   });
 
   test("has NO showApproveBlocker calls", () => {
-    expect(successPath).not.toContain("showApproveBlocker(");
+    expect(approveSuccess).not.toContain("showApproveBlocker(");
+  });
+});
+
+describe("hasInFlightAuditWork", () => {
+  test("does NOT count staged files as in-flight work", () => {
+    // Dropping a bill on the home page and clicking another tab must
+    // not pop the discard modal — staged files are cheap to re-drop.
+    expect(inFlightBody).not.toContain("hasStagedUpload");
   });
 
-  test("state cleanup runs BEFORE showNav (not after)", () => {
-    const cleanupIdx = successPath.indexOf("clearStagingRef(");
-    const navIdx = successPath.indexOf('showNav("bills")');
-    expect(cleanupIdx).toBeGreaterThan(-1);
-    expect(navIdx).toBeGreaterThan(-1);
-    expect(cleanupIdx).toBeLessThan(navIdx);
+  test("still guards the progress and review sub-views", () => {
+    expect(inFlightBody).toContain('currentWorkflowView === "progress"');
+    expect(inFlightBody).toContain('currentWorkflowView === "review"');
+    expect(inFlightBody).toContain("reviewState != null");
+  });
+
+  test("still guards an in-progress complaint draft", () => {
+    expect(inFlightBody).toContain("hasComplaintInProgress");
   });
 });
