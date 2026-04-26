@@ -9,18 +9,36 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const FLOW_STAGES = ["Extract", "Audit", "Negotiate", "Finalize"];
 
 /**
- * Clamp a "saved" amount to [0, original]. Saving more than the bill
- * existed for in the first place is physically impossible, and a
- * negative saved (final > original) means the agent inflated the
- * outcome — display $0 in that case rather than a confusing negative.
- * Used everywhere we render `patient_saved` / `saved` / `total_saved`.
+ * Clamp a "saved" amount to [0, cap]. Saving more than the user actually
+ * owes is impossible and confusing. Display $0 for negative or invalid
+ * inputs rather than a misleading negative number.
  */
-function clampSaved(saved, original) {
+function clampSaved(saved, cap) {
   const s = Number(saved ?? 0);
   if (!Number.isFinite(s) || s <= 0) return 0;
-  const orig = Number(original ?? 0);
-  if (orig > 0 && s > orig) return orig;
+  const c = Number(cap ?? 0);
+  if (c > 0 && s > c) return c;
   return s;
+}
+
+/**
+ * Maximum amount the user could possibly save on this bill — i.e., the
+ * upper bound for any "we can save you $X" number. For medical bills
+ * with an EOB, this is the EOB patient responsibility (what the user
+ * actually owes after insurance), NOT the bill's full charges (which
+ * may include amounts the insurer has already covered or that the
+ * provider is over-billing). For everything else, fall back to the
+ * bill's current balance due.
+ */
+function maxSavingsCap(report) {
+  const meta = report?.analyzer?.metadata ?? {};
+  const eobOwed = Number(meta.eob_patient_responsibility ?? 0);
+  const billDue =
+    Number(report?.summary?.original_balance ?? 0) ||
+    Number(meta.bill_current_balance_due ?? 0);
+  if (eobOwed > 0 && billDue > 0) return Math.min(eobOwed, billDue);
+  if (eobOwed > 0) return eobOwed;
+  return billDue;
 }
 
 /**
@@ -1110,14 +1128,20 @@ function updateNavCounts() {
   ).length;
   setNavCount("#nav-approval-count", pendingApprovals);
 
-  // Bills: anything that needs the user's attention right now — real
-  // audits in attention state (escalated / failed / awaiting / cancelled)
-  // plus mock rows tagged with an attentionReason that haven't been
-  // dismissed.
-  const auditsInAttention = audits.filter((a) => attentionReason(a)).length;
+  // Bills badge: only count *real* attention states — escalated, paused,
+  // agent error, verify-outcome. The "awaiting your approval" state is
+  // NOT a notification — the user just audited the bill and is staring
+  // at the plan-review screen; surfacing a sidebar badge while they're
+  // mid-flow is noise. The "Awaiting" chip still appears on the bill
+  // row itself for the case where they navigate away and come back.
+  const NOTIFY_KEYS = new Set(["error", "paused", "escalated", "verify_outcome"]);
+  const auditsInAttention = audits.filter((a) => {
+    const r = attentionReason(a);
+    return r && NOTIFY_KEYS.has(r.key);
+  }).length;
   const hiddenMocks = getHiddenMocks();
   const mocksInAttention = MOCK_RECURRING_BILLS.filter(
-    (b) => !hiddenMocks.has(b.id) && b.attentionReason,
+    (b) => !hiddenMocks.has(b.id) && b.attentionReason && NOTIFY_KEYS.has(b.attentionReason.key),
   ).length;
   setNavCount("#nav-bills-count", auditsInAttention + mocksInAttention);
 
@@ -1485,12 +1509,14 @@ async function loadOpportunities(report) {
       estimate: Number(o.dollar_estimate) || 0,
     }));
     const rawTotal = normalized.reduce((s, o) => s + (o.estimate ?? 0), 0);
-    // The model occasionally sums opportunity estimates above the bill's
-    // original balance — that's nonsense (you can't save more than you
-    // owe). Clamp the headline number so the user never sees it. The
-    // per-opportunity rows keep their own numbers since they're upper-
-    // bound estimates that may overlap.
-    const total = clampSaved(rawTotal, report.summary?.original_balance);
+    // Opportunity estimates may overlap (the model proposes 5 strategies
+    // that all chip away at the same defensible amount), and "what you
+    // can save" cannot exceed "what you owe" (the EOB patient
+    // responsibility for medical bills, the bill total otherwise). Clamp
+    // the headline so the user never sees a savings figure above their
+    // actual obligation. Per-opportunity rows keep their own numbers
+    // since they're each an upper-bound estimate.
+    const total = clampSaved(rawTotal, maxSavingsCap(report));
     const provider = report.analyzer?.metadata?.provider_name ?? "the provider";
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this ${providerKindLabel(report)}.`
@@ -1501,7 +1527,7 @@ async function loadOpportunities(report) {
     console.warn("[opps] falling back to synthesized", err);
     const fallback = buildOpportunities(report);
     const rawTotal = fallback.reduce((s, o) => s + (o.estimate ?? 0), 0);
-    const total = clampSaved(rawTotal, report.summary?.original_balance);
+    const total = clampSaved(rawTotal, maxSavingsCap(report));
     $("#review-title").textContent = total > 0
       ? `We think we can save you ${fmt$(total)} on this bill.`
       : "Bill reviewed — a few angles to try.";
@@ -2362,7 +2388,11 @@ function renderBills() {
     if (isNegotiating) lifecycle = "active";
     else if (isResolved) lifecycle = "resolved";
     else if (isFailed || isEscalated || isCancelled) lifecycle = "attention";
-    else lifecycle = "attention"; // audited but no negotiation dispatched yet
+    // Audited-but-not-yet-approved is no longer "attention" — it shouldn't
+    // pop a sidebar badge while the user is mid-flow on the review screen.
+    // Treats it as "watching" instead; the row's own chip ("Awaiting your
+    // approval") still surfaces the state on the Bills page.
+    else lifecycle = null;
     return {
       id: `audit-${a.name}`,
       kind: "audit",
