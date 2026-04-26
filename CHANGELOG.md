@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.14.0] - 2026-04-26
+
+### Added
+- **Real ElevenLabs voice negotiation, end-to-end.** The orchestrator now places real outbound calls when all four `ELEVENLABS_*` env vars are set; with any missing it falls back to the existing dual-Claude simulator. The simulator path is unchanged, so day-to-day dev never spends Twilio minutes. Full setup steps live in the new "Voice setup" section of the README.
+- **`POST /api/voice/dial` endpoint.** Auth-gated, takes `{run_id}`, looks up the run's resolved provider phone, gets-or-creates a per-user ElevenLabs agent, and either places the call via `client.startOutboundCall` or short-circuits when `VOICE_DRY_RUN=true`. Returns `{conversation_id, dry_run, agent_id, agent_cached}` to the SPA.
+- **Six unauthenticated webhook routes at `/webhooks/voice/<tool>`.** ElevenLabs server tools post here (`get_disputed_line`, `confirm_eob_amount`, `propose_general_discount`, `record_negotiated_amount`, `request_human_handoff`, `end_call`). Each route verifies the Bearer token via constant-time compare against `ELEVENLABS_WEBHOOK_SECRET`, validates the `conversation_id` against an ASCII allowlist (path-traversal hardening), takes the per-conversation lock, dispatches into the existing `tool-handlers.dispatchToolCall` (same code the simulator uses), and appends a transcript turn. Late-arriving tool calls after `end_call` no longer mutate the finalized envelope.
+- **Per-user ElevenLabs agent cache.** New `voice_agents` SQLite table keyed on `user_id` with an SHA-256 of the agent config; identical bills reuse the same agent across calls, mutated configs (different patient, floor, webhook base, etc.) bust the cache and create a fresh agent.
+- **Operator-wide daily voice budget.** New `voice_spend` table (one row per UTC day) plus `BONSAI_VOICE_DAILY_BUDGET_USD` (default $50). The dial endpoint refuses to place a call when `(today_spend + max_estimate) > cap`. `end_call` debits the actual cost.
+- **Per-user daily voice quota.** `BONSAI_VOICE_DAILY_LIMIT` (default 5 calls / 24h sliding window) returns 429 with a user-readable "Daily voice call limit hit." message.
+- **Pre-call confirmation modal.** New `voice-confirm-modal` in `public/index.html`; `dialVoiceWithConfirm({runId, providerName, providerPhone})` exposed on `window` in `public/assets/app.js`. Fetches `/api/voice/cost` to populate the price range and only fires the dial on Confirm.
+- **`scripts/voice-smoke.ts`.** Operator-driven end-to-end smoke against a test number; polls the per-user transcript file until `end_call` lands and prints the final state.
+- **`VOICE_DRY_RUN=true` flag.** `/api/voice/dial` logs the call it would place and returns a synthetic `dryrun_*` conversation_id without invoking ElevenLabs — lets agents and the smoke script exercise the wiring without burning Twilio minutes.
+
+### Changed
+- `src/orchestrator.ts` voice branch routes to a new in-process `dialVoiceForUser` helper when env is configured; polls the conversation meta file until the agent's `end_call` webhook flips status to `"ended"`. On a 30-min timeout the meta is marked `"failed"` and a degraded transcript is returned instead of throwing — so a stuck call doesn't lose the partial transcript or leak a "negotiating" run forever.
+- `BonsaiReport.voice_call.source` now tags `"real" | "simulator"` so the SPA can badge which path produced the transcript.
+- `.env.example` documents the four `ELEVENLABS_*` vars plus the three cost knobs (`BONSAI_VOICE_DAILY_LIMIT`, `BONSAI_VOICE_DAILY_BUDGET_USD`, `VOICE_DRY_RUN`).
+
+### Tests
+- New `test/voice-cost.test.ts` covers estimator math at default / point / zero, the per-user 5-call rate limit triggering on the 6th call, the `BONSAI_VOICE_DAILY_LIMIT` override, the operator budget cap blocking dials, missing-phone 400, and the dry-run synthetic-id path.
+- New `test/voice-agent-cache.test.ts` verifies first call creates + writes the row, second call with identical config hits the cache without invoking `createAgent`, and a mutated config busts the cache.
+- New `test/voice-webhooks.test.ts` covers Bearer good/bad/malformed/length-mismatch/dev-mode/prod-mode, 401/404/400 paths, all six tool dispatches (parametric), the `withCallLock` mutex serializing 8 concurrent webhooks, the 404 when CallState is missing, and the `end_call` finalization path.
+- New `test/voice-spend.test.ts` exercises the spend tracker directly: same-day accumulation, separate UTC-day buckets, no-op behavior on zero/negative/NaN, and the budget env override.
+- 35 new voice tests; full suite 269/269 passing post-merge with main.
+
 ## [0.1.13.0] - 2026-04-26
 
 ### Changed

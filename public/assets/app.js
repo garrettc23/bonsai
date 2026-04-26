@@ -6205,4 +6205,102 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+/**
+ * Voice-call pre-dial confirmation modal. Fetches the operator's pinned
+ * cost estimate, shows the user the provider + phone they're about to call
+ * and the price range, and only fires POST /api/voice/dial on Confirm.
+ *
+ * Errors from the dial endpoint (429 daily-limit / 429 budget-cap / 412
+ * missing phone) are rendered inline in the modal body — the user can
+ * cancel without leaving the bill they were viewing.
+ *
+ * Exposed on `window.dialVoiceWithConfirm` so any future "Negotiate by
+ * phone" button can call it without further rewiring.
+ */
+async function dialVoiceWithConfirm({ runId, providerName, providerPhone, onSuccess, onError } = {}) {
+  if (!runId) throw new Error("dialVoiceWithConfirm: missing runId");
+  const modal = document.getElementById("voice-confirm-modal");
+  const scrim = document.getElementById("voice-confirm-scrim");
+  const costEl = document.getElementById("voice-confirm-cost");
+  const targetEl = document.getElementById("voice-confirm-target");
+  const errEl = document.getElementById("voice-confirm-error");
+  const goBtn = document.getElementById("voice-confirm-go");
+  const cancelBtn = document.getElementById("voice-confirm-cancel");
+  if (!modal || !scrim || !costEl || !goBtn || !cancelBtn) return;
+
+  const friendlyTarget = providerName
+    ? `Bonsai will call ${escapeHtml(providerName)}${providerPhone ? ` at ${escapeHtml(providerPhone)}` : ""}.`
+    : providerPhone
+    ? `Bonsai will call ${escapeHtml(providerPhone)}.`
+    : "Bonsai will place an outbound call to the provider on file.";
+  if (targetEl) targetEl.innerHTML = friendlyTarget;
+
+  errEl.hidden = true;
+  errEl.textContent = "";
+  goBtn.disabled = false;
+
+  try {
+    const res = await apiFetch("/api/voice/cost");
+    if (res.ok) {
+      const j = await res.json();
+      const min = typeof j?.min_usd === "number" ? `$${j.min_usd.toFixed(2)}` : "$0.82";
+      const max = typeof j?.max_usd === "number" ? `$${j.max_usd.toFixed(2)}` : "$2.46";
+      costEl.textContent = `${min}–${max}`;
+    }
+  } catch {
+    /* fall back to the placeholder copy already in the DOM */
+  }
+
+  modal.hidden = false;
+  scrim.hidden = false;
+
+  const close = () => {
+    modal.hidden = true;
+    scrim.hidden = true;
+    goBtn.removeEventListener("click", onGo);
+    cancelBtn.removeEventListener("click", onCancel);
+    scrim.removeEventListener("click", onCancel);
+  };
+  function onCancel() {
+    close();
+  }
+  async function onGo() {
+    goBtn.disabled = true;
+    errEl.hidden = true;
+    errEl.textContent = "";
+    try {
+      const res = await apiFetch("/api/voice/dial", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: runId }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg =
+          body?.message ||
+          body?.error ||
+          (res.status === 429
+            ? "Daily voice call limit hit. Try again tomorrow."
+            : "Couldn't start the call. Try again in a moment.");
+        errEl.textContent = msg;
+        errEl.hidden = false;
+        goBtn.disabled = false;
+        if (typeof onError === "function") onError({ status: res.status, body });
+        return;
+      }
+      close();
+      if (typeof onSuccess === "function") onSuccess(body);
+    } catch (err) {
+      errEl.textContent = `Network error: ${String(err?.message ?? err)}`;
+      errEl.hidden = false;
+      goBtn.disabled = false;
+      if (typeof onError === "function") onError({ status: 0, body: { error: String(err?.message ?? err) } });
+    }
+  }
+  goBtn.addEventListener("click", onGo);
+  cancelBtn.addEventListener("click", onCancel);
+  scrim.addEventListener("click", onCancel);
+}
+window.dialVoiceWithConfirm = dialVoiceWithConfirm;
+
 init();

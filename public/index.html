@@ -605,6 +605,21 @@
       </div>
     </div>
 
+    <!-- Voice-call pre-dial confirmation modal -->
+    <div class="confirm-scrim" id="voice-confirm-scrim" hidden></div>
+    <div class="confirm-modal" id="voice-confirm-modal" hidden role="dialog" aria-labelledby="voice-confirm-title">
+      <div class="confirm-body">
+        <h3 class="confirm-title" id="voice-confirm-title">Call by phone?</h3>
+        <p class="confirm-sub" id="voice-confirm-sub">Bonsai will call this provider on your behalf. Calls usually run 5–15 minutes and cost roughly <strong id="voice-confirm-cost">$0.82–$2.46</strong>.</p>
+        <div class="confirm-sub" id="voice-confirm-target"></div>
+        <div class="confirm-sub" id="voice-confirm-error" hidden></div>
+      </div>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-ghost" id="voice-confirm-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="voice-confirm-go">Place call</button>
+      </div>
+    </div>
+
     <!-- Integration credentials modal (Connect / Edit from Settings) -->
     <div class="confirm-scrim" id="intg-scrim" hidden></div>
     <div class="confirm-modal intg-modal" id="intg-modal" hidden role="dialog" aria-labelledby="intg-title">

@@ -301,6 +301,52 @@ Rationale: balance-billing disputes above $1,500 almost always need a rep
 on the phone to remove the write-off from the account. Below that threshold,
 email is cheaper and leaves a paper trail.
 
+## Voice setup (real ElevenLabs)
+
+When all four `ELEVENLABS_*` env vars below are set, the orchestrator
+routes the voice channel to a real ElevenLabs Conversational AI call
+(via the linked Twilio trunk) instead of the dual-Claude simulator. With
+any one missing, the simulator path stays in effect — the simulator
+exists precisely so day-to-day dev never depends on Twilio minutes.
+
+```
+ELEVENLABS_API_KEY=...                  # xi-api-key (Settings → API Keys)
+ELEVENLABS_TWILIO_PHONE_NUMBER_ID=...   # see one-time setup below
+ELEVENLABS_WEBHOOK_BASE=https://bonsai.example.com   # public root; agent posts back to <base>/webhooks/voice/<tool>
+ELEVENLABS_WEBHOOK_SECRET=...           # Bearer secret embedded in the agent's webhook headers
+```
+
+Optional cost-control knobs:
+
+```
+BONSAI_VOICE_DAILY_LIMIT=5              # per-user daily call cap (default 5)
+BONSAI_VOICE_DAILY_BUDGET_USD=50        # operator-wide daily ceiling (default $50)
+VOICE_DRY_RUN=true                      # log the call we WOULD place, return a synthetic conversation_id
+```
+
+One-time provisioning:
+
+1. **Provision a Twilio number.** Twilio console → Phone Numbers → Buy a Number.
+2. **Import it into ElevenLabs.** Dashboard → Phone Numbers → Import number → From Twilio. Paste your Twilio account SID + auth token + the number. Bonsai never holds Twilio credentials; ElevenLabs proxies all carrier traffic.
+3. **Look up the `phone_number_id`.** ElevenLabs maintains its own ID for the imported number. Get it with:
+   ```
+   curl -H "xi-api-key: $ELEVENLABS_API_KEY" https://api.elevenlabs.io/v1/convai/twilio/phone-numbers
+   ```
+   Set the matching entry's `id` as `ELEVENLABS_TWILIO_PHONE_NUMBER_ID` in Railway.
+4. **Smoke-test end-to-end.** `bun run scripts/voice-smoke.ts` against a number you own:
+   ```
+   BONSAI_VOICE_SMOKE_TO=+15551234567 \
+   BONSAI_VOICE_SMOKE_USER_EMAIL=you@example.com \
+   bun run scripts/voice-smoke.ts
+   ```
+   The script dials, then polls the per-user transcript file under
+   `out/users/<id>/calls/<conversation_id>.json` until the agent's
+   `end_call` server-tool fires, and prints the final state.
+
+A single ElevenLabs imported number serves all per-user agents — agent
+binding happens at call time via `agent_id` + `agent_phone_number_id` on
+the outbound-call request, not at agent-creation time.
+
 ## Negotiation loops
 
 **Email (`src/negotiate-email.ts`).** Claude drafts a reply using only facts

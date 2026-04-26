@@ -96,6 +96,18 @@ export function getDb(): Database {
     CREATE INDEX IF NOT EXISTS password_resets_user_id_idx ON password_resets(user_id);
     CREATE INDEX IF NOT EXISTS password_resets_expires_idx ON password_resets(expires_at);
 
+    CREATE TABLE IF NOT EXISTS voice_agents (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      agent_config_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS voice_spend (
+      utc_date TEXT PRIMARY KEY,
+      total_usd REAL NOT NULL
+    );
+
     -- Cached Managed-Agents agent IDs. Keyed on purpose ("offer-hunt", future
     -- managed agents land alongside) so we create the cloud-hosted agent +
     -- environment once and reuse them across runs. agent_config_hash is a

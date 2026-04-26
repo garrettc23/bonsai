@@ -66,6 +66,13 @@ import {
 import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
 import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
 import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
+import { dialVoiceForUser } from "./server/voice-dial.ts";
+import {
+  handleVoiceWebhook,
+  VOICE_TOOL_NAMES,
+  type VoiceToolName,
+} from "./server/voice-webhooks.ts";
+import { estimateCallCost } from "./lib/voice-cost-estimate.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -1373,6 +1380,7 @@ async function kickoffNegotiation(runId: string): Promise<void> {
       billPdfPath: run.bill_path,
       eobPdfPath: run.eob_path,
       billFixtureName: run.fixture_name,
+      run_id: run.run_id,
       channel: run.channel,
       email_persona: run.email_persona,
       voice_persona: run.voice_persona,
@@ -1418,6 +1426,60 @@ async function kickoffNegotiation(runId: string): Promise<void> {
     }
     throw err;
   }
+}
+
+async function handleVoiceDial(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { run_id?: string } | null;
+  if (!body?.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
+  const run = loadPending(body.run_id);
+  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
+
+  const providerPhone =
+    run.contact?.support_phone?.trim() ||
+    run.resolved_contact?.phone?.trim() ||
+    null;
+  if (!providerPhone) {
+    return Response.json(
+      {
+        error: "missing_phone",
+        message: "Add a support phone in the Contact tab before dialing.",
+      },
+      { status: 412 },
+    );
+  }
+
+  const user = getCurrentUser();
+  const analyzer = run.partial_report?.analyzer;
+  if (!analyzer) {
+    return Response.json({ error: "run has no analyzer result" }, { status: 400 });
+  }
+
+  const result = await dialVoiceForUser(user, {
+    run_id: run.run_id,
+    analyzer,
+    provider_phone: providerPhone,
+    bill_kind: run.contact?.bill_kind,
+    account_holder_name: run.contact?.account_holder_name ?? null,
+    final_acceptable_floor: run.final_acceptable_floor,
+  });
+
+  if (!result.ok) {
+    if (result.status === 429 && typeof result.retry_after_sec === "number") {
+      return rateLimitResponse(result.retry_after_sec, result.error);
+    }
+    return Response.json({ error: result.error }, { status: result.status });
+  }
+
+  return Response.json({
+    conversation_id: result.conversation_id,
+    dry_run: result.dry_run,
+    agent_id: result.agent_id,
+    agent_cached: result.agent_cached,
+  });
+}
+
+function handleVoiceCost(): Response {
+  return Response.json(estimateCallCost());
 }
 
 async function handleStopNegotiation(req: Request): Promise<Response> {
@@ -2723,6 +2785,18 @@ const server = Bun.serve({
         return handleResendInboundEcho(req);
       }
 
+      // ElevenLabs server-tool callbacks. Bearer-verified inside the handler.
+      // Lives outside the auth gate — the agent talks directly to us, not
+      // through a session.
+      const voiceWebhookMatch = url.pathname.match(/^\/webhooks\/voice\/([a-z_]+)$/);
+      if (req.method === "POST" && voiceWebhookMatch) {
+        const tool = voiceWebhookMatch[1];
+        if ((VOICE_TOOL_NAMES as readonly string[]).includes(tool)) {
+          return handleVoiceWebhook(tool as VoiceToolName, req);
+        }
+        return new Response("Not found", { status: 404 });
+      }
+
       // Static pages render unauthenticated; the front-end calls /api/auth/me
       // and switches to the login screen when no user is returned.
       if ((req.method === "GET" || req.method === "HEAD") && !url.pathname.startsWith("/api/")) {
@@ -2780,6 +2854,8 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
         if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);
         if (req.method === "POST" && url.pathname === "/api/approve") return handleApprove(req);
+        if (req.method === "POST" && url.pathname === "/api/voice/dial") return handleVoiceDial(req);
+        if (req.method === "GET" && url.pathname === "/api/voice/cost") return handleVoiceCost();
         if (req.method === "POST" && url.pathname === "/api/stop") return handleStopNegotiation(req);
         if (req.method === "POST" && url.pathname === "/api/resume") return handleResumeNegotiation(req);
         if (req.method === "POST" && url.pathname === "/api/delete") return handleDeleteBill(req);
