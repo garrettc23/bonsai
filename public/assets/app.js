@@ -175,6 +175,42 @@ function clearUnsavedGuard() { unsavedGuard = null; }
  */
 let stagedFilesRef = null;
 function setStagedFilesRef(getter) { stagedFilesRef = getter; }
+// Companion setter so success-path code (e.g. approveAndRun) can drop the
+// staged files when the workflow finishes — without it, the discard guard
+// thinks there's still a pending upload and pops a confirmation modal.
+let clearStagingRef = () => {};
+function setClearStagingRef(fn) { clearStagingRef = typeof fn === "function" ? fn : (() => {}); }
+
+// Group bills by normalized provider_name and assign Finder-style suffixes:
+// "Memorial Hospital", "Memorial Hospital (1)", "Memorial Hospital (2)".
+// Input is newest-first; we walk in reverse so the OLDEST keeps the bare
+// name and newer dupes pick up "(1)", "(2)". Mirrored in
+// src/lib/display-names.ts (which the unit test imports).
+function computeDisplayNames(rows, { getKey, getName }) {
+  const out = new Map();
+  if (!Array.isArray(rows) || rows.length === 0) return out;
+  const counts = new Map();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    const key = getKey(row);
+    const raw = getName(row);
+    if (typeof raw !== "string" || raw.length === 0) {
+      out.set(key, raw ?? null);
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (!trimmed || /^unknown provider$/i.test(trimmed)) {
+      out.set(key, raw);
+      continue;
+    }
+    const norm = trimmed.toLowerCase();
+    const n = counts.get(norm) ?? 0;
+    out.set(key, n === 0 ? trimmed : `${trimmed} (${n})`);
+    counts.set(norm, n + 1);
+  }
+  return out;
+}
+
 function hasStagedUpload() {
   try {
     const arr = stagedFilesRef?.();
@@ -927,6 +963,10 @@ async function init() {
     cancelPrefetch();
     renderStaging();
   }
+  // Expose to outside callers (approveAndRun) so they can drop staged
+  // files when the workflow finishes — otherwise hasStagedUpload() still
+  // reports true and showNav() pops a discard-confirmation modal.
+  setClearStagingRef(clearStaging);
 
   function flashStagingMessage(msg) {
     const grid = $("#dz-staging-grid");
@@ -1181,11 +1221,17 @@ function renderReceipts() {
       "</span> bill" +
       (data.count === 1 ? "" : "s");
   }
-  // Show top 5 most recent.
+  // Show top 5 most recent. Apply Finder-style dedup against the FULL
+  // receipts list before slicing so a duplicate that happens to fall
+  // outside the top 5 still influences the suffix on the visible row.
+  const receiptDisplayByName = computeDisplayNames(data.rows, {
+    getKey: (r) => r.name,
+    getName: (r) => r.provider_name ?? null,
+  });
   const top = data.rows.slice(0, 5);
   rowsEl.innerHTML = top
     .map((r) => {
-      const provider = r.provider_name || r.name;
+      const provider = receiptDisplayByName.get(r.name) ?? r.provider_name ?? r.name;
       const dos = r.date_of_service ? " · " + r.date_of_service : "";
       const channel = (r.channel_used || "—").toString();
       const channelTag =
@@ -2291,7 +2337,14 @@ async function approveAndRun() {
       throw new Error(j?.message ?? j?.error ?? (await res.text()));
     }
     await res.json();
+    // Clean up workflow state BEFORE navigating. Without this the
+    // navigation guard in showNav() (which inspects reviewState +
+    // currentWorkflowView + stagedFiles) would think the user has
+    // unfinished upload work and pop a discard-confirmation modal —
+    // exactly between "click Accept" and "land in Bills".
     reviewState = null;
+    clearStagingRef();
+    setWorkflowView("overview");
     await loadHistory();
     updateNavCounts();
     await showNav("bills");
@@ -3001,6 +3054,15 @@ function renderBills() {
     restoreViewChildren(view);
   }
 
+  // Finder-style dedup so two audits of the same provider don't render
+  // with identical labels. Suffixes are presentation-only — stored
+  // provider_name is untouched. Audits arrive newest-first; oldest keeps
+  // the bare name.
+  const displayByName = computeDisplayNames(audits, {
+    getKey: (a) => a.name,
+    getName: (a) => a.provider_name ?? null,
+  });
+
   const auditRows = audits.map((a) => {
     const score = scoreFromAudit(a);
     // outcome === "in_progress" is the real-email mode case: the agent
@@ -3031,7 +3093,7 @@ function renderBills() {
     return {
       id: `audit-${a.name}`,
       kind: "audit",
-      vendor: a.provider_name ?? a.name,
+      vendor: displayByName.get(a.name) ?? a.provider_name ?? a.name,
       account: a.patient_name ? `${a.patient_name} · ${a.date_of_service ?? "—"}` : (a.date_of_service ?? "One-time bill"),
       lastCheck: relTime(a.modified),
       addedAt: a.modified ?? Date.now(),
@@ -4778,20 +4840,33 @@ async function deleteBill() {
     closeBillDrawer();
     return;
   }
-  try {
-    const res = await apiFetch("/api/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ run_id: runId }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    await loadHistory();
-    updateNavCounts();
-    if (currentNav === "bills") renderBills();
-    closeBillDrawer();
-  } catch (err) {
-    alert(`Couldn't delete: ${err?.message ?? err}`);
+  // Optimistic UI: drop the row from the local cache and re-render
+  // immediately. The server delete fires in the background — the new
+  // /api/delete is idempotent, so a race with another tab or a missing
+  // pending record returns 200 and the UI stays consistent.
+  const auditName = row.audit?.name;
+  if (historyCache?.audits) {
+    historyCache.audits = historyCache.audits.filter(
+      (a) => a.run_id !== runId && a.name !== auditName,
+    );
   }
+  closeBillDrawer();
+  if (currentNav === "bills") renderBills();
+  updateNavCounts();
+
+  apiFetch("/api/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_id: runId }),
+  })
+    .then((res) => {
+      if (!res.ok) {
+        console.warn(`[delete] server returned ${res.status} for ${runId}`);
+      }
+    })
+    .catch((err) => {
+      console.warn(`[delete] network error for ${runId}:`, err);
+    });
 }
 
 /** Promise-based confirm modal. Resolves true on confirm, false on cancel/scrim. */

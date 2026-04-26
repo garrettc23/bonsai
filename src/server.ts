@@ -64,6 +64,7 @@ import {
   type User,
 } from "./lib/auth.ts";
 import { ensureUserDirs, userPaths, currentUserPaths } from "./lib/user-paths.ts";
+import { deleteBillByRunId } from "./lib/delete-bill.ts";
 import { getCurrentUser, withUserContext } from "./lib/user-context.ts";
 import { getClientIp, rateLimit, rateLimitResponse } from "./lib/rate-limit.ts";
 import { dialVoiceForUser } from "./server/voice-dial.ts";
@@ -1498,40 +1499,23 @@ async function handleStopNegotiation(req: Request): Promise<Response> {
 }
 
 /**
- * Delete a bill entirely. Removes the PendingRun plus any on-disk report
- * and appeal letter tied to the same fixture_name. Only the files
- * registered to this run are touched — other bills are untouched.
+ * Delete a bill entirely. Idempotent: returns 200 with deleted=false if
+ * the pending record is already gone, so the client's optimistic UI
+ * doesn't paint an error toast over a successful local delete. The
+ * actual unlink logic lives in lib/delete-bill.ts so the unit test can
+ * exercise it without booting the HTTP server.
  */
 async function handleDeleteBill(req: Request): Promise<Response> {
   const body = (await req.json()) as { run_id?: string };
   if (!body.run_id) return Response.json({ error: "Missing run_id" }, { status: 400 });
-  const run = loadPending(body.run_id);
-  if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
-
-  // Flip status so any in-flight worker bails out before writing anything.
-  run.status = "cancelled";
-  run.error = "Deleted by user";
-  savePending(run);
-
-  const tryUnlink = (p: string): void => {
-    if (existsSync(p)) {
-      try { unlinkSync(p); } catch (err) { console.warn("[delete] unlink failed", p, err); }
-    }
-  };
-
-  tryUnlink(pendingPath(run.run_id));
-  const userP = currentUserPaths();
-  tryUnlink(userP.reportPath(run.fixture_name));
-  tryUnlink(userP.appealPath(run.fixture_name));
-  // Uploaded bill files are per-user content — clean those up too so the
-  // uploads dir doesn't grow without bound. Scoped strictly to this run's
-  // recorded paths; nothing else gets touched.
-  for (const p of run.bill_paths ?? []) {
-    if (p.startsWith(uploadDir())) tryUnlink(p);
-  }
-  if (run.eob_path && run.eob_path.startsWith(uploadDir())) tryUnlink(run.eob_path);
-
-  return Response.json({ ok: true, run_id: run.run_id });
+  const result = deleteBillByRunId(body.run_id, {
+    loadPending,
+    savePending,
+    pendingPath,
+    uploadDir,
+    paths: currentUserPaths(),
+  });
+  return Response.json(result);
 }
 
 async function handleResumeNegotiation(req: Request): Promise<Response> {
