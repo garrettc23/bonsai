@@ -764,6 +764,12 @@ async function init() {
     await runPhasedFromSample(fixture, channel);
   });
 
+  // Complaint flow — non-bill negotiations (flight delays, refunds, etc.)
+  $("#open-complaint-btn")?.addEventListener("click", openComplaintModal);
+  $("#complaint-cancel")?.addEventListener("click", closeComplaintModal);
+  $("#complaint-scrim")?.addEventListener("click", closeComplaintModal);
+  $("#complaint-submit")?.addEventListener("click", submitComplaint);
+
   // ─── Multi-file staging: drop/pick up to 10 files, review, then "Next" ──
   const uploadForm = $("#upload-form");
   const MAX_BILL_FILES = 10;
@@ -1275,6 +1281,68 @@ async function runAndRender(fn) {
 // ─── Phased run: audit → review → approve → negotiate ────────────
 
 let reviewState = null; // { run_id, partial_report }
+
+function openComplaintModal() {
+  $("#complaint-error").hidden = true;
+  $("#complaint-error").textContent = "";
+  $("#complaint-scrim").hidden = false;
+  $("#complaint-modal").hidden = false;
+  setTimeout(() => $("#complaint-company")?.focus(), 50);
+}
+
+function closeComplaintModal() {
+  $("#complaint-scrim").hidden = true;
+  $("#complaint-modal").hidden = true;
+}
+
+async function submitComplaint() {
+  const company = $("#complaint-company")?.value?.trim() ?? "";
+  const description = $("#complaint-description")?.value?.trim() ?? "";
+  const desired = $("#complaint-desired")?.value?.trim() ?? "";
+  const errEl = $("#complaint-error");
+  const submitBtn = $("#complaint-submit");
+  if (!company || !description) {
+    errEl.textContent = "Company name and what happened are both required.";
+    errEl.hidden = false;
+    return;
+  }
+  errEl.hidden = true;
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Drafting…";
+  // Show the loading view immediately; the Opus draft takes ~10-15s.
+  closeComplaintModal();
+  setWorkflowView("progress");
+  updatePageHeader({
+    eyebrow: "Drafting your complaint",
+    title: `Building the case against ${escapeHtml(company)}`,
+  });
+  startTimeline();
+  try {
+    const res = await fetch("/api/complaint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ company, description, desired_outcome: desired }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const { run_id, report } = await res.json();
+    stopTimeline();
+    reviewState = { run_id, partial_report: report };
+    renderReviewView(report);
+    setWorkflowView("review");
+    // Reset the modal inputs for next time.
+    $("#complaint-company").value = "";
+    $("#complaint-description").value = "";
+    $("#complaint-desired").value = "";
+  } catch (err) {
+    stopTimeline();
+    $("#error-body").textContent = String(err?.message ?? err);
+    setWorkflowView("error");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Draft my complaint";
+  }
+}
 
 async function runPhasedFromSample(fixture, channel) {
   setWorkflowView("progress");
@@ -2332,14 +2400,14 @@ function renderEarlyAccessHero(view) {
   const btn = hero.querySelector("#early-access-btn");
   if (!btn) return;
 
-  // Sync the button text + state to the user's current join status.
-  // Called once on mount and again after every toggle so we never have
-  // a stale label.
+  // Sync the button to the user's current join status. Joined uses the
+  // amber AI accent (the "ai" wordmark color) — the color shift IS the
+  // affordance that the button is now a leave-toggle. No micro-copy
+  // needed; clicking again removes them. Mount once + after every
+  // toggle so the state never drifts.
   const sync = () => {
     const joined = !!currentUser?.early_access_at;
-    btn.textContent = joined
-      ? "Added to early access ✓ (click to leave)"
-      : "Sign up for early access";
+    btn.textContent = joined ? "Added to early access ✓" : "Sign up for early access";
     btn.classList.toggle("is-joined", joined);
   };
   sync();

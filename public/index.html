@@ -116,6 +116,10 @@
                     <option value="persistent" selected>persistent</option>
                   </select>
                 </div>
+                <div class="dz-other-row">
+                  <span>Not a bill?</span>
+                  <button id="open-complaint-btn" class="dz-sample-link" type="button">Negotiate a complaint or refund &nbsp;→</button>
+                </div>
               </div>
 
               <div class="intake-aside">
@@ -522,5 +526,28 @@
     </div>
 
     <script src="/assets/app.js"></script>
+    <!-- Complaint intake modal (non-bill negotiations) -->
+    <div class="modal-scrim" id="complaint-scrim" hidden></div>
+    <div class="modal" id="complaint-modal" hidden role="dialog" aria-modal="true" aria-labelledby="complaint-modal-title">
+      <h2 class="modal-title" id="complaint-modal-title">Negotiate a complaint or refund</h2>
+      <p class="modal-body">Tell Bonsai what happened. We'll draft a complaint letter, find the company's customer support, and email it for you. Same flow as bills.</p>
+      <label class="auth-field" style="margin-top:14px">
+        <span>Company</span>
+        <input type="text" id="complaint-company" placeholder="e.g. American Airlines, Comcast, Amazon" autocomplete="off" />
+      </label>
+      <label class="auth-field" style="margin-top:10px">
+        <span>What happened?</span>
+        <textarea id="complaint-description" rows="4" placeholder="My flight 1234 from SFO to JFK on March 14 was delayed 6 hours, missed my connection, had to pay $400 for a hotel. I want a refund + $1,000 in compensation."></textarea>
+      </label>
+      <label class="auth-field" style="margin-top:10px">
+        <span>What do you want? <span style="color:var(--ink-mute)">(optional)</span></span>
+        <input type="text" id="complaint-desired" placeholder="e.g. Full refund, $500 credit, replacement, written response" autocomplete="off" />
+      </label>
+      <div class="auth-error" id="complaint-error" hidden></div>
+      <div class="modal-actions" style="margin-top:14px">
+        <button type="button" class="btn btn-ghost" id="complaint-cancel">Cancel</button>
+        <button type="button" class="btn btn-primary" id="complaint-submit">Draft my complaint</button>
+      </div>
+    </div>
   </body>
 </html>

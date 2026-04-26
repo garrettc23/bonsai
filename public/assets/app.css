@@ -373,7 +373,8 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-family: var(--font-mono);
   letter-spacing: -0.005em;
 }
-.dz-sample-row {
+.dz-sample-row,
+.dz-other-row {
   margin-top: 20px;
   display: flex;
   justify-content: center;
@@ -383,6 +384,9 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink-mute);
   font-family: var(--font-mono);
   letter-spacing: 0.02em;
+}
+.dz-other-row {
+  margin-top: 8px;
 }
 .dz-sample-link {
   background: transparent;
@@ -4527,6 +4531,18 @@ body.legal-page { background: var(--bg); }
 .empty-hero-cta {
   /* Inherits .btn.btn-primary.btn-lg sizing; nothing custom needed.
      Kept as a hook for future per-page tweaks. */
+}
+/* Early-access button — joined state uses the amber AI accent (the same
+   color as the "ai" in the wordmark + the tagline accent). The color
+   shift IS the toggle affordance: same button, click again to leave. */
+.empty-hero-cta.is-joined {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: var(--bg);
+}
+.empty-hero-cta.is-joined:hover {
+  background: #6f4a10;
+  border-color: #6f4a10;
 }
 
 /* Approve-flow blocker (Resend / contact not configured). Sits above the

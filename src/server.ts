@@ -226,6 +226,17 @@ interface PendingRun {
   outcome_verified?: "yes" | "no" | "partial";
   outcome_notes?: string;
   outcome_verified_at?: number;
+  /**
+   * Complaint flow only. Pre-drafted opportunity tactics produced by the
+   * complaint composer at intake time, so /api/opportunities can return
+   * them without a second Opus call.
+   */
+  complaint_opportunities?: Array<{
+    title: string;
+    description: string;
+    dollar_estimate: number;
+    icon: string;
+  }>;
 }
 
 /** Days after a resolved negotiation before we nudge the user to verify. */
@@ -470,6 +481,193 @@ async function handleAudit(req: Request): Promise<Response> {
       console.error(`[contact ${run.run_id}]`, err);
     });
   }
+
+  return Response.json({ run_id: run.run_id, report: partial });
+}
+
+/**
+ * Negotiate something that isn't a bill — flight-delay refunds, defective
+ * orders, service complaints, etc. Takes a free-form description, drafts a
+ * complaint letter via Opus, and lands the user in the same plan-review
+ * flow the bill audit produces. The PendingRun is "complaint-shaped":
+ * empty errors[], non-bill metadata, complaint-style appeal letter.
+ */
+async function handleComplaint(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    company?: string;
+    description?: string;
+    desired_outcome?: string;
+  } | null;
+  const company = body?.company?.trim();
+  const description = body?.description?.trim();
+  if (!company || !description) {
+    return Response.json(
+      { error: "Missing company or description" },
+      { status: 400 },
+    );
+  }
+  const desired = body?.desired_outcome?.trim() ?? "";
+
+  const system = [
+    "You are Bonsai, drafting a formal complaint letter on the user's behalf to a company.",
+    "The user describes the issue and what they want; you produce a tight, persuasive complaint letter that:",
+    "  - Opens with a clear ask (refund, replacement, credit, response within 14 days, etc.).",
+    "  - States the facts concisely. Reference any specifics the user gave (dates, amounts, order numbers).",
+    "  - Cites relevant consumer-protection levers when applicable: DOT 14 CFR Part 250 for flights, FTC Mail/Internet Order rule for online orders, Magnuson-Moss for warranties, state attorney-general / BBB / consumer-affairs as escalation.",
+    "  - Closes with a deadline + escalation path.",
+    "Tone: firm, professional, never threatening. 200-350 words. No prose outside the tool call.",
+    "",
+    "Also propose 3-5 strategy opportunities — specific tactics the user could pursue. Each gets a short title + 1-2 sentence description + an upper-bound dollar estimate (or 0 if money isn't the point).",
+  ].join("\n");
+
+  const userMsg = [
+    `Company: ${company}`,
+    `Issue: ${description}`,
+    desired ? `Desired outcome: ${desired}` : "",
+  ].filter(Boolean).join("\n");
+
+  const COMPLAINT_TOOL: Anthropic.Tool = {
+    name: "draft_complaint",
+    description: "Return the drafted complaint letter + tactical opportunities.",
+    input_schema: {
+      type: "object",
+      required: ["subject", "letter_markdown", "headline", "opportunities"],
+      properties: {
+        subject: { type: "string", description: "Short, professional subject line." },
+        letter_markdown: { type: "string", description: "The complaint letter body, markdown OK." },
+        headline: { type: "string", description: "1-line summary of what the user is asking for." },
+        opportunities: {
+          type: "array",
+          minItems: 3,
+          maxItems: 5,
+          items: {
+            type: "object",
+            required: ["title", "description", "dollar_estimate", "icon"],
+            properties: {
+              title: { type: "string" },
+              description: { type: "string" },
+              dollar_estimate: { type: "number", minimum: 0 },
+              icon: {
+                type: "string",
+                enum: ["shield", "scan", "pulse", "doc", "phone", "mail", "sparkle", "check"],
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  let drafted: {
+    subject: string;
+    letter_markdown: string;
+    headline: string;
+    opportunities: Array<{ title: string; description: string; dollar_estimate: number; icon: string }>;
+  };
+  try {
+    const anthropic = new Anthropic();
+    const resp = await anthropic.messages.create({
+      model: "claude-opus-4-7",
+      max_tokens: 1500,
+      system,
+      tools: [COMPLAINT_TOOL],
+      tool_choice: { type: "tool", name: "draft_complaint" },
+      messages: [{ role: "user", content: userMsg }],
+    });
+    const tool = resp.content.find(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "draft_complaint",
+    );
+    if (!tool) {
+      return Response.json({ error: "Model did not draft the complaint" }, { status: 502 });
+    }
+    drafted = tool.input as typeof drafted;
+  } catch (err) {
+    return Response.json({ error: (err as Error).message }, { status: 500 });
+  }
+
+  // Synthesize a BonsaiReport-shaped object so the existing plan-review
+  // UI can render it without special-casing. The analyzer block carries
+  // the user's description in line_quote so anything that displays it
+  // ("the rep replied to: …") still looks coherent.
+  const fixtureName = `complaint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const partial: BonsaiReport = {
+    analyzer: {
+      metadata: {
+        provider_name: company,
+        provider_billing_address: "",
+        patient_name: "",
+        claim_number: "",
+        date_of_service: "",
+        insurer_name: "",
+        eob_patient_responsibility: 0,
+        bill_current_balance_due: 0,
+        account_number: "",
+        bill_kind: "other",
+      },
+      errors: [],
+      summary: {
+        high_confidence_total: 0,
+        worth_reviewing_total: 0,
+        bill_total_disputed: 0,
+        headline: drafted.headline,
+      },
+      grounding_failures: [],
+      meta: {
+        model: "claude-opus-4-7",
+        input_tokens: 0,
+        output_tokens: 0,
+        elapsed_ms: 0,
+        tool_turns: 1,
+      },
+    },
+    appeal: {
+      markdown: drafted.letter_markdown,
+      subject: drafted.subject,
+      defensible_total: 0,
+      used_placeholders: [],
+    },
+    strategy: {
+      chosen: "persistent",
+      reason: "Complaint mode: email the company, escalate to phone if they stonewall.",
+    },
+    summary: {
+      original_balance: 0,
+      defensible_disputed: 0,
+      final_balance: null,
+      patient_saved: null,
+      channel_used: "persistent",
+      outcome: "in_progress",
+      outcome_detail: "Awaiting user approval of the complaint letter.",
+    },
+  };
+
+  const run: PendingRun = {
+    run_id: newRunId(),
+    fixture_name: fixtureName,
+    bill_path: "",
+    bill_paths: [],
+    bill_names: [],
+    channel: "persistent",
+    partial_report: partial,
+    qa: [],
+    created_at: Date.now(),
+    status: "audited",
+    contact: { support_email: null, support_phone: null, support_portal_url: null, account_holder_name: null, bill_kind: "other" },
+    contact_status: "pending",
+  };
+  savePending(run);
+
+  // Stash the drafted opportunities on the run itself so /api/opportunities
+  // can return them without a second Opus call. Skipped for bill audits
+  // (no field set), used here for complaint runs.
+  run.complaint_opportunities = drafted.opportunities;
+  savePending(run);
+
+  // Kick off the contact lookup so the user's company gets a contact
+  // resolved (e.g. customer-support@united.com).
+  kickoffContactResolution(run.run_id).catch((err) => {
+    console.error(`[contact ${run.run_id}]`, err);
+  });
 
   return Response.json({ run_id: run.run_id, report: partial });
 }
@@ -807,6 +1005,11 @@ async function handleOpportunities(req: Request): Promise<Response> {
   const run = loadPending(body.run_id);
   if (!run) return Response.json({ error: "Run not found or expired" }, { status: 404 });
 
+  // Complaint flow: opportunities were drafted at intake time and stashed
+  // on the run. Just return them — no second Opus call.
+  if (run.complaint_opportunities && !run.plan_edits?.trim()) {
+    return Response.json({ opportunities: run.complaint_opportunities });
+  }
   // Fast path: ship a hand-curated opportunities list for any fixture
   // that has fixtures/<name>.opportunities.json next to its PDF. Skips a
   // ~10s Opus call on the demo path. Bypassed when the user has chatted
@@ -2348,6 +2551,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/run") return handleUpload(req);
         if (req.method === "POST" && url.pathname === "/api/thumbnail") return handleThumbnail(req);
         if (req.method === "POST" && url.pathname === "/api/audit") return handleAudit(req);
+        if (req.method === "POST" && url.pathname === "/api/complaint") return handleComplaint(req);
         if (req.method === "POST" && url.pathname === "/api/ask") return handleAsk(req);
         if (req.method === "POST" && url.pathname === "/api/plan-chat") return handlePlanChat(req);
         if (req.method === "POST" && url.pathname === "/api/opportunities") return handleOpportunities(req);
