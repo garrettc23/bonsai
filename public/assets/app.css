@@ -2498,7 +2498,10 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 .offer-actions {
   display: flex;
   gap: 8px;
-  margin-top: 4px;
+  /* Stick to the bottom of the card so action buttons line up across
+   * tiles regardless of how long each "Why it fits" body runs. The
+   * parent .offer-card is already flex-column. */
+  margin-top: auto;
 }
 .offer-actions .btn { flex: 1; }
 .offer-eta {
@@ -2723,35 +2726,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-size: 13px;
   color: var(--ink-soft);
   line-height: 1.5;
-}
-.switch-amount-prompt {
-  font-size: 14px;
-  color: var(--ink);
-  margin-bottom: 14px;
-  line-height: 1.4;
-}
-.switch-amount-label {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-  margin-bottom: 6px;
-}
-.switch-amount-input {
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 16px;
-  font-family: var(--font-display);
-  border: 1px solid var(--line-strong);
-  border-radius: 6px;
-  background: var(--paper);
-  color: var(--ink);
-}
-.switch-amount-input:focus {
-  outline: 2px solid var(--green);
-  outline-offset: 1px;
 }
 .switch-amount-error {
   margin-top: 8px;

@@ -42,18 +42,30 @@ describe("/api/switch-complete server handler", () => {
   });
 });
 
-describe("Switch modal Complete/Dismiss UI", () => {
-  test("modal markup has primary Complete + ghost Dismiss buttons", () => {
+describe("Switch modal — single 'Switch completed' button (FIX N)", () => {
+  test("modal markup has exactly one primary action button", () => {
     const html = readFileSync(join(__dirname, "..", "public", "index.html"), "utf-8");
     expect(html).toContain('id="switch-complete"');
-    expect(html).toContain('id="switch-dismiss"');
-    expect(html).toContain('id="switch-amount-input"');
+    expect(html).toContain(">Switch completed<");
+    // The two-step flow's secondary buttons are gone
+    expect(html).not.toContain('id="switch-dismiss"');
+    expect(html).not.toContain('id="switch-amount-input"');
+    expect(html).not.toContain('id="switch-amount-cancel"');
+    expect(html).not.toContain('id="switch-amount-submit"');
   });
 
-  test("openSwitchModal posts to /api/switch-complete on submit", () => {
+  test("openSwitchModal posts to /api/switch-complete on click", () => {
     expect(APP_JS).toContain("/api/switch-complete");
     expect(APP_JS).toMatch(/new_provider:\s*recommendedName/);
-    expect(APP_JS).toMatch(/new_amount:\s*amount/);
+  });
+
+  test("new_amount uses the offer's recommended price (no user input)", () => {
+    // The user signed up for the recommended plan; that price IS the new
+    // amount. Asking them to re-type it after they just read it on the
+    // card is busywork.
+    const fnStart = APP_JS.indexOf("function openSwitchModal");
+    const fnSlice = APP_JS.slice(fnStart, fnStart + 5000);
+    expect(fnSlice).toMatch(/new_amount:\s*Number\(offer\.offered/);
   });
 
   test("activity timeline renders completed_switches entries", () => {

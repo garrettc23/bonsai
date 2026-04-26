@@ -3668,9 +3668,24 @@ function renderOffers() {
       grid.appendChild(buildBestProviderCard());
     } else {
       let visible;
-      if (offersFilter === "All") visible = offersCache;
-      else if (offersFilter === "Recommended") visible = offersCache.filter((o) => o.recommended);
-      else visible = offersCache.filter((o) => o.category === offersFilter);
+      if (offersFilter === "All") {
+        visible = offersCache;
+      } else if (offersFilter === "Recommended") {
+        // Show ONE recommended card per bill — collapse multiple
+        // alternatives for the same baseline (current_provider) to the
+        // single highest-saving one. The All view keeps every offer for
+        // users who want to compare alternatives directly.
+        const bestByBill = new Map();
+        for (const o of offersCache) {
+          if (!o.recommended) continue;
+          const key = o.baseline?.current_provider ?? o.id;
+          const cur = bestByBill.get(key);
+          if (!cur || (o.saves || 0) > (cur.saves || 0)) bestByBill.set(key, o);
+        }
+        visible = [...bestByBill.values()];
+      } else {
+        visible = offersCache.filter((o) => o.category === offersFilter);
+      }
       for (const o of visible) grid.appendChild(buildOfferCard(o));
     }
   }
@@ -3880,21 +3895,17 @@ function openSwitchModal(offer) {
       : "Real savings depend on your usage and any switch fees from your current provider.";
   }
 
-  // Reset the modal to step-1 (instructions) state on every open. Without
-  // this, a user who clicked Complete and bailed would re-open into the
-  // amount-input view instead of the steps.
-  $("#switch-steps-view").hidden = false;
-  $("#switch-amount-view").hidden = true;
-  $("#switch-actions-steps").hidden = false;
-  $("#switch-actions-amount").hidden = true;
-  $("#switch-amount-input").value = "";
-  $("#switch-amount-error").hidden = true;
-  $("#switch-amount-error").textContent = "";
-
+  // One-button flow: the user clicks "Switch completed" once they've
+  // signed up with the recommended provider. We log the switch using the
+  // recommended monthly price (offer.offered) — they already saw it on
+  // the card, no point asking them to re-type it.
   const recommendedName = offer.source ?? "the recommended provider";
   const currentName = offer.baseline?.current_provider ?? "your current provider";
-  $("#switch-amount-prompt").textContent =
-    `Once you're signed up with ${recommendedName}, enter the new monthly amount you're paying. Bonsai will log the switch in this bill's activity.`;
+  const errEl = $("#switch-amount-error");
+  if (errEl) {
+    errEl.hidden = true;
+    errEl.textContent = "";
+  }
 
   scrim.hidden = false;
   modal.hidden = false;
@@ -3903,92 +3914,85 @@ function openSwitchModal(offer) {
     modal.classList.add("open");
   });
 
+  const completeBtn = $("#switch-complete");
+  const prevBtnText = completeBtn ? completeBtn.textContent : "Switch completed";
+  if (completeBtn) {
+    completeBtn.disabled = false;
+    completeBtn.textContent = "Switch completed";
+  }
+
   const cleanup = () => {
     scrim.classList.remove("open");
     modal.classList.remove("open");
     setTimeout(() => { scrim.hidden = true; modal.hidden = true; }, 180);
     $("#switch-close").onclick = null;
-    $("#switch-dismiss").onclick = null;
-    $("#switch-complete").onclick = null;
-    $("#switch-amount-cancel").onclick = null;
-    $("#switch-amount-submit").onclick = null;
+    if (completeBtn) {
+      completeBtn.onclick = null;
+      completeBtn.disabled = false;
+      completeBtn.textContent = prevBtnText;
+    }
     scrim.onclick = null;
     document.removeEventListener("keydown", onKey);
   };
   const onKey = (ev) => { if (ev.key === "Escape") cleanup(); };
   $("#switch-close").onclick = cleanup;
-  $("#switch-dismiss").onclick = cleanup;
   scrim.onclick = cleanup;
   document.addEventListener("keydown", onKey);
 
-  // Step 1 → step 2 transition. Hide the instructions, show the amount
-  // input. Bring focus into the input so the user can type immediately.
-  $("#switch-complete").onclick = () => {
-    $("#switch-steps-view").hidden = true;
-    $("#switch-amount-view").hidden = false;
-    $("#switch-actions-steps").hidden = true;
-    $("#switch-actions-amount").hidden = false;
-    setTimeout(() => $("#switch-amount-input").focus(), 50);
-  };
-  $("#switch-amount-cancel").onclick = () => {
-    $("#switch-steps-view").hidden = false;
-    $("#switch-amount-view").hidden = true;
-    $("#switch-actions-steps").hidden = false;
-    $("#switch-actions-amount").hidden = true;
-  };
-  $("#switch-amount-submit").onclick = async () => {
-    const errEl = $("#switch-amount-error");
-    errEl.hidden = true;
-    errEl.textContent = "";
-    const raw = $("#switch-amount-input").value.trim();
-    const amount = Number(raw);
-    if (!raw || !Number.isFinite(amount) || amount < 0) {
-      errEl.textContent = "Enter a valid dollar amount.";
-      errEl.hidden = false;
-      return;
-    }
-    const runId = drawerState?.row?.audit?.run_id;
-    if (!runId) {
-      errEl.textContent = "Couldn't find the bill this offer belongs to. Refresh and try again.";
-      errEl.hidden = false;
-      return;
-    }
-    const submitBtn = $("#switch-amount-submit");
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Saving…";
-    try {
-      const res = await apiFetch("/api/switch-complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          run_id: runId,
-          category: offer.category ?? null,
-          current_provider: currentName,
-          new_provider: recommendedName,
-          new_amount: amount,
-        }),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j?.message ?? j?.error ?? res.statusText);
+  if (completeBtn) {
+    completeBtn.onclick = async () => {
+      const runId = drawerState?.row?.audit?.run_id;
+      if (errEl) {
+        errEl.hidden = true;
+        errEl.textContent = "";
       }
-      cleanup();
-      // Reload history + drawer so the activity log immediately shows the
-      // new switch. The drawer re-render brings the user to the activity
-      // tab where they'll see the entry.
-      await loadHistory();
-      const updated = findUpdatedRowAfterRefresh(drawerState.row);
-      if (updated) {
-        drawerState.row = updated;
-        openBillDrawer(updated);
+      if (!runId) {
+        if (errEl) {
+          errEl.textContent = "Couldn't find the bill this offer belongs to. Refresh and try again.";
+          errEl.hidden = false;
+        }
+        return;
       }
-    } catch (err) {
-      errEl.textContent = `Couldn't save: ${err?.message ?? err}`;
-      errEl.hidden = false;
-      submitBtn.disabled = false;
-      submitBtn.textContent = "Save switch";
-    }
-  };
+      completeBtn.disabled = true;
+      completeBtn.textContent = "Saving…";
+      try {
+        const res = await apiFetch("/api/switch-complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            run_id: runId,
+            category: offer.category ?? null,
+            current_provider: currentName,
+            new_provider: recommendedName,
+            // We log the recommended price as the new monthly amount —
+            // the user just signed up for that plan, so that's what
+            // they're paying now. No need to re-prompt.
+            new_amount: Number(offer.offered ?? 0),
+          }),
+        });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          throw new Error(j?.message ?? j?.error ?? res.statusText);
+        }
+        cleanup();
+        // Reload history + drawer so the activity log immediately shows
+        // the new switch on the bill's Activity tab.
+        await loadHistory();
+        const updated = findUpdatedRowAfterRefresh(drawerState.row);
+        if (updated) {
+          drawerState.row = updated;
+          openBillDrawer(updated);
+        }
+      } catch (err) {
+        if (errEl) {
+          errEl.textContent = `Couldn't save: ${err?.message ?? err}`;
+          errEl.hidden = false;
+        }
+        completeBtn.disabled = false;
+        completeBtn.textContent = "Switch completed";
+      }
+    };
+  }
 }
 
 

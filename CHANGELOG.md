@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.30.0] - 2026-04-26
+
+### Changed
+- **Comparison Recommended view collapses to one tile per bill.** Multiple alternative offers can exist for the same baseline (different pharmacies for one Rx; different ISPs for one cable bill). The Recommended filter now keeps the single highest-saving recommendation per `baseline.current_provider` so the page doesn't drown in near-duplicates. The All view still shows every alternative for users who want to compare them directly.
+- **Switch modal collapses to one button.** The two-step Dismiss/Complete → Back/Save-switch flow had four buttons spread across two views. Replaced with a single primary "Switch completed" button — the user already saw the recommended monthly price on the offer card, so the new amount is logged from `offer.offered` instead of asking them to re-type it.
+- **Tile action buttons align across cards.** `.offer-actions` now sets `margin-top: auto` so Dismiss/Compare/Switch buttons stick to the bottom of each tile regardless of how long the "Why it fits" body runs. Cards next to each other in the grid line up cleanly.
+
 ## [0.1.29.0] - 2026-04-26
 
 ### Fixed
