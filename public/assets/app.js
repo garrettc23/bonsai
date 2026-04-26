@@ -2646,9 +2646,12 @@ function renderConversation(report) {
  * Spinner-flavored empty state for the Comparison tab while a background
  * offer hunt is still in flight. Same stash-and-swap pattern as
  * renderHeroEmptyView so restoreViewChildren can bring the chrome back
- * once offers arrive.
+ * once offers arrive. Starts a 1s ticker that updates `.hunt-elapsed`
+ * in place — when the hero is unmounted (chrome restored or nav-away),
+ * the ticker detects the missing DOM node and self-clears, so callers
+ * don't need explicit teardown.
  */
-function renderComparisonHuntingHero(view, elapsedSeconds) {
+function renderComparisonHuntingHero(view) {
   if (view.querySelector(":scope > .empty-hero.hunting")) return;
 
   // If a different empty-hero (e.g. the idle "drop a bill" CTA) is
@@ -2661,18 +2664,34 @@ function renderComparisonHuntingHero(view, elapsedSeconds) {
   stash.style.display = "none";
   while (view.firstChild) stash.appendChild(view.firstChild);
 
+  const elapsed0 = Math.max(0, Math.floor((Date.now() - offersPollStartedAt) / 1000));
   const hero = document.createElement("div");
   hero.className = "empty-hero hunting";
   hero.innerHTML = `
     <div class="empty-hero-card">
       <h2 class="empty-hero-title">Bonsai is hunting alternatives…</h2>
-      <p class="empty-hero-body">Searching the web for cheaper providers that match your recent audit. This usually takes 30–90 seconds. <span class="hunt-elapsed">${elapsedSeconds}s elapsed</span></p>
+      <p class="empty-hero-body">Searching the web for cheaper providers to lower your recurring expenses. This usually takes 30–90 seconds. <span class="hunt-elapsed">${elapsed0}s elapsed</span></p>
       <div class="hunt-status" style="justify-content:center"><span class="pulse-dot"></span> Searching…</div>
     </div>`;
 
   hero.appendChild(stash);
   hero.dataset.viewChildren = "1";
   view.appendChild(hero);
+
+  // 1s ticker so the user can watch the elapsed time count up. Kills
+  // itself the moment .hunt-elapsed leaves the DOM (chrome restored,
+  // user navigated away, hero replaced). One ticker at a time.
+  if (offersHuntTickerId) clearInterval(offersHuntTickerId);
+  offersHuntTickerId = setInterval(() => {
+    const el = document.querySelector(".empty-hero.hunting .hunt-elapsed");
+    if (!el) {
+      clearInterval(offersHuntTickerId);
+      offersHuntTickerId = null;
+      return;
+    }
+    const secs = Math.max(0, Math.floor((Date.now() - offersPollStartedAt) / 1000));
+    el.textContent = `${secs}s elapsed`;
+  }, 1000);
 }
 
 function renderHeroEmptyView(view, { title, body, cta }) {
@@ -2880,6 +2899,13 @@ const KIND_ICON = {
 let offersCache = [];
 let offersPollTimer = null;
 let offersPollStartedAt = 0;
+let offersPollTimedOut = false;
+let offersHuntTickerId = null;
+
+// 90s cap matches the user-facing "30–90 seconds" copy. Past that we give
+// up and surface the empty Comparison page instead of leaving the spinner
+// turning forever — most hunts that beat the cap return ≤60s.
+const OFFERS_POLL_CAP_MS = 90 * 1000;
 
 async function loadOffers() {
   try {
@@ -2896,12 +2922,21 @@ async function pollOffersUntilFresh() {
   if (offersPollTimer) return; // already polling
   if (offersCache.length > 0) return; // already have offers
   offersPollStartedAt = Date.now();
+  offersPollTimedOut = false;
   const tick = async () => {
     offersPollTimer = null;
     if (currentNav !== "offers") return; // navigated away
-    if (Date.now() - offersPollStartedAt > 5 * 60 * 1000) return; // 5min cap
+    if (Date.now() - offersPollStartedAt > OFFERS_POLL_CAP_MS) {
+      // Hunt likely failed to find anything (or is taking too long).
+      // Flip the timed-out flag and re-render so the chrome shows with
+      // an empty grid instead of leaving the spinner up forever.
+      offersPollTimedOut = true;
+      renderOffers();
+      return;
+    }
     await loadOffers();
     if (offersCache.length > 0) {
+      offersPollTimedOut = false;
       renderOffers();
       return;
     }
@@ -3340,21 +3375,28 @@ function renderOffers() {
   // restoreViewChildren can bring it back when offers land.
   if (offersCache.length === 0) {
     if (offersPollTimer) {
-      const elapsed = Math.floor((Date.now() - offersPollStartedAt) / 1000);
-      renderComparisonHuntingHero(view, elapsed);
-    } else {
+      renderComparisonHuntingHero(view);
+      return;
+    }
+    if (!offersPollTimedOut) {
+      // Idle, never tried — new user with no audits yet.
       renderHeroEmptyView(view, {
         title: "No alternatives yet",
         body:
           "Bonsai hunts for cheaper providers across your recurring costs every time you upload a bill. Drop one on the Home tab to kick off your first audit — Comparison populates automatically once it's done.",
         cta: "Go to Home",
       });
+      return;
     }
-    return;
+    // Timed out after a hunt — fall through to the chrome render below
+    // so the user sees the comparison page with an empty grid (banner
+    // hidden, just the "Recommended" / "All" filter chips). Better than
+    // spinning forever or hiding the page entirely.
   }
 
-  // Have offers — restore the original chrome (banner, filters, grid)
-  // if the previous render mounted an empty-hero in its place.
+  // Have offers, or hunt timed out — restore the original chrome
+  // (banner, filters, grid) if the previous render mounted an empty-hero
+  // in its place.
   restoreViewChildren(view);
 
   // The savings banner only earns the page real estate when Bonsai has
