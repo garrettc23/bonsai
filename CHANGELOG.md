@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.32.1] - 2026-04-26
+## [0.1.32.2] - 2026-04-29
+
+### Changed
+- **Landing page polish.** Top-right CTA renamed from "Get started" to "Sign up" so the nav has both auth verbs (Sign in / Sign up) instead of one auth verb and one product verb. Hero badge "Now in preview" → "Now in beta", and the meta line + FAQ answer follow suit. The `$1,313.24 saved across 12 bills audited so far` line is gone — small-N social proof was undercutting more than it was selling.
+- **Smooth-scroll on nav anchors.** Clicking Features / How it works / FAQ now animates to the section instead of jumping. Added `scroll-margin-top: 72px` so the section heading clears the sticky nav after the scroll completes.
+
+### Fixed
+- **Marquee no longer shows an empty gap on wide screens.** The category track (Insurance · Utilities · Medical · …) had two copies of the list animating to `translateX(-50%)` for the loop. On viewports wider than one copy (~1450px — basically every laptop), the right edge of the screen ran out of content at the loop point and snapped. Now four copies animating to `-25%`: copies 2-4 always trail right of the viewport, so the loop is seamless on any screen size. Same scroll speed as before.
 
 ### Added
 - **`SECURITY.md`** — security policy for the OSS launch. Supported versions (latest only, beta), private reporting via `gcahill@firebaystudios.com`, in-scope (auth bypass, RCE, cross-user data exposure, secret extraction) vs. out-of-scope (rate-limit bypass, social engineering, brute force without lockout), and a standard 90-day coordinated disclosure timeline.
