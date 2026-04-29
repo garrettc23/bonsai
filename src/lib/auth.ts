@@ -21,6 +21,9 @@ export interface User {
   /** Timestamp when the user signed up for the Comparison early-access
    * waitlist. Null when they haven't joined yet. */
   early_access_at: number | null;
+  /** Google's stable subject ID — set when the account is linked to a
+   * Google identity. Null for password-only accounts. */
+  google_sub: string | null;
 }
 
 export interface Session {
@@ -103,6 +106,7 @@ export async function createUser(
     accepted_terms_at: now,
     pending_email: null,
     early_access_at: null,
+    google_sub: null,
   };
 }
 
@@ -114,10 +118,11 @@ type UserRow = {
   accepted_terms_at: number | null;
   pending_email: string | null;
   early_access_at: number | null;
+  google_sub: string | null;
 };
 
 const USER_COLUMNS =
-  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email, early_access_at";
+  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email, early_access_at, google_sub";
 
 function rowToUser(row: UserRow): User {
   return {
@@ -128,6 +133,7 @@ function rowToUser(row: UserRow): User {
     accepted_terms_at: row.accepted_terms_at,
     pending_email: row.pending_email,
     early_access_at: row.early_access_at ?? null,
+    google_sub: row.google_sub ?? null,
   };
 }
 
@@ -317,6 +323,75 @@ export function getUserByEmail(email: string): User | null {
     .query(`SELECT ${USER_COLUMNS} FROM users WHERE email = ?`)
     .get(normalizeEmail(email)) as UserRow | null;
   return row ? rowToUser(row) : null;
+}
+
+// ─── Google OAuth ───────────────────────────────────────────────
+
+/** Look up a user by their Google subject ID. */
+export function getUserByGoogleSub(sub: string): User | null {
+  const db = getDb();
+  const row = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE google_sub = ?`)
+    .get(sub) as UserRow | null;
+  return row ? rowToUser(row) : null;
+}
+
+/**
+ * Create a user that signed in with Google. We still satisfy the NOT NULL
+ * password_hash constraint by storing an Argon2id hash of a high-entropy
+ * random secret the user will never see — they cannot password-login until
+ * they go through forgot-password and set one. Email is marked verified
+ * because Google verified it; terms are auto-accepted because the OAuth
+ * consent screen surfaces our links and the act of approving the consent
+ * is the acceptance.
+ */
+export async function createGoogleUser(email: string, googleSub: string): Promise<User> {
+  const normalizedEmail = normalizeEmail(email);
+  if (!isValidEmail(normalizedEmail)) {
+    throw new AuthError("invalid_email", "Google returned an email Bonsai can't accept.");
+  }
+  const db = getDb();
+  const existingByEmail = db.query("SELECT id FROM users WHERE email = ?").get(normalizedEmail);
+  if (existingByEmail) {
+    throw new AuthError("email_taken", "An account with that email already exists.");
+  }
+  const id = newId("usr");
+  const password_hash = await Bun.password.hash(
+    randomBytes(32).toString("hex"),
+    { algorithm: "argon2id" },
+  );
+  const now = Date.now();
+  db.query(
+    `INSERT INTO users (id, email, password_hash, created_at, accepted_terms_at, email_verified_at, google_sub)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, normalizedEmail, password_hash, now, now, now, googleSub);
+  return {
+    id,
+    email: normalizedEmail,
+    created_at: now,
+    email_verified_at: now,
+    accepted_terms_at: now,
+    pending_email: null,
+    early_access_at: null,
+    google_sub: googleSub,
+  };
+}
+
+/**
+ * Link a Google identity to an existing password account. Used when a user
+ * who already signed up with email + password later uses "Sign in with
+ * Google" against the same email. We trust Google's email-verification
+ * here — if the addresses match and Google says the email is verified,
+ * the human in front of Google's consent screen owns the inbox we'd
+ * otherwise let them password-reset against.
+ */
+export function linkGoogleSub(userId: string, sub: string): User {
+  const db = getDb();
+  db.query("UPDATE users SET google_sub = ?, email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?")
+    .run(sub, Date.now(), userId);
+  const user = getUserById(userId);
+  if (!user) throw new AuthError("user_not_found", "Account no longer exists.");
+  return user;
 }
 
 /**

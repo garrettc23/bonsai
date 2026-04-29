@@ -2927,6 +2927,173 @@ function handleMe(user: User | null): Response {
   return Response.json({ user: userPublic(user) });
 }
 
+// ─── Google OAuth (sign in with Google) ─────────────────────────
+
+const GOOGLE_STATE_COOKIE = "bonsai_oauth_state";
+const GOOGLE_STATE_TTL_SEC = 5 * 60;
+
+/** Match the redirect URI Google sees with what's registered in the OAuth client. */
+function googleRedirectUri(req: Request): string {
+  const reqUrl = new URL(req.url);
+  // In production the reverse proxy terminates TLS upstream, so req.url is
+  // http://internal — fall back to BONSAI_PUBLIC_DOMAIN there. Locally, the
+  // request URL itself is correct.
+  if (process.env.NODE_ENV === "production") {
+    const host = process.env.BONSAI_PUBLIC_DOMAIN?.trim();
+    if (host) return `https://${host}/api/auth/google/callback`;
+  }
+  return `${reqUrl.origin}/api/auth/google/callback`;
+}
+
+function setOAuthStateCookie(state: string): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${GOOGLE_STATE_COOKIE}=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${GOOGLE_STATE_TTL_SEC}${secure}`;
+}
+
+function clearOAuthStateCookie(): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${GOOGLE_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
+}
+
+function readOAuthStateCookie(req: Request): string | null {
+  const cookie = req.headers.get("cookie");
+  if (!cookie) return null;
+  for (const part of cookie.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === GOOGLE_STATE_COOKIE) return rest.join("=");
+  }
+  return null;
+}
+
+async function handleGoogleStart(req: Request): Promise<Response> {
+  const { isGoogleOAuthConfigured, newOAuthState, buildAuthorizeUrl } = await import(
+    "./lib/google-oauth.ts"
+  );
+  if (!isGoogleOAuthConfigured()) {
+    return new Response("Sign in with Google is not configured on this server.", {
+      status: 503,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+  const state = newOAuthState();
+  const authorizeUrl = buildAuthorizeUrl(state, googleRedirectUri(req));
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: authorizeUrl,
+      "Set-Cookie": setOAuthStateCookie(state),
+    },
+  });
+}
+
+/**
+ * Render a tiny HTML page that bounces back to /app with a flash message.
+ * Used when the OAuth callback fails — we want the user to land on the SPA
+ * with a friendly explanation rather than a bare error string.
+ */
+function googleCallbackErrorRedirect(message: string): Response {
+  const target = `/app?google_error=${encodeURIComponent(message)}`;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: target,
+      "Set-Cookie": clearOAuthStateCookie(),
+    },
+  });
+}
+
+async function handleGoogleCallback(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const errorParam = url.searchParams.get("error");
+  if (errorParam) {
+    // User hit "Cancel" on Google's consent screen, or scope was denied.
+    return googleCallbackErrorRedirect(`Google sign-in was cancelled (${errorParam}).`);
+  }
+  if (!code || !state) {
+    return googleCallbackErrorRedirect("Google sign-in returned an incomplete response.");
+  }
+  const cookieState = readOAuthStateCookie(req);
+  if (!cookieState || cookieState !== state) {
+    return googleCallbackErrorRedirect("Sign-in session expired — please try again.");
+  }
+
+  const {
+    isGoogleOAuthConfigured,
+    exchangeCodeForToken,
+    fetchGoogleProfile,
+    GoogleOAuthError,
+  } = await import("./lib/google-oauth.ts");
+  if (!isGoogleOAuthConfigured()) {
+    return googleCallbackErrorRedirect("Sign in with Google is not configured.");
+  }
+
+  let profile;
+  try {
+    const token = await exchangeCodeForToken(code, googleRedirectUri(req));
+    profile = await fetchGoogleProfile(token.access_token);
+  } catch (err) {
+    if (err instanceof GoogleOAuthError) {
+      console.warn(`[google-oauth] ${err.code}: ${err.message}`);
+      return googleCallbackErrorRedirect(
+        err.code === "email_not_verified"
+          ? "Google says this email isn't verified — sign in with a verified address."
+          : "Couldn't reach Google to finish signing in. Please try again.",
+      );
+    }
+    throw err;
+  }
+
+  // Resolve to a user. Three cases:
+  //   1. We've seen this google_sub before → log them straight in.
+  //   2. The email matches a password-only user → link the Google identity
+  //      to their account (Google verified the email, so we trust it).
+  //   3. New email → create a fresh Google-only user.
+  const { getUserByGoogleSub, getUserByEmail, createGoogleUser, linkGoogleSub } = await import(
+    "./lib/auth.ts"
+  );
+  let user = getUserByGoogleSub(profile.sub);
+  if (!user) {
+    const byEmail = getUserByEmail(profile.email);
+    if (byEmail) {
+      user = linkGoogleSub(byEmail.id, profile.sub);
+    } else {
+      try {
+        user = await createGoogleUser(profile.email, profile.sub);
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return googleCallbackErrorRedirect(err.message);
+        }
+        throw err;
+      }
+    }
+  }
+
+  const session = createSession(user.id);
+  ensureUserDirs(userPaths(user.id));
+  // Seed profile email + agent authorization for fresh Google users so
+  // their first audit picks up their real email for CCs / inbound replies.
+  // Idempotent for repeat sign-ins (setProfileConfig overwrites).
+  await withUserContext(user, async () => {
+    const { setProfileConfig, getProfileConfig } = await import("./lib/user-settings.ts");
+    const existing = getProfileConfig();
+    if (!existing.email) {
+      setProfileConfig({
+        email: user!.email,
+        authorized: true,
+        hipaa_acknowledged: true,
+      });
+    }
+  });
+
+  // Build cookies array — Set-Cookie can be set twice (state-clear + session).
+  const headers = new Headers({ Location: "/app" });
+  headers.append("Set-Cookie", clearOAuthStateCookie());
+  headers.append("Set-Cookie", setSessionCookieHeader(session.id));
+  return new Response(null, { status: 302, headers });
+}
+
 const PUBLIC_API_PATHS = new Set([
   "/api/auth/signup",
   "/api/auth/login",
@@ -2934,6 +3101,8 @@ const PUBLIC_API_PATHS = new Set([
   "/api/auth/me",
   "/api/auth/forgot",
   "/api/auth/reset",
+  "/api/auth/google",
+  "/api/auth/google/callback",
   "/api/public-config",
 ]);
 
@@ -2998,6 +3167,8 @@ const server = Bun.serve({
       if (req.method === "GET" && url.pathname === "/api/auth/me") return handleMe(requireUser(req));
       if (req.method === "POST" && url.pathname === "/api/auth/forgot") return handleForgotPassword(req);
       if (req.method === "POST" && url.pathname === "/api/auth/reset") return handleResetPassword(req);
+      if (req.method === "GET" && url.pathname === "/api/auth/google") return handleGoogleStart(req);
+      if (req.method === "GET" && url.pathname === "/api/auth/google/callback") return handleGoogleCallback(req);
 
       // Resend's inbound webhook is unauthenticated — it carries an svix
       // HMAC signature instead of a session cookie. Lives outside the auth

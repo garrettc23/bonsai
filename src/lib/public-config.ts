@@ -10,12 +10,19 @@
 export interface PublicConfig {
   support_email: string | null;
   public_domain: string | null;
+  /** True when GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET are both set on the
+   * server, so the SPA login UI knows whether to render the "Sign in with
+   * Google" button. */
+  google_oauth_enabled: boolean;
 }
 
 export function readPublicConfig(): PublicConfig {
   const support_email = process.env.BONSAI_SUPPORT_EMAIL?.trim() || null;
   const public_domain = process.env.BONSAI_PUBLIC_DOMAIN?.trim() || null;
-  return { support_email, public_domain };
+  const google_oauth_enabled = Boolean(
+    process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim(),
+  );
+  return { support_email, public_domain, google_oauth_enabled };
 }
 
 export function handlePublicConfig(): Response {

@@ -10,7 +10,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { handlePublicConfig, readPublicConfig } from "../src/lib/public-config.ts";
 
-const ENV_KEYS = ["BONSAI_SUPPORT_EMAIL", "BONSAI_PUBLIC_DOMAIN"] as const;
+const ENV_KEYS = [
+  "BONSAI_SUPPORT_EMAIL",
+  "BONSAI_PUBLIC_DOMAIN",
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+] as const;
 
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -21,7 +26,11 @@ describe("/api/public-config", () => {
     for (const k of ENV_KEYS) delete process.env[k];
     const res = handlePublicConfig();
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ support_email: null, public_domain: null });
+    expect(await res.json()).toEqual({
+      support_email: null,
+      public_domain: null,
+      google_oauth_enabled: false,
+    });
   });
 
   test("returns trimmed values when set", async () => {
@@ -31,12 +40,24 @@ describe("/api/public-config", () => {
     expect(await res.json()).toEqual({
       support_email: "support@example.com",
       public_domain: "bonsai.example.com",
+      google_oauth_enabled: false,
     });
   });
 
   test("blank strings collapse to null (don't render an empty mailto)", () => {
     process.env.BONSAI_SUPPORT_EMAIL = "   ";
     process.env.BONSAI_PUBLIC_DOMAIN = "";
-    expect(readPublicConfig()).toEqual({ support_email: null, public_domain: null });
+    expect(readPublicConfig()).toEqual({
+      support_email: null,
+      public_domain: null,
+      google_oauth_enabled: false,
+    });
+  });
+
+  test("google_oauth_enabled flips true only when both Google env vars are set", () => {
+    process.env.GOOGLE_CLIENT_ID = "id";
+    expect(readPublicConfig().google_oauth_enabled).toBe(false);
+    process.env.GOOGLE_CLIENT_SECRET = "secret";
+    expect(readPublicConfig().google_oauth_enabled).toBe(true);
   });
 });

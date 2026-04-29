@@ -48,8 +48,11 @@ export function getDb(): Database {
       created_at INTEGER NOT NULL,
       email_verified_at INTEGER,
       accepted_terms_at INTEGER,
-      pending_email TEXT
+      pending_email TEXT,
+      google_sub TEXT
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx
+      ON users(google_sub) WHERE google_sub IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS email_verifications (
       token TEXT PRIMARY KEY,
@@ -145,9 +148,20 @@ export function getDb(): Database {
     // page. Used both to display "Added to early access" on subsequent
     // visits and to query who's interested in the comparison feature.
     "early_access_at INTEGER",
+    // Google's stable subject ID for users who signed in with Google.
+    // NULL for password-only accounts. The unique index is partial so
+    // many NULLs don't collide.
+    "google_sub TEXT",
   ]) {
     try { db.exec(`ALTER TABLE users ADD COLUMN ${col};`); } catch { /* already exists */ }
   }
+  // Partial unique index covers existing DBs that just got the column added.
+  try {
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx
+       ON users(google_sub) WHERE google_sub IS NOT NULL;`,
+    );
+  } catch { /* ignore */ }
 
   _db = db;
   _dbPath = targetPath;
