@@ -2,9 +2,21 @@
  * styles from app.css — no duplication. Sets only the landing-specific
  * layout: nav, hero, feature grid, step list, FAQ, footer. */
 
+html {
+  scroll-behavior: smooth;
+}
+
 .landing-page {
   background: var(--bg);
   color: var(--ink);
+}
+
+/* Anchor targets sit under the sticky nav — push them down so the
+ * heading isn't hidden after a smooth-scroll. */
+#features,
+#how-it-works,
+#faq {
+  scroll-margin-top: 72px;
 }
 
 /* The SPA's `.brand` rule pads its bottom (sidebar context). Reset that
@@ -191,6 +203,7 @@ a.btn { text-decoration: none; }
   white-space: nowrap;
   width: max-content;
   animation: marquee 50s linear infinite;
+  will-change: transform;
 }
 .landing-marquee-track span {
   font-family: var(--font-display);
@@ -204,9 +217,13 @@ a.btn { text-decoration: none; }
   opacity: 0.6;
   font-style: italic;
 }
+/* Track holds 4 identical copies of the category list. Scrolling the
+ * track left by 25% (one full copy) lands the next copy in the same
+ * spot the previous one occupied — seamless loop, with copies 2-4
+ * trailing right of viewport so there's no empty gap on wide screens. */
 @keyframes marquee {
   from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
+  to { transform: translateX(-25%); }
 }
 @media (prefers-reduced-motion: reduce) {
   .landing-marquee-track { animation: none; }
