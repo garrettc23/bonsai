@@ -147,20 +147,34 @@ let timelineTimer = null;
 let currentNav = "overview";
 let historyCache = null;
 
-// Unsaved-changes guard for Profile and Settings.
-// `installUnsavedGuard(getValues)` snapshots the form state and registers a
-// dirty-check used by both showNav() (in-app navigation) and beforeunload.
-// Save handlers call `markSaved()` to reset the baseline.
+// Unsaved-changes guard for the Settings tab (which now hosts both the
+// profile card and the agent-tune card after the v1.34 merge).
+// `installUnsavedGuard` accepts either a single getValues function (legacy
+// shape) or an object map { name: getValues } so each card carries its
+// own baseline. `markSaved(name)` resets just one card; `markSaved()` with
+// no name resets all baselines (used by callers that don't know their name).
+// This matters because each card POSTs to a different endpoint — saving
+// profile shouldn't silently clean tune's dirty state and vice versa.
 let unsavedGuard = null;
-function installUnsavedGuard(getValues) {
-  let baseline;
-  try { baseline = JSON.stringify(getValues()); } catch { baseline = ""; }
+function installUnsavedGuard(arg) {
+  const cards = typeof arg === "function" ? { _: arg } : arg;
+  const baselines = {};
+  for (const [name, fn] of Object.entries(cards)) {
+    try { baselines[name] = JSON.stringify(fn()); } catch { baselines[name] = ""; }
+  }
   const guard = {
     isDirty: () => {
-      try { return JSON.stringify(getValues()) !== baseline; } catch { return false; }
+      for (const [name, fn] of Object.entries(cards)) {
+        try { if (JSON.stringify(fn()) !== baselines[name]) return true; } catch { /* ignore */ }
+      }
+      return false;
     },
-    markSaved: () => {
-      try { baseline = JSON.stringify(getValues()); } catch { /* ignore */ }
+    markSaved: (name) => {
+      const targets = name ? [name] : Object.keys(cards);
+      for (const t of targets) {
+        if (!cards[t]) continue;
+        try { baselines[t] = JSON.stringify(cards[t]()); } catch { /* ignore */ }
+      }
     },
   };
   unsavedGuard = guard;
@@ -245,7 +259,7 @@ async function confirmDiscardUnsaved() {
     return confirmModal({ title, body, confirmText, cancelText });
   }
   if (!unsavedGuard?.isDirty?.()) return true;
-  if (!(currentNav === "profile" || currentNav === "settings")) return true;
+  if (currentNav !== "settings") return true;
   return confirmModal({
     title: "Discard unsaved changes?",
     body: "You've made changes that haven't been saved. Leaving this tab will lose them.",
@@ -348,7 +362,7 @@ async function showNav(name) {
     n.classList.toggle("active", n.dataset.nav === name);
   }
   // Hide every view; the nav-specific ones get revealed below
-  for (const v of ["overview", "complaint", "progress", "review", "results", "error", "bills", "offers", "profile", "settings"]) {
+  for (const v of ["overview", "complaint", "progress", "review", "results", "error", "bills", "offers", "settings"]) {
     $(`#view-${v}`)?.classList.add("hidden");
   }
   if (name === "overview") {
@@ -371,9 +385,6 @@ async function showNav(name) {
     // each audit. Bails out automatically once results land or the user
     // navigates away.
     void pollOffersUntilFresh();
-  } else if (name === "profile") {
-    $("#view-profile").classList.remove("hidden");
-    renderProfile();
   } else if (name === "settings") {
     $("#view-settings").classList.remove("hidden");
     renderSettings();
@@ -529,8 +540,20 @@ function renderAuthScreen() {
           </span>
         </div>
         <div class="auth-tag">Every bill, negotiated.</div>
+        <div class="auth-google-row" id="auth-google-row" hidden>
+          <a class="auth-google-btn" href="/api/auth/google">
+            <svg class="auth-google-mark" viewBox="0 0 18 18" aria-hidden="true">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.706A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.706V4.962H.957A8.997 8.997 0 0 0 0 9c0 1.452.348 2.827.957 4.038l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.962L3.964 7.294C4.672 5.166 6.656 3.58 9 3.58z"/>
+            </svg>
+            Continue with Google
+          </a>
+          <div class="auth-divider"><span>or</span></div>
+        </div>
         <div class="auth-tabs">
-          <button type="button" class="auth-tab is-active" data-tab="login">Log in</button>
+          <button type="button" class="auth-tab is-active" data-tab="login">Sign in</button>
           <button type="button" class="auth-tab" data-tab="signup">Sign up</button>
         </div>
         <form class="auth-form" id="auth-form" autocomplete="on">
@@ -542,7 +565,7 @@ function renderAuthScreen() {
             <span>Password</span>
             <input type="password" name="password" autocomplete="current-password" minlength="8" required />
           </label>
-          <button type="submit" class="auth-submit" data-label-login="Log in" data-label-signup="Create account">Log in</button>
+          <button type="submit" class="auth-submit" data-label-login="Sign in" data-label-signup="Create account">Sign in</button>
           <div class="auth-error" id="auth-error" hidden></div>
         </form>
         <div class="auth-foot">
@@ -568,6 +591,38 @@ function renderAuthScreen() {
   let mode = "login";
   const submit = document.getElementById("auth-form").querySelector(".auth-submit");
   const errEl = document.getElementById("auth-error");
+
+  // The OAuth callback bounces here with ?google_error=<msg> when the round
+  // trip with Google fails (cancelled consent, expired state, unverified
+  // email). Surface it in the same red error block as login failures, then
+  // strip the query param so a refresh doesn't keep it sticky.
+  const googleError = params.get("google_error");
+  if (googleError) {
+    errEl.textContent = googleError;
+    errEl.hidden = false;
+    const cleanUrl = window.location.pathname + window.location.hash;
+    window.history.replaceState({}, "", cleanUrl);
+  }
+
+  // Landing page CTAs pass ?auth=signup / ?auth=signin so the form opens
+  // on the tab the user clicked toward instead of always defaulting to
+  // login. Strip the param after switching so a hard refresh doesn't
+  // override the user's tab choice if they later toggle it.
+  const initialTab = params.get("auth") === "signup" ? "signup" : "login";
+
+  // Reveal the Google button only if the server is configured for it. We
+  // fetch /api/public-config (cheap, public) on every auth-screen mount;
+  // /app reloads are infrequent enough that caching isn't worth the bug
+  // surface of a stale cache when the operator rotates the OAuth client.
+  fetch("/api/public-config", { credentials: "same-origin" })
+    .then((r) => r.json())
+    .then((cfg) => {
+      if (cfg && cfg.google_oauth_enabled) {
+        const row = document.getElementById("auth-google-row");
+        if (row) row.hidden = false;
+      }
+    })
+    .catch(() => { /* SPA still works without Google sign-in */ });
   const pwField = document.querySelector('input[name="password"]');
   attachPasswordToggle(pwField);
   const forgotLink = document.getElementById("auth-forgot");
@@ -588,6 +643,19 @@ function renderAuthScreen() {
       termsRow.hidden = mode !== "signup";
       errEl.hidden = true;
     });
+  }
+
+  // Apply the ?auth= preselection by triggering the matching tab's click
+  // handler — same code path as a real user click, so labels, autocomplete,
+  // and foot-row visibility all flip in lockstep. Then drop the query
+  // param so the URL stays clean.
+  if (initialTab === "signup") {
+    const signupTab = document.querySelector('.auth-tab[data-tab="signup"]');
+    if (signupTab) signupTab.click();
+  }
+  if (params.has("auth")) {
+    const cleanUrl = window.location.pathname + window.location.hash;
+    window.history.replaceState({}, "", cleanUrl);
   }
 
   forgotLink.addEventListener("click", (ev) => {
@@ -1660,7 +1728,15 @@ async function runPhasedFromPrefetch(promise) {
   startTimeline();
   try {
     const data = await promise;
-    if (!data || data.__error) throw data?.__error ?? new Error("Audit cancelled");
+    // Null = the prefetch was aborted (user removed the staged file /
+    // cancelled before the audit completed). Not an error condition —
+    // bounce back to the upload screen so they can pick a fresh bill.
+    if (!data) {
+      stopTimeline();
+      setWorkflowView("overview");
+      return;
+    }
+    if (data.__error) throw data.__error;
     const { run_id, report } = data;
     stopTimeline();
     reviewState = { run_id, partial_report: report };
@@ -4220,36 +4296,11 @@ function clearSaveStatusOnEdit(formRoot, statusEl) {
   formRoot.addEventListener("change", wipe);
 }
 
-// ─── Profile ──────────────────────────────────────────────────
-
-async function renderProfile() {
-  updatePageHeader({
-    eyebrow: "Profile",
-    title: "Who you are",
-    stats: null,
-  });
-  const root = $("#profile-groups");
-  root.innerHTML = '<div class="tl-sub">Loading…</div>';
-
-  let sdata;
-  try {
-    sdata = await apiFetch("/api/settings").then((r) => r.json());
-  } catch {
-    sdata = { profile: {} };
-  }
-  const profile = sdata.profile ?? {};
-
-  root.innerHTML = "";
-  const card = mkProfileCard(profile);
-  root.appendChild(card.el);
-  installUnsavedGuard(card.getValues);
-}
+// ─── Profile card (rendered inside the merged Settings tab) ─────
 
 function mkProfileCard(p) {
   const g = document.createElement("div");
   g.className = "settings-group";
-  const authorized = !!p.authorized;
-  const hipaaAcked = !!p.hipaa_acknowledged;
   g.innerHTML = `
     <div class="settings-group-title">Personal details</div>
     <div class="settings-card">
@@ -4266,7 +4317,7 @@ function mkProfileCard(p) {
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Email</div>
-          <div class="settings-row-help">Inbound replies from companies route here. Used as your contact email on every appeal.</div>
+          <div class="settings-row-help">Inbound replies from companies route here.</div>
           <input type="email" id="prof-email" class="settings-input" value="${escapeHtml(p.email ?? "")}" placeholder="you@example.com" autocomplete="email" />
         </div>
       </div>
@@ -4280,21 +4331,21 @@ function mkProfileCard(p) {
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Address</div>
-          <div class="settings-row-help">Billing address on file. Used on appeal letters and dispute correspondence.</div>
+          <div class="settings-row-help">Used on appeal letters and dispute correspondence.</div>
           <input type="text" id="prof-address" class="settings-input" value="${escapeHtml(p.address ?? "")}" placeholder="123 Main St, Apt 4, Oakland, CA 94612" autocomplete="street-address" />
         </div>
       </div>
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Date of birth</div>
-          <div class="settings-row-help">Some accounts require this to verify your identity. Never used for marketing.</div>
+          <div class="settings-row-help">Some accounts require this to verify your identity.</div>
           <input type="date" id="prof-dob" class="settings-input" value="${escapeHtml(p.dob ?? "")}" autocomplete="bday" />
         </div>
       </div>
       <div class="settings-row settings-row-split">
         <div class="settings-row-main">
           <div class="settings-row-label">SSN (last 4)</div>
-          <div class="settings-row-help">Some accounts require this to pull your record. Stored locally; never shown in transcripts.</div>
+          <div class="settings-row-help">Some accounts require this to pull your record. It's securely stored.</div>
           <input type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" id="prof-ssn" class="settings-input" value="${escapeHtml(p.ssn_last4 ?? "")}" placeholder="1234" autocomplete="off" />
         </div>
         <div class="settings-row-main">
@@ -4303,9 +4354,42 @@ function mkProfileCard(p) {
           <input type="text" id="prof-dl" class="settings-input" value="${escapeHtml(p.drivers_license ?? "")}" placeholder="D1234567" autocomplete="off" />
         </div>
       </div>
-    </div>
+    </div>`;
 
-    <div class="settings-group-title" style="margin-top:24px">Authorization</div>
+  // SSN: digits only.
+  const ssnInput = g.querySelector("#prof-ssn");
+  ssnInput.addEventListener("input", () => {
+    ssnInput.value = ssnInput.value.replace(/\D/g, "").slice(0, 4);
+  });
+
+  const getValues = () => ({
+    first_name: g.querySelector("#prof-first").value.trim(),
+    last_name: g.querySelector("#prof-last").value.trim(),
+    email: g.querySelector("#prof-email").value.trim(),
+    phone: g.querySelector("#prof-phone").value.trim(),
+    address: g.querySelector("#prof-address").value.trim(),
+    dob: g.querySelector("#prof-dob").value.trim(),
+    ssn_last4: ssnInput.value.trim(),
+    drivers_license: g.querySelector("#prof-dl").value.trim(),
+  });
+
+  // Format phone as the user types: "9498879051" → "(949) 887-9051"
+  attachPhoneFormatter(g.querySelector("#prof-phone"));
+  return { el: g, getValues };
+}
+
+// Authorization + HIPAA — split out from the personal-details card so it
+// can sit at the bottom of the Settings page (after Account) where the
+// gravity of the legal copy doesn't dominate the form. Same /api/settings/
+// profile POST shape — the unified Save merges these values back into the
+// profile payload before sending.
+function mkAuthorizationCard(p) {
+  const g = document.createElement("div");
+  g.className = "settings-group";
+  const authorized = !!p.authorized;
+  const hipaaAcked = !!p.hipaa_acknowledged;
+  g.innerHTML = `
+    <div class="settings-group-title">Authorization</div>
     <div class="settings-card">
       <div class="settings-row settings-row-checkbox">
         <label class="consent-row">
@@ -4350,16 +4434,8 @@ function mkProfileCard(p) {
           </span>
         </label>
       </div>
-    </div>
-
-    <div class="settings-row" style="justify-content:flex-end;gap:10px;margin-top:16px">
-      <span id="prof-save-status" class="tg-save-status"></span>
-      <button class="btn btn-primary" id="prof-save-btn" type="button">Save profile</button>
     </div>`;
 
-  // HIPAA panel reveals only when the main authorization box is checked.
-  // Unchecking the auth box also clears the HIPAA acknowledgment so the user
-  // re-acknowledges if they re-authorize later.
   const authBox = g.querySelector("#prof-authorized");
   const hipaaPanel = g.querySelector("#prof-hipaa-panel");
   const hipaaBox = g.querySelector("#prof-hipaa");
@@ -4372,62 +4448,19 @@ function mkProfileCard(p) {
     }
   });
 
-  // SSN: digits only.
-  const ssnInput = g.querySelector("#prof-ssn");
-  ssnInput.addEventListener("input", () => {
-    ssnInput.value = ssnInput.value.replace(/\D/g, "").slice(0, 4);
-  });
-
   const getValues = () => ({
-    first_name: g.querySelector("#prof-first").value.trim(),
-    last_name: g.querySelector("#prof-last").value.trim(),
-    email: g.querySelector("#prof-email").value.trim(),
-    phone: g.querySelector("#prof-phone").value.trim(),
-    address: g.querySelector("#prof-address").value.trim(),
-    dob: g.querySelector("#prof-dob").value.trim(),
-    ssn_last4: ssnInput.value.trim(),
-    drivers_license: g.querySelector("#prof-dl").value.trim(),
     authorized: authBox.checked,
     hipaa_acknowledged: hipaaBox.checked,
   });
-
-  const saveBtn = g.querySelector("#prof-save-btn");
-  const status = g.querySelector("#prof-save-status");
-  saveBtn.addEventListener("click", async () => {
-    const body = getValues();
-    saveBtn.disabled = true;
-    status.textContent = "Saving…";
-    status.className = "tg-save-status";
-    try {
-      const res = await apiFetch("/api/settings/profile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      flashSavedThenFade(status);
-      unsavedGuard?.markSaved?.();
-    } catch (err) {
-      status.textContent = `Error: ${err?.message ?? err}`;
-      status.className = "tg-save-status err";
-    } finally {
-      saveBtn.disabled = false;
-    }
-  });
-  // Format phone as the user types: "9498879051" → "(949) 887-9051"
-  attachPhoneFormatter(g.querySelector("#prof-phone"));
-  // Clear the "Saved ✓" pill the instant any field changes — stale
-  // confirmation is misleading when there are pending edits.
-  clearSaveStatusOnEdit(g, status);
   return { el: g, getValues };
 }
 
-// ─── Tune your agent ───────────────────────────────────────────
+// ─── Settings (profile + tune + account, merged into one tab) ──
 
 async function renderSettings() {
   updatePageHeader({
     eyebrow: "Settings",
-    title: "Tune your agent",
+    title: "Profile and preferences",
     stats: null,
   });
   const root = $("#settings-groups");
@@ -4437,25 +4470,25 @@ async function renderSettings() {
   try {
     sdata = await apiFetch("/api/settings").then((r) => r.json());
   } catch {
-    sdata = { tune: {}, integrations: [], fixtures: { count: 0 }, port: 3333 };
+    sdata = { profile: {}, tune: {}, integrations: [], fixtures: { count: 0 }, port: 3333 };
   }
 
   root.innerHTML = "";
 
-  // Tune — tone, channels, floor, notifications.
+  // Order: personal details → personalization (tune) → account → authorization.
+  // Authorization sits at the bottom because the legal copy is heavy and we
+  // don't want it dominating the form. Account sits above it so logout /
+  // delete are reachable without scrolling past the consent block.
+  const profile = mkProfileCard(sdata.profile ?? {});
+  root.appendChild(profile.el);
+
   const tune = mkTuneCard(sdata.tune ?? {});
   root.appendChild(tune.el);
 
-  // Connected accounts deliberately omitted from the rendered tree —
-  // every integration (Anthropic, Resend, ElevenLabs) is operator-owned
-  // via Railway env vars, so there's nothing for an end user to configure.
-  // mkIntegrationsCard + the /api/settings/integrations write surface are
-  // kept on disk for re-enablement if we ever want per-user BYO credentials.
-
-  installUnsavedGuard(tune.getValues);
-
-  // Account — signed-in user, log out, export, delete. One card so users
-  // don't have to hunt across two sections for "things that are mine".
+  // Account — signed-in user, log out, export, delete. Delete-account row
+  // comes first (the irreversible action gets visual weight); log out is
+  // the last row so the most-common-but-low-stakes action is the easiest
+  // one to reach by scroll.
   const accountGroup = document.createElement("div");
   accountGroup.className = "settings-group";
   accountGroup.innerHTML = `
@@ -4463,10 +4496,10 @@ async function renderSettings() {
     <div class="settings-card">
       <div class="settings-row">
         <div class="settings-row-main">
-          <div class="settings-row-label">Signed in as</div>
-          <div class="settings-row-help" id="account-email">${escapeHtml(currentUser?.email ?? "")}</div>
+          <div class="settings-row-label">Delete account</div>
+          <div class="settings-row-help">Removes stored bills, EOBs, and negotiation history. Irreversible.</div>
         </div>
-        <button class="btn btn-ghost" id="account-logout-btn" type="button">Log out</button>
+        <button class="btn btn-ghost" id="data-delete-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
       </div>
       <div class="settings-row">
         <div class="settings-row-main">
@@ -4477,10 +4510,10 @@ async function renderSettings() {
       </div>
       <div class="settings-row">
         <div class="settings-row-main">
-          <div class="settings-row-label">Delete account</div>
-          <div class="settings-row-help">Removes stored bills, EOBs, and negotiation history. Irreversible.</div>
+          <div class="settings-row-label">Signed in as</div>
+          <div class="settings-row-help" id="account-email">${escapeHtml(currentUser?.email ?? "")}</div>
         </div>
-        <button class="btn btn-ghost" id="data-delete-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
+        <button class="btn btn-ghost" id="account-logout-btn" type="button">Log out</button>
       </div>
     </div>`;
   root.appendChild(accountGroup);
@@ -4518,31 +4551,53 @@ async function renderSettings() {
     openDeleteAccountModal();
   });
 
-  // Save row — pinned to the very bottom of the Settings page.
+  // Authorization — heaviest legal copy, sits last so it doesn't dominate
+  // the form. Same /api/settings/profile POST as personal-details (the
+  // unified Save below merges both bags before sending).
+  const authorization = mkAuthorizationCard(sdata.profile ?? {});
+  root.appendChild(authorization.el);
+
+  // Two baselines: profile (personal-details + authorization, both saved
+  // through /api/settings/profile) and tune (saved through /api/settings/
+  // tune). Saving one shouldn't silently clear the other's dirty state.
+  const combinedProfileGetValues = () => ({
+    ...profile.getValues(),
+    ...authorization.getValues(),
+  });
+  installUnsavedGuard({ profile: combinedProfileGetValues, tune: tune.getValues });
+
+  // Single Save row pinned to the very bottom — POSTs both the profile
+  // payload and the tune payload in parallel. Either failing surfaces the
+  // error; both succeeding flashes "Saved ✓" once.
   const saveRow = document.createElement("div");
   saveRow.className = "settings-save-row";
   saveRow.innerHTML = `
-    <span id="tune-save-status" class="tg-save-status"></span>
-    <button class="btn btn-primary" id="tune-save-btn" type="button">Save</button>`;
+    <span id="settings-save-status" class="tg-save-status"></span>
+    <button class="btn btn-primary" id="settings-save-btn" type="button">Save</button>`;
   root.appendChild(saveRow);
 
-  const saveBtn = saveRow.querySelector("#tune-save-btn");
-  const status = saveRow.querySelector("#tune-save-status");
-  // Clear the "Saved ✓" pill the moment any field on the Settings page
-  // changes — listening on `root` covers tune card, integrations card,
-  // and account card via event bubbling.
+  const saveBtn = saveRow.querySelector("#settings-save-btn");
+  const status = saveRow.querySelector("#settings-save-status");
   clearSaveStatusOnEdit(root, status);
   saveBtn.addEventListener("click", async () => {
     saveBtn.disabled = true;
     status.textContent = "Saving…";
     status.className = "tg-save-status";
     try {
-      const res = await apiFetch("/api/settings/tune", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(tune.getValues()),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      const [profileRes, tuneRes] = await Promise.all([
+        apiFetch("/api/settings/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(combinedProfileGetValues()),
+        }),
+        apiFetch("/api/settings/tune", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(tune.getValues()),
+        }),
+      ]);
+      if (!profileRes.ok) throw new Error(await profileRes.text());
+      if (!tuneRes.ok) throw new Error(await tuneRes.text());
       flashSavedThenFade(status);
       unsavedGuard?.markSaved?.();
     } catch (err) {
@@ -4740,7 +4795,7 @@ function mkTuneCard(tune) {
        <span class="tone-opt-help">${help}</span>
      </label>`;
   g.innerHTML = `
-    <div class="settings-group-title">Negotiation style</div>
+    <div class="settings-group-title">Agent personalization</div>
     <div class="settings-card">
       <div class="settings-row">
         <div class="settings-row-main">

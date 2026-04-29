@@ -711,10 +711,39 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-style: italic;
   font-weight: 500;
 }
-.dots span { display: inline-block; animation: dot 1.2s infinite; }
-.dots span:nth-child(2) { animation-delay: .15s; }
-.dots span:nth-child(3) { animation-delay: .3s; }
-@keyframes dot { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+/* Two flavors of `.dots`:
+ *   - Timeline / extract screen passes literal "." characters as content
+ *     and only needs the opacity pulse (the dots are rendered as text).
+ *   - Chat bubbles pass empty <span>s; for those we draw circles via
+ *     background-color so there's something visible to animate.
+ * The `:empty` scoping keeps the two surfaces from stomping on each other. */
+.dots span {
+  display: inline-block;
+  animation: dot 1.2s ease-in-out infinite;
+}
+.dots span:nth-child(2) { animation-delay: 0.18s; }
+.dots span:nth-child(3) { animation-delay: 0.36s; }
+.dots:has(span:empty) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 1em;
+  vertical-align: middle;
+}
+.dots span:empty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.25;
+}
+@keyframes dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dots span { animation: none; opacity: 0.6; }
+}
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: none; }
@@ -4324,6 +4353,52 @@ body.auth-screen {
   margin-top: 4px;
   color: var(--ink-mute);
   font-size: 13.5px;
+}
+.auth-google-row {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.auth-google-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--line-strong, #d4d4d0);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.auth-google-btn:hover {
+  background: var(--surface);
+  border-color: var(--ink-mute);
+}
+.auth-google-mark {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--ink-mute);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
 }
 .auth-tabs {
   display: flex;
