@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.33.0] - 2026-04-29
+
+### Added
+- **Sign in with Google.** Continue with Google button on the SPA's auth screen runs an OAuth 2.0 authorization-code flow against Google's OpenID Connect endpoints — three branches in the callback: log in if we've seen the Google `sub` before, auto-link to an existing password account if the email matches (Google verifies emails so the takeover risk is bounded), otherwise create a fresh account with email already verified and terms auto-accepted via the consent screen. New `users.google_sub` column with a partial unique index. Server-only client_secret, HttpOnly+SameSite=Lax state cookie for CSRF, rejects unverified Google emails. Env vars `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` are optional — server boots without them and the SPA hides the button via `/api/public-config`'s new `google_oauth_enabled` flag.
+- **Tab-aware landing CTAs.** "Sign up" / "Get started" buttons on the landing page now pass `?auth=signup` so the SPA opens directly on the sign-up tab instead of always defaulting to log-in. The query param is stripped after the tab switches so a refresh doesn't re-force it.
+
+### Changed
+- **"Log in" → "Sign in"** in the SPA auth tabs and submit button to align with the verb on the Continue with Google button (and the landing nav).
+- **Profile and Settings tabs merged into one Settings tab.** Order on the page: Personal details → Agent personalization (was "Negotiation style") → Account → Authorization (moved to the bottom because the legal copy is heavy). One unified Save button at the bottom POSTs profile + tune in parallel; the per-card "Save profile" is gone. Account section reordered with Delete at the top and Log out at the bottom. Per-card baselines so saving one section doesn't silently drop the other's pending edits.
+- **Tighter Settings copy.** Email → "Inbound replies from companies route here." Address → "Used on appeal letters and dispute correspondence." DOB → "Some accounts require this to verify your identity." SSN → "Some accounts require this to pull your record. It's securely stored."
+
+### Fixed
+- **"Bonsai is thinking" indicator now actually visible.** The chat bubbles have always rendered `<span class="dots"><span></span><span></span><span></span></span>` while waiting for a reply, but the CSS only animated opacity on three empty spans — nothing to draw, so the indicator was invisible. Empty spans now get a 6×6 circle background scoped via `:has(span:empty)` so the timeline / extract-screen variant (which uses literal `.` characters) still renders unchanged.
+- **Cancelling a bill upload no longer shows "Something went wrong."** When the user removed a staged file mid-audit, `runPhasedFromPrefetch` was treating the resulting null promise like a thrown error and routing it to the error view with body "Audit cancelled". Now null (cancellation) returns silently to the upload screen; only `__error` (a real failure) surfaces the error block.
+
 ## [0.1.32.2] - 2026-04-29
 
 ### Changed
