@@ -907,29 +907,6 @@ async function init() {
     }
   });
 
-  // Fixture dropdown
-  const fixtures = await apiFetch("/api/fixtures").then((r) => r.json()).catch(() => ({ fixtures: [] }));
-  const sel = $("#fixture");
-  sel.innerHTML = "";
-  for (const f of fixtures.fixtures ?? []) {
-    const o = document.createElement("option");
-    o.value = f;
-    o.textContent = f;
-    sel.appendChild(o);
-  }
-  if (sel.options.length === 0) {
-    const o = document.createElement("option");
-    o.value = "bill-001";
-    o.textContent = "bill-001";
-    sel.appendChild(o);
-  }
-
-  $("#run-fixture").addEventListener("click", async () => {
-    const fixture = $("#fixture").value;
-    const channel = $("#channel").value;
-    await runPhasedFromSample(fixture, channel);
-  });
-
   // Complaint flow — non-bill negotiations (flight delays, refunds, etc.).
   // Opens a dedicated workflow sub-view (not a modal) so the intake feels
   // like the same lane as the bill audit flow.

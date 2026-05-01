@@ -386,7 +386,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-family: var(--font-mono);
   letter-spacing: -0.005em;
 }
-.dz-sample-row,
 .dz-other-row {
   margin-top: 20px;
   display: flex;
@@ -397,9 +396,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink-mute);
   font-family: var(--font-mono);
   letter-spacing: 0.02em;
-}
-.dz-other-row {
-  margin-top: 8px;
 }
 .dz-sample-link {
   background: transparent;
@@ -412,7 +408,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   letter-spacing: 0.02em;
 }
 .dz-sample-link:hover { color: var(--ink); }
-.dz-sample-link-select { display: none; }
 .aside-hint {
   margin-top: 18px;
   padding: 12px 14px;
