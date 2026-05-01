@@ -24,6 +24,10 @@ export interface User {
   /** Google's stable subject ID — set when the account is linked to a
    * Google identity. Null for password-only accounts. */
   google_sub: string | null;
+  /** When the user finished (or skipped) the in-app first-login tour.
+   * Null until the tour is dismissed; the SPA fires the tour on init
+   * whenever this is null. */
+  tour_completed_at: number | null;
 }
 
 export interface Session {
@@ -107,6 +111,7 @@ export async function createUser(
     pending_email: null,
     early_access_at: null,
     google_sub: null,
+    tour_completed_at: null,
   };
 }
 
@@ -119,10 +124,11 @@ type UserRow = {
   pending_email: string | null;
   early_access_at: number | null;
   google_sub: string | null;
+  tour_completed_at: number | null;
 };
 
 const USER_COLUMNS =
-  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email, early_access_at, google_sub";
+  "id, email, created_at, email_verified_at, accepted_terms_at, pending_email, early_access_at, google_sub, tour_completed_at";
 
 function rowToUser(row: UserRow): User {
   return {
@@ -134,6 +140,7 @@ function rowToUser(row: UserRow): User {
     pending_email: row.pending_email,
     early_access_at: row.early_access_at ?? null,
     google_sub: row.google_sub ?? null,
+    tour_completed_at: row.tour_completed_at ?? null,
   };
 }
 
@@ -374,7 +381,50 @@ export async function createGoogleUser(email: string, googleSub: string): Promis
     pending_email: null,
     early_access_at: null,
     google_sub: googleSub,
+    tour_completed_at: null,
   };
+}
+
+/**
+ * Stamp the user as having finished (or dismissed) the first-login tour.
+ * Idempotent — the SPA can call this from a "Done" or "Skip" button and
+ * we'll only write the timestamp once. Returns the fresh User so the
+ * client can update its in-memory copy without an extra fetch.
+ */
+export function markTourCompleted(userId: string): User {
+  const db = getDb();
+  const existing = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow | null;
+  if (!existing) throw new AuthError("user_not_found", "User no longer exists.");
+  if (!existing.tour_completed_at) {
+    db.query(`UPDATE users SET tour_completed_at = ? WHERE id = ?`)
+      .run(Date.now(), userId);
+  }
+  const fresh = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow;
+  return rowToUser(fresh);
+}
+
+/**
+ * Clear the tour-completed timestamp so the SPA fires the tour again on
+ * next init. Used by the "Replay tour" link in Settings.
+ */
+export function resetTourCompleted(userId: string): User {
+  const db = getDb();
+  const existing = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow | null;
+  if (!existing) throw new AuthError("user_not_found", "User no longer exists.");
+  if (existing.tour_completed_at) {
+    db.query(`UPDATE users SET tour_completed_at = NULL WHERE id = ?`)
+      .run(userId);
+  }
+  const fresh = db
+    .query(`SELECT ${USER_COLUMNS} FROM users WHERE id = ?`)
+    .get(userId) as UserRow;
+  return rowToUser(fresh);
 }
 
 /**

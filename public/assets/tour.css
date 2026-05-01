@@ -1,0 +1,511 @@
+/* Bonsai first-login product tour.
+ * Ramp-style chapter rail + tooltip with arrow, but in Bonsai brand
+ * colors. Spotlight is a box-shadow on the ring element so rounded
+ * targets keep their rounded corners (no clip-path math). */
+
+:root {
+  --tour-dim: rgba(14, 14, 12, 0.55);
+  --tour-z-overlay: 1200;
+  --tour-z-rail: 1300;
+  --tour-z-pop: 1400;
+}
+
+/* ─── Spotlight ring ───
+ * One element handles the dimming AND the cutout via a 9999px box-shadow.
+ * Border-radius is set per-target by JS to follow the element's actual
+ * rounded corners. Pointer events are off so the dimmed area is purely
+ * visual — users can still click the popover and rail above. */
+.tour-spotlight-ring {
+  position: fixed;
+  z-index: var(--tour-z-overlay);
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 0 0 9999px var(--tour-dim),
+    0 0 0 4px rgba(23, 114, 69, 0.35),
+    0 8px 28px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition:
+    top 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    left 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    width 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    height 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    border-radius 280ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  border-radius: 8px;
+}
+.tour-spotlight-ring.tour-no-target {
+  /* Centered chapters / no-anchor states: shrink the ring off-screen
+   * but keep the box-shadow so the whole screen stays dimmed.
+   * `transition: none` is critical — without it the ring animates
+   * over 280ms from the previous chapter's anchor toward the center,
+   * leaving the previous element visibly "glowing" behind the modal
+   * for the duration of the animation. Snap to the centered state. */
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-width: 0;
+  box-shadow: 0 0 0 9999px var(--tour-dim);
+  transition: none;
+}
+
+/* ─── Chapter rail (Ramp-style) ───
+ * Anchor: bottom-left aligned with the Getting Started pill. Width is
+ * capped to the sidebar width so the panel never sticks out beyond
+ * the nav. Vars are JS-set from the pill's rect; fallbacks keep the
+ * rail correct even if the pill isn't mounted. */
+.tour-rail {
+  position: fixed;
+  left: var(--tour-rail-left, 24px);
+  bottom: var(--tour-rail-bottom, 24px);
+  width: 300px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  padding: 18px 18px 14px;
+  z-index: var(--tour-z-rail);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.18);
+  font-family: var(--font-ui);
+}
+/* During the active tour (with overlay + popover) the rail is hidden —
+ * navigation happens via Back / Next in the popover. The rail only
+ * appears in browse mode (pill click). */
+body.tour-active .tour-rail { display: none; }
+.tour-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 10px;
+}
+.tour-rail-title {
+  font-family: var(--font-display);
+  font-size: 19px;
+  line-height: 1.15;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin: 0;
+}
+.tour-rail-skip {
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tour-rail-skip:hover { color: var(--ink); }
+.tour-rail-close {
+  background: transparent;
+  border: 0;
+  padding: 4px;
+  margin: -4px;
+  cursor: pointer;
+  color: var(--ink-mute);
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.tour-rail-close:hover { color: var(--ink); }
+.tour-rail-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.tour-rail-progress-track {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-alt);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.tour-rail-progress-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 999px;
+  transition: width 320ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.tour-rail-progress-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ink-mute);
+  min-width: 32px;
+  text-align: right;
+}
+.tour-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tour-rail-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 6px;
+  border-radius: 8px;
+  color: var(--ink-soft);
+  transition: background 160ms, color 160ms;
+  /* Each row is a button — clickable to jump to that chapter (in either
+   * browse or active mode). Reset native button styling. */
+  background: transparent;
+  border: 0;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+.tour-rail-item:hover { background: var(--surface-alt); }
+.tour-rail-item.is-active {
+  background: var(--surface-alt);
+  color: var(--ink);
+}
+.tour-rail-item.is-done .tour-rail-label,
+.tour-rail-item.is-done .tour-rail-sub {
+  color: var(--ink-mute);
+}
+.tour-rail-item.is-done .tour-rail-label {
+  text-decoration: line-through;
+}
+.tour-rail-bullet {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--line-strong);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 1px;
+  background: transparent;
+}
+.tour-rail-item.is-active .tour-rail-bullet {
+  border-style: solid;
+  border-color: var(--green);
+  background: transparent;
+}
+.tour-rail-item.is-active .tour-rail-bullet::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.tour-rail-item.is-done .tour-rail-bullet {
+  border: 0;
+  background: var(--green);
+  color: #fff;
+}
+.tour-rail-item.is-done .tour-rail-bullet::after {
+  content: "";
+  width: 8px;
+  height: 5px;
+  border-left: 1.75px solid #fff;
+  border-bottom: 1.75px solid #fff;
+  transform: rotate(-45deg);
+  margin-top: -2px;
+}
+.tour-rail-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tour-rail-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+}
+.tour-rail-sub {
+  font-size: 11.5px;
+  color: var(--ink-mute);
+  letter-spacing: -0.005em;
+}
+
+/* ─── Popover (Ramp-style with arrow) ─── */
+.tour-pop {
+  position: fixed;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 18px 20px 16px;
+  z-index: var(--tour-z-pop);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+  font-family: var(--font-ui);
+  transition: opacity 200ms;
+}
+.tour-pop.tour-pop-centered {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 420px;
+  text-align: center;
+}
+/* Final-chapter modal: bigger title, single primary action, no Back. */
+.tour-pop.tour-pop-finale {
+  width: 460px;
+  padding: 28px 32px 24px;
+}
+.tour-pop.tour-pop-finale .tour-pop-title {
+  font-size: 30px;
+  margin: 4px 0 12px;
+}
+.tour-pop.tour-pop-finale .tour-pop-body {
+  font-size: 14.5px;
+  margin-bottom: 22px;
+}
+.tour-pop.tour-pop-finale .tour-pop-actions {
+  justify-content: center;
+}
+.tour-pop.tour-pop-finale .tour-pop-counter,
+.tour-pop.tour-pop-finale .tour-pop-foot-spacer {
+  display: none;
+}
+.tour-pop.tour-pop-finale .tour-btn-primary {
+  padding: 12px 28px;
+  font-size: 14.5px;
+}
+
+/* Arrow tail. Two stacked triangles (one for the border, one for the
+ * fill) so the tail appears welded to the popover edge. JS sets the
+ * data-arrow attribute to top/bottom/left/right based on placement. */
+.tour-pop[data-arrow]::before,
+.tour-pop[data-arrow]::after {
+  content: "";
+  position: absolute;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+.tour-pop[data-arrow="top"]::before {
+  top: -9px;
+  left: var(--arrow-pos, 50%);
+  margin-left: -9px;
+  border-width: 0 9px 9px 9px;
+  border-color: transparent transparent var(--line-strong) transparent;
+}
+.tour-pop[data-arrow="top"]::after {
+  top: -8px;
+  left: var(--arrow-pos, 50%);
+  margin-left: -8px;
+  border-width: 0 8px 8px 8px;
+  border-color: transparent transparent var(--surface) transparent;
+}
+.tour-pop[data-arrow="bottom"]::before {
+  bottom: -9px;
+  left: var(--arrow-pos, 50%);
+  margin-left: -9px;
+  border-width: 9px 9px 0 9px;
+  border-color: var(--line-strong) transparent transparent transparent;
+}
+.tour-pop[data-arrow="bottom"]::after {
+  bottom: -8px;
+  left: var(--arrow-pos, 50%);
+  margin-left: -8px;
+  border-width: 8px 8px 0 8px;
+  border-color: var(--surface) transparent transparent transparent;
+}
+.tour-pop[data-arrow="left"]::before {
+  left: -9px;
+  top: var(--arrow-pos, 50%);
+  margin-top: -9px;
+  border-width: 9px 9px 9px 0;
+  border-color: transparent var(--line-strong) transparent transparent;
+}
+.tour-pop[data-arrow="left"]::after {
+  left: -8px;
+  top: var(--arrow-pos, 50%);
+  margin-top: -8px;
+  border-width: 8px 8px 8px 0;
+  border-color: transparent var(--surface) transparent transparent;
+}
+.tour-pop[data-arrow="right"]::before {
+  right: -9px;
+  top: var(--arrow-pos, 50%);
+  margin-top: -9px;
+  border-width: 9px 0 9px 9px;
+  border-color: transparent transparent transparent var(--line-strong);
+}
+.tour-pop[data-arrow="right"]::after {
+  right: -8px;
+  top: var(--arrow-pos, 50%);
+  margin-top: -8px;
+  border-width: 8px 0 8px 8px;
+  border-color: transparent transparent transparent var(--surface);
+}
+
+.tour-pop-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: transparent;
+  border: 0;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--ink-mute);
+  display: inline-flex;
+}
+.tour-pop-close:hover { color: var(--ink); }
+.tour-pop-title {
+  font-family: var(--font-display);
+  font-size: 24px;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  margin: 0 28px 10px 0;
+  color: var(--ink);
+}
+.tour-pop-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  margin: 0 0 18px;
+}
+.tour-pop-status {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--green);
+  margin: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tour-pop-status[hidden] { display: none; }
+.tour-pop-status .tour-spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--green-tint);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: tour-spin 700ms linear infinite;
+}
+@keyframes tour-spin { to { transform: rotate(360deg); } }
+/* Footer: 3-column Back | counter | Next.
+ * Back and Next are equally weighted on the edges; the counter sits
+ * dead-center in mono caps. When there's no Back (chapter 1), a
+ * spacer fills the same width so the counter stays centered. */
+.tour-pop-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+.tour-pop-counter {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  flex: 1;
+  text-align: center;
+}
+.tour-pop-foot-spacer {
+  display: inline-block;
+  width: 64px;
+}
+.tour-pop-actions .tour-btn {
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  font-weight: 500;
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 140ms, border-color 140ms, color 140ms,
+              box-shadow 140ms, filter 140ms;
+}
+.tour-pop-actions .tour-btn:hover {
+  background: var(--surface-alt);
+}
+.tour-pop-actions .tour-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Primary = Bonsai brand amber, matching the Getting-Started pill so
+ * the whole onboarding palette is consistent. */
+.tour-pop-actions .tour-btn-primary {
+  background: var(--amber);
+  color: #fff;
+  border-color: var(--amber);
+  box-shadow: 0 4px 12px rgba(139, 94, 20, 0.2);
+}
+.tour-pop-actions .tour-btn-primary:hover {
+  background: var(--amber);
+  border-color: var(--amber);
+  filter: brightness(1.08);
+  box-shadow: 0 6px 18px rgba(139, 94, 20, 0.3);
+}
+.tour-pop-actions .tour-btn-primary:disabled:hover {
+  filter: none;
+  box-shadow: 0 4px 12px rgba(139, 94, 20, 0.2);
+}
+
+/* ─── Mobile / docked layout ─── */
+@media (max-width: 720px) {
+  .tour-pop:not(.tour-pop-centered) {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    top: auto !important;
+    width: auto;
+    max-width: none;
+    transform: none !important;
+  }
+  .tour-pop[data-arrow]::before,
+  .tour-pop[data-arrow]::after { display: none; }
+  .tour-rail {
+    left: 12px;
+    right: 12px;
+    bottom: auto;
+    top: 12px;
+    transform: none;
+    width: auto;
+    padding: 12px 14px;
+  }
+  .tour-rail-list { display: none; }
+  .tour-rail-progress-row { margin-bottom: 0; }
+}
+
+/* Keep nav-counts steady while tour is active — they shift layout. */
+body.tour-active .nav-count:not([hidden]) { visibility: hidden; }
+
+/* Lock body scroll while tour is active EXCEPT when the chat or the
+ * accept button is the spotlight target — those chapters live mid-page
+ * and the user needs to scroll to see what they're being shown. The
+ * tour script sets `tour-allow-scroll` on body for those chapters. */
+body.tour-active:not(.tour-allow-scroll) { overflow: hidden; }
+
+/* During the tour we replace the empty Bills + Offers views with demo
+ * data, and hide adjacent UI that would look weird against the demo
+ * (filters, attention banners, etc.). [data-tour-hidden] is set by JS
+ * on those elements; cleared when the tour ends. */
+[data-tour-hidden="1"] { display: none !important; }
+
+/* During the tour the drawer is part of the chapter — clicking the
+ * scrim or the X button must NOT dismiss it (that would yank the
+ * spotlight target out from under the popover). The user advances
+ * via Next or by clicking the demo bills row. Pointer-events:none
+ * lets clicks pass through; visibility stays so the scrim still dims. */
+body.tour-active #drawer-scrim,
+body.tour-active #drawer-close { pointer-events: none; }
+body.tour-active #drawer-close { opacity: 0.4; }
+
+/* Skip the 280ms slide-in for the tour drawer — snappy transitions
+ * matter more than the animation here, and the slide was the main
+ * cause of the "glitchy" 5→6 chapter handoff. The drawer just snaps
+ * into place; spotlight + popover follow on the same frame. */
+body.tour-active #bill-drawer,
+body.tour-active #drawer-scrim { transition: none !important; }

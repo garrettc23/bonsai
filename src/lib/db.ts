@@ -49,7 +49,8 @@ export function getDb(): Database {
       email_verified_at INTEGER,
       accepted_terms_at INTEGER,
       pending_email TEXT,
-      google_sub TEXT
+      google_sub TEXT,
+      tour_completed_at INTEGER
     );
     CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx
       ON users(google_sub) WHERE google_sub IS NOT NULL;
@@ -152,6 +153,10 @@ export function getDb(): Database {
     // NULL for password-only accounts. The unique index is partial so
     // many NULLs don't collide.
     "google_sub TEXT",
+    // Timestamp the user finished or dismissed the first-login product
+    // tour. NULL until completed; the SPA fires the tour on init when
+    // this is null. The "Replay tour" link in Settings nulls it again.
+    "tour_completed_at INTEGER",
   ]) {
     try { db.exec(`ALTER TABLE users ADD COLUMN ${col};`); } catch { /* already exists */ }
   }
