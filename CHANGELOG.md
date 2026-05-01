@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.35.0] - 2026-05-01
+
+### Added
+- **"What Bonsai negotiates" categories section.** Replaces the old "How it works" stack with four illustrative categories — Insurance, Medical, Recurring, Disputes — pinned in a 320vh sticky scroll track. Each step swaps a clay-style category illustration on the right and a description block on the left, with an arrow + savings pill ("AVG $612 SAVED / YR" etc.) appearing next to the active keyword. Active step is derived from scroll position so it always matches what's visible.
+- **NEGOTIATION WON hero card.** Replaces the previous invoice-with-amber-annotation SVG with a tilted bill mock (AT&T Internet, "Auto-renew") that shows a struck-through line item with a green NEGOTIATION WON stamp and "$247 SAVED" — pain → win in one glance.
+- **Uniform 800ms nav scroll.** Anchor clicks (Features / Categories / FAQ) animate via JS rAF with a fixed duration and ease-in-out cubic, so a Features↔FAQ jump that crosses the 320vh categories track no longer drifts slowly through the sticky pin.
+
+### Changed
+- **Hero copy → pain-first.** "Every bill, negotiated." → "You're being overcharged. Bonsai gets your money back." with "lower your bills" underlined. Page title becomes "Bonsai — Lower your bills" so the tab matches the marketing voice.
+- **Features section restructured.** "What Bonsai does" is now four asymmetric cards with hover animations: Upload a bill / Find ways to lower it / Automatically recover your money / Find cheaper options. Each card includes a small product mock so the user sees what the agent actually outputs.
+- **FAQ → two-column layout.** Two-column grid with chevron disclosure arrows replaces the stacked accordion. Question set updated for the new framing.
+- **Footer redesigned.** Giant Bonsai wordmark on dark ink background, tree icon sized to cap-height of the B, "ai" underlined in amber as a single text-decoration rule (no more `::after` hairline). "Sign Up" CTA + lightweight nav.
+- **Final CTA in amber.** "Ready to lower your bills?" sits on the brand-amber surface so the page ends with a strong color anchor.
+- **Wordmark + tagline underlines unified.** Both `.wm-tail` and `.tagline-accent` now use `text-decoration: underline` with `text-decoration-skip-ink: auto` instead of absolutely-positioned `::after` rules — descenders on glyphs render cleanly over the line, and the underline width matches the letterforms exactly.
+
+### Fixed
+- **Categories active step now correct after long scrolls.** Scrolling up from FAQ used to leave the sticky stuck on Insurance instead of advancing through Disputes → Recurring → Medical → Insurance. Active step is now computed from scroll position relative to the track on every scroll frame (rAF-throttled), so it always matches what's visible regardless of how the user got there. Replaces the IntersectionObserver + 2-second pause that had race conditions on long jumps.
+- **Saved-amount pill alignment.** "AVG $X SAVED / YR" pill next to each keyword (Insurance / Medical / Recurring / Disputes) is now horizontally aligned with the arrow ⇒ and vertically centered to the word — flex-centered to the line-box, no more transform offsets that pushed it off the keyword's optical center.
+
 ## [0.1.34.0] - 2026-04-30
 
 ### Added
