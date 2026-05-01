@@ -1026,7 +1026,7 @@
     }
     return [
       card({
-        category: "AUTO_INSURANCE",
+        category: "AUTO INSURANCE",
         source: "Lemonade Auto",
         current: 180,
         offered: 125,
@@ -1070,7 +1070,7 @@
       grid.dataset.tourBackup = grid.innerHTML;
     }
     grid.innerHTML = demoOffersHtml();
-    document.querySelector("#offers-filter-row")?.setAttribute("data-tour-hidden", "1");
+    document.querySelector("#offers-filters")?.setAttribute("data-tour-hidden", "1");
   }
 
   function clearDemoData() {
