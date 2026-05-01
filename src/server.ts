@@ -350,6 +350,15 @@ function loadPending(runId: string): PendingRun | null {
 
 const AUDIT_DAILY_LIMIT_DEFAULT = 5;
 
+// Operator-only override: emails that bypass the per-user daily cap.
+// CSV via env, defaulting to the dev/test inbox so internal QA isn't blocked.
+const AUDIT_UNLIMITED_EMAILS = new Set(
+  (process.env.BONSAI_AUDIT_UNLIMITED_EMAILS ?? "garrettcahill23@gmail.com")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean),
+);
+
 async function handleAudit(req: Request): Promise<Response> {
   // Per-user daily cap. Audit kicks off Opus 4.7 (operator-paid, ~$0.25–$1.00/run);
   // without a ceiling, one runaway user can drain the budget overnight.
@@ -359,13 +368,29 @@ async function handleAudit(req: Request): Promise<Response> {
     process.env.BONSAI_AUDIT_DAILY_LIMIT ?? String(AUDIT_DAILY_LIMIT_DEFAULT),
     10,
   );
-  const rl = rateLimit({
-    key: `audit:user:${user.id}`,
-    max: Number.isFinite(dailyMax) && dailyMax > 0 ? dailyMax : AUDIT_DAILY_LIMIT_DEFAULT,
-    windowMs: 24 * 60 * 60 * 1000,
-  });
-  if (!rl.ok) {
-    return rateLimitResponse(rl.retryAfterSec, "Daily limit hit, upgrade to remove.");
+  const effectiveMax =
+    Number.isFinite(dailyMax) && dailyMax > 0 ? dailyMax : AUDIT_DAILY_LIMIT_DEFAULT;
+  const isUnlimited = AUDIT_UNLIMITED_EMAILS.has(user.email.toLowerCase());
+  if (!isUnlimited) {
+    const rl = rateLimit({
+      key: `audit:user:${user.id}`,
+      max: effectiveMax,
+      windowMs: 24 * 60 * 60 * 1000,
+    });
+    if (!rl.ok) {
+      return Response.json(
+        {
+          error: "Daily limit hit, upgrade to remove.",
+          code: "audit_daily_limit",
+          retry_after_sec: rl.retryAfterSec,
+          daily_limit: effectiveMax,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(Math.max(1, rl.retryAfterSec)) },
+        },
+      );
+    }
   }
 
   // Supports two body shapes:
@@ -2154,9 +2179,12 @@ async function handleStatic(pathname: string): Promise<Response> {
     headers: {
       "Content-Type": contentType(path),
       // Force re-validation on every load so iterating on app.js/app.css
-      // doesn't strand the user on a stale build. Cheap during dev; can
-      // tighten in production once we have hashed asset URLs.
-      "Cache-Control": "no-cache, must-revalidate",
+      // doesn't strand the user on a stale build. `no-store` + Pragma
+      // covers older browsers that ignore `no-cache`. Cheap during dev;
+      // can tighten in production once we have hashed asset URLs.
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
     },
   });
 }
@@ -2696,13 +2724,27 @@ function userPublic(user: User): {
   email: string;
   accepted_terms_at: number | null;
   early_access_at: number | null;
+  tour_completed_at: number | null;
 } {
   return {
     id: user.id,
     email: user.email,
     accepted_terms_at: user.accepted_terms_at,
     early_access_at: user.early_access_at,
+    tour_completed_at: user.tour_completed_at,
   };
+}
+
+async function handleMarkTourCompleted(user: User): Promise<Response> {
+  const { markTourCompleted } = await import("./lib/auth.ts");
+  const updated = markTourCompleted(user.id);
+  return Response.json({ user: userPublic(updated) });
+}
+
+async function handleResetTour(user: User): Promise<Response> {
+  const { resetTourCompleted } = await import("./lib/auth.ts");
+  const updated = resetTourCompleted(user.id);
+  return Response.json({ user: userPublic(updated) });
 }
 
 async function handleJoinEarlyAccess(user: User): Promise<Response> {
@@ -3264,6 +3306,8 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/bills/verify-outcome") return handleVerifyOutcome(req);
         if (req.method === "POST" && url.pathname === "/api/early-access") return handleJoinEarlyAccess(user);
         if (req.method === "DELETE" && url.pathname === "/api/early-access") return handleLeaveEarlyAccess(user);
+        if (req.method === "POST" && url.pathname === "/api/auth/tour-completed") return handleMarkTourCompleted(user);
+        if (req.method === "DELETE" && url.pathname === "/api/auth/tour-completed") return handleResetTour(user);
         const feedbackMatch = url.pathname.match(/^\/api\/feedback\/([a-zA-Z0-9_-]+)$/);
         if (req.method === "GET" && feedbackMatch) return handleGetFeedback(feedbackMatch[1]);
         const contactStatusMatch = url.pathname.match(/^\/api\/contact\/([a-zA-Z0-9_-]+)$/);

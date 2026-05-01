@@ -118,7 +118,9 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   position: relative;
   font-weight: 400;
 }
-/* Tasteful hairline rule under the italic "ai" — the AI tell, editorial. */
+/* Hairline rule under the italic "ai" — the AI tell, editorial. Solid
+ * amber so it matches the "ai" text color exactly (and the tagline
+ * "agent" underline below the sidebar uses the same treatment). */
 .wordmark .wm-tail::after {
   content: "";
   position: absolute;
@@ -127,7 +129,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   bottom: 2px;
   height: 1px;
   background: var(--amber);
-  opacity: 0.45;
 }
 
 .nav {
@@ -231,8 +232,9 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   position: absolute;
   left: 0; right: 0; bottom: 2px;
   height: 1px;
+  /* Solid amber to match the logo's "ai" text color (not the muted
+   * 0.45-opacity hairline used under the wordmark). */
   background: var(--amber);
-  opacity: 0.45;
 }
 
 .main {
@@ -384,7 +386,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   font-family: var(--font-mono);
   letter-spacing: -0.005em;
 }
-.dz-sample-row,
 .dz-other-row {
   margin-top: 20px;
   display: flex;
@@ -395,9 +396,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--ink-mute);
   font-family: var(--font-mono);
   letter-spacing: 0.02em;
-}
-.dz-other-row {
-  margin-top: 8px;
 }
 .dz-sample-link {
   background: transparent;
@@ -410,7 +408,6 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   letter-spacing: 0.02em;
 }
 .dz-sample-link:hover { color: var(--ink); }
-.dz-sample-link-select { display: none; }
 .aside-hint {
   margin-top: 18px;
   padding: 12px 14px;
@@ -5007,10 +5004,25 @@ body.legal-page { background: var(--bg); }
   text-align: center;
   box-shadow: 0 1px 0 rgba(14, 14, 12, 0.02);
 }
+.error-page .error-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0;
+  margin: 0 0 24px;
+  text-decoration: none;
+}
+.error-page .error-brand .brand-mark {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+}
+.error-page .error-brand .brand-mark img {
+  width: 44px;
+  height: 44px;
+}
 .error-page .wordmark {
   font-size: 48px;
-  margin-bottom: 24px;
-  display: inline-block;
 }
 .error-page h1 {
   font-family: var(--font-display);

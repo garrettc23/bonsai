@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.33.0] - 2026-04-29
+## [0.1.34.0] - 2026-04-30
+
+### Added
+- **First-login product tour.** Eight chapters walk new users through upload → audit results → chat refinement → accept → manage negotiations → drawer detail → comparison → finale. Spotlight ring + popover with arrow tail, brand-amber primary CTA, mono counter "X of 7" (the centered finale modal is `hideFromRail` and not counted as a step). Click guards on the dropzone, accept button, demo bill row, and offer card buttons mean the user can interact naturally and the tour advances. Replay anytime from Settings → "Product Tour" or the bottom-left "Getting started" pill (which doubles as a chapter list in browse mode).
+- **Bonsai Product Tour rail.** Click the Getting started pill to open a chapter list panel (Ramp-style) — visited chapters strike through, current chapter gets a green ring, click any chapter to jump straight to it. Tour state persists in localStorage so the pill progress survives reloads; the server-side `tour_completed_at` flag (new column on `users`) gates the auto-fire on first login.
+- **Demo bill drawer for chapter 6.** Mirrors the real `#bill-drawer` chrome exactly — Original / Current / Saved / Status (with a yellow NEGOTIATING traffic-light pill), Negotiation Frequency dropdown set to Monthly, red Stop button, Activity tab active by default with a three-event timeline (appeal sent → provider reply → escalation), Contact tab swappable with disabled fixture fields. Drawer scrim / X / Esc are all locked during the tour so the user can click around the drawer without dismissing it.
+- **Friendly daily-cap UX for the bill audit endpoint.** Free tier still capped at 5 audits per day per user (env-overridable via `BONSAI_AUDIT_DAILY_LIMIT`). When hit, the client now renders a "You've used your daily audits — Free tier is limited to N audits per day. Resets in Xh Ym" card instead of dumping the raw 429 text into the generic error view. Server response carries `code: "audit_daily_limit"` + `daily_limit` + `retry_after_sec` so the client can detect this specific case.
+- **Audit whitelist by email.** New `BONSAI_AUDIT_UNLIMITED_EMAILS` env var (CSV, defaults to `garrettcahill23@gmail.com` for internal QA) skips the per-user daily cap entirely. Lets ops widen access for paid tiers / staging without a rebuild.
+- **404 page now has the bonsai-tree icon.** Wraps the wordmark in the canonical `.brand` link so the 404 looks like the rest of the brand instead of a text-only fallback.
+
+### Changed
+- **Removed "Try a sample" button from the home page.** The dropzone-row CTA is gone; the tour kicks off the sample audit internally via `runPhasedFromSample("bill-001", ...)` so the public flow no longer needs to expose it. Drops `#run-fixture` / `#fixture` / `#channel` elements + their init wiring; complaint row inherits the normal 20px top margin.
+- **Asset cache headers tightened.** `public/*` static responses now send `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` + `Pragma: no-cache` + `Expires: 0` so iterating on app.js / tour.js / app.css doesn't strand users on stale builds. Production with hashed asset URLs is the long-term fix.
+- **Settings → Account row renamed.** "Replay product tour" → "Product Tour" with a button labelled "Product Tour"; Export-all-data row removed; Log out button rendered in red as the destructive section action.
+
+### Fixed
+- **Drawer dismissal locked during the product tour.** `closeBillDrawer()` bails when `body.tour-active` is set so scrim click / X close / Esc don't yank the spotlight target out from under chapter 6's popover. CSS `pointer-events: none` on `#drawer-scrim` and `#drawer-close` is a defensive layer for real mouse interactions; the JS gate covers programmatic clicks.
+
+
 
 ### Added
 - **Sign in with Google.** Continue with Google button on the SPA's auth screen runs an OAuth 2.0 authorization-code flow against Google's OpenID Connect endpoints — three branches in the callback: log in if we've seen the Google `sub` before, auto-link to an existing password account if the email matches (Google verifies emails so the takeover risk is bounded), otherwise create a fresh account with email already verified and terms auto-accepted via the consent screen. New `users.google_sub` column with a partial unique index. Server-only client_secret, HttpOnly+SameSite=Lax state cookie for CSRF, rejects unverified Google emails. Env vars `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` are optional — server boots without them and the SPA hides the button via `/api/public-config`'s new `google_oauth_enabled` flag.

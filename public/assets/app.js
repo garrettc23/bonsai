@@ -327,7 +327,7 @@ function hasComplaintInProgress() {
   return Boolean(company || desc || desired || email || phone);
 }
 
-async function showNav(name) {
+async function showNav(name, opts = {}) {
   // Block navigation when leaving in-flight work — prompts via the in-app
   // confirm modal instead of the browser's native confirm() dialog.
   // We trigger the prompt in two cases:
@@ -337,17 +337,33 @@ async function showNav(name) {
   //      "Home" while on the plan-review screen silently drops back to
   //      the upload screen, losing the audit. (Both nav values are
   //      "overview" so the first check passes through.)
+  //
+  // `opts.force` skips the confirm prompt and still cleans up state. The
+  // first-login product tour calls showNav with force:true so its
+  // auto-navigation between chapters doesn't get blocked by an unsaved-
+  // changes modal that would render under the tour overlay (the tour
+  // chapter "Hit accept when you're ready" deliberately did NOT click
+  // the approve button — so reviewState is still set when chapter 5
+  // wants to navigate to the negotiation tab).
   const tabSwitch = name !== currentNav;
   const homeFromMidFlow =
     name === "overview" && currentNav === "overview" && hasInFlightAuditWork();
   if (tabSwitch || homeFromMidFlow) {
-    const ok = await confirmDiscardUnsaved();
+    const ok = opts.force ? true : await confirmDiscardUnsaved();
     if (!ok) return;
     if (tabSwitch) clearUnsavedGuard();
     // Always reset workflow + reviewState when the user confirms leaving
     // mid-flow — otherwise the next showNav would still see leftover
     // state and re-prompt unnecessarily.
-    if (homeFromMidFlow) {
+    // The tour deliberately drives navigation while keeping the
+    // audit alive (chapter 2 → chapter 3 lands on the chat panel
+    // with the just-audited bill in reviewState). Pass
+    // `keepReviewState: true` from those code paths so this branch
+    // doesn't yank the state out from under them.
+    if (
+      !opts.keepReviewState &&
+      (homeFromMidFlow || (opts.force && tabSwitch && hasInFlightAuditWork()))
+    ) {
       reviewState = null;
       clearComplaintInputs();
     }
@@ -879,35 +895,16 @@ async function init() {
   // Browser-level unsaved-changes prompt on full page reload / tab close.
   // Triggers for any in-flight audit work (staged upload, running audit,
   // pending review accept) OR Profile/Settings dirty state — losing
-  // any of these is silently destructive.
+  // any of these is silently destructive. The tour's finale reload
+  // sets `__bonsaiSkipUnsavedPrompt` so the user doesn't get a "leave
+  // this site?" dialog when the tour ends with the sample audit still
+  // sitting in reviewState.
   window.addEventListener("beforeunload", (ev) => {
+    if (window.__bonsaiSkipUnsavedPrompt) return;
     if (unsavedGuard?.isDirty?.() || hasInFlightAuditWork()) {
       ev.preventDefault();
       ev.returnValue = "";
     }
-  });
-
-  // Fixture dropdown
-  const fixtures = await apiFetch("/api/fixtures").then((r) => r.json()).catch(() => ({ fixtures: [] }));
-  const sel = $("#fixture");
-  sel.innerHTML = "";
-  for (const f of fixtures.fixtures ?? []) {
-    const o = document.createElement("option");
-    o.value = f;
-    o.textContent = f;
-    sel.appendChild(o);
-  }
-  if (sel.options.length === 0) {
-    const o = document.createElement("option");
-    o.value = "bill-001";
-    o.textContent = "bill-001";
-    sel.appendChild(o);
-  }
-
-  $("#run-fixture").addEventListener("click", async () => {
-    const fixture = $("#fixture").value;
-    const channel = $("#channel").value;
-    await runPhasedFromSample(fixture, channel);
   });
 
   // Complaint flow — non-bill negotiations (flight delays, refunds, etc.).
@@ -968,7 +965,7 @@ async function init() {
       form.set("channel", "persistent");
       prefetchPromise = apiFetch("/api/audit", { method: "POST", body: form, signal: controller.signal })
         .then(async (res) => {
-          if (!res.ok) throw new Error(await res.text());
+          if (!res.ok) throw await readErrorPayload(res);
           return res.json();
         })
         .catch((err) => {
@@ -1244,6 +1241,19 @@ async function init() {
 
   // Default view
   showNav("overview");
+
+  // Onboarding scaffold — the Getting Started checklist (sidebar pill +
+  // panel) attaches once and refreshes itself on tab-visibility +
+  // dispatched events. The first-login product tour fires from here too;
+  // both run after init so the DOM is fully wired.
+  setTimeout(() => {
+    if (typeof window.__bonsaiGettingStartedAttach === "function") {
+      window.__bonsaiGettingStartedAttach(currentUser);
+    }
+    if (typeof window.__bonsaiTourMaybeAutoFire === "function") {
+      window.__bonsaiTourMaybeAutoFire(currentUser);
+    }
+  }, 0);
 }
 
 let receiptsCache = null;
@@ -1650,43 +1660,100 @@ async function submitComplaint() {
   }
 }
 
-async function runPhasedFromSample(fixture, channel) {
-  setWorkflowView("progress");
-  updatePageHeader({
-    eyebrow: "Audit in progress",
-    title: "Reading the bill &amp; finding every overcharge",
-  });
-  startTimeline();
+// Reads a non-OK response and returns an Error carrying the parsed JSON
+// payload (when present) on `.payload`. Lets call sites distinguish the
+// per-user daily-cap 429 from a generic failure without re-fetching.
+async function readErrorPayload(res) {
+  const text = await res.text();
+  let payload = null;
+  try { payload = JSON.parse(text); } catch { /* not JSON */ }
+  const message = payload?.error ?? text;
+  const err = new Error(message);
+  if (payload) err.payload = payload;
+  return err;
+}
+
+// Routes an audit error into either the friendly daily-cap card or the
+// generic "Something went wrong" view, depending on the server's `code`.
+function showAuditError(err) {
+  const payload = err?.payload;
+  const view = $("#view-error");
+  const eyebrow = view?.querySelector(".eyebrow");
+  const body = $("#error-body");
+  const resetBtn = $("#error-reset");
+  if (payload?.code === "audit_daily_limit") {
+    const limit = Number(payload.daily_limit) || 5;
+    const sec = Math.max(0, Number(payload.retry_after_sec) || 0);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const reset = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m` : "soon";
+    if (eyebrow) {
+      eyebrow.classList.remove("eyebrow-red");
+      eyebrow.textContent = "You've used your daily audits";
+    }
+    if (body) {
+      body.textContent =
+        `Free tier is limited to ${limit} audit${limit === 1 ? "" : "s"} per day. ` +
+        `Resets in ${reset}.`;
+    }
+    if (resetBtn) resetBtn.textContent = "Back";
+  } else {
+    if (eyebrow) {
+      eyebrow.classList.add("eyebrow-red");
+      eyebrow.textContent = "Something went wrong";
+    }
+    if (body) body.textContent = String(err?.message ?? err);
+    if (resetBtn) resetBtn.textContent = "Back";
+  }
+  setWorkflowView("error");
+}
+
+async function runPhasedFromSample(fixture, channel, opts = {}) {
+  // The tour passes silent:true to skip the progress timeline + the
+  // artificial 1.5s minimum-loading delay, so the user lands on the
+  // review screen instantly without seeing a fake "loading" flash.
+  const silent = !!opts.silent;
+  if (!silent) {
+    setWorkflowView("progress");
+    updatePageHeader({
+      eyebrow: "Audit in progress",
+      title: "Reading the bill &amp; finding every overcharge",
+    });
+    startTimeline();
+  }
   // Cached fixtures return in ~20ms — too fast to show what Bonsai is
   // doing. Hold the loading view for ~1.5s so the user actually sees
   // the timeline animate. Real uploads (which are slow on their own)
   // skip past this minimum because the audit response takes longer.
   const startedAt = Date.now();
-  const MIN_LOADING_MS = 1500;
+  const MIN_LOADING_MS = silent ? 0 : 1500;
   try {
     const res = await apiFetch("/api/audit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fixture, channel }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw await readErrorPayload(res);
     const { run_id, report } = await res.json();
     const elapsed = Date.now() - startedAt;
     if (elapsed < MIN_LOADING_MS) {
       await new Promise((r) => setTimeout(r, MIN_LOADING_MS - elapsed));
     }
-    stopTimeline();
+    if (!silent) stopTimeline();
     reviewState = { run_id, partial_report: report };
     renderReviewView(report);
-    setWorkflowView("review");
+    // In silent mode (tour pre-load) the caller controls the workflow
+    // view so chapter 1 can stay anchored on the dropzone — flipping
+    // to "review" here would yank the upload screen out from under the
+    // current chapter and force the popover into a centered modal.
+    if (!silent) setWorkflowView("review");
     // Server-side handleAudit just fired runOfferHunt for this bill —
     // start the Comparison nav pulse so the user can see something's
     // happening even before they navigate to that tab.
     markComparisonHuntStarted(run_id);
   } catch (err) {
-    stopTimeline();
-    $("#error-body").textContent = String(err?.message ?? err);
-    setWorkflowView("error");
+    if (!silent) stopTimeline();
+    showAuditError(err);
   }
 }
 
@@ -1699,7 +1766,7 @@ async function runPhasedFromUpload(formData) {
   startTimeline();
   try {
     const res = await apiFetch("/api/audit", { method: "POST", body: formData });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw await readErrorPayload(res);
     const { run_id, report } = await res.json();
     stopTimeline();
     reviewState = { run_id, partial_report: report };
@@ -1711,8 +1778,7 @@ async function runPhasedFromUpload(formData) {
     markComparisonHuntStarted(run_id);
   } catch (err) {
     stopTimeline();
-    $("#error-body").textContent = String(err?.message ?? err);
-    setWorkflowView("error");
+    showAuditError(err);
   }
 }
 
@@ -1748,8 +1814,7 @@ async function runPhasedFromPrefetch(promise) {
     markComparisonHuntStarted(run_id);
   } catch (err) {
     stopTimeline();
-    $("#error-body").textContent = String(err?.message ?? err);
-    setWorkflowView("error");
+    showAuditError(err);
   }
 }
 
@@ -2836,6 +2901,13 @@ function renderConversation(report) {
  * don't need explicit teardown.
  */
 function renderComparisonHuntingHero(view) {
+  // Skip the hunting hero entirely while the tour is showing demo
+  // cards — otherwise the "Bonsai is hunting…" panel renders over
+  // the demo grid for the first frame and breaks the illusion.
+  if (document.body.classList.contains("tour-active") &&
+      document.querySelector("#offers-grid [data-tour-demo]")) {
+    return;
+  }
   if (view.querySelector(":scope > .empty-hero.hunting")) return;
 
   // If a different empty-hero (e.g. the idle "drop a bill" CTA) is
@@ -3187,6 +3259,13 @@ function startHuntStatusPoll() {
 async function pollOffersUntilFresh() {
   if (offersPollTimer) return; // already polling
   if (offersCache.length > 0) return; // already have offers
+  // The first-login tour shows demo offers on the Comparison tab. Skip
+  // the poll while the tour is active so the hunting-hero overlay
+  // doesn't render on top of the demo cards.
+  if (document.body.classList.contains("tour-active") &&
+      document.querySelector("#offers-grid [data-tour-demo]")) {
+    return;
+  }
   // Don't activate the poll if the user has never uploaded a bill — the
   // comparison agent only runs server-side on audit completion, so without
   // any audits there's nothing in flight worth waiting on. The idle "No
@@ -3246,6 +3325,14 @@ function scheduleBillsPoll() {
 }
 
 function renderBills() {
+  // While the first-login tour is showing demo bills on this view,
+  // skip the real render — otherwise the poll loop would wipe the
+  // injected rows. clearDemoData() at tour teardown puts real state
+  // back; the next render (poll tick or nav) repaints normally.
+  if (document.body.classList.contains("tour-active") &&
+      document.querySelector("#bills-rows [data-tour-demo]")) {
+    return;
+  }
   updatePageHeader({
     eyebrow: "Negotiation",
     title: "Every negotiation in one place",
@@ -3651,6 +3738,12 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
+  // Same logic as renderBills — let the tour-injected demo cards stay
+  // visible during the tour without poll-tick overwrites.
+  if (document.body.classList.contains("tour-active") &&
+      document.querySelector("#offers-grid [data-tour-demo]")) {
+    return;
+  }
   updatePageHeader({
     eyebrow: "Comparison",
     title: "Cheaper alternatives, found for you",
@@ -4485,10 +4578,10 @@ async function renderSettings() {
   const tune = mkTuneCard(sdata.tune ?? {});
   root.appendChild(tune.el);
 
-  // Account — signed-in user, log out, export, delete. Delete-account row
-  // comes first (the irreversible action gets visual weight); log out is
-  // the last row so the most-common-but-low-stakes action is the easiest
-  // one to reach by scroll.
+  // Account — signed-in user, replay tour, log out. (Export and Delete
+  // were both deliberately removed; export was unused and delete needs
+  // a support-channel confirmation step.) Log out is styled red because
+  // it's the destructive action of the section.
   const accountGroup = document.createElement("div");
   accountGroup.className = "settings-group";
   accountGroup.innerHTML = `
@@ -4496,59 +4589,30 @@ async function renderSettings() {
     <div class="settings-card">
       <div class="settings-row">
         <div class="settings-row-main">
-          <div class="settings-row-label">Delete account</div>
-          <div class="settings-row-help">Removes stored bills, EOBs, and negotiation history. Irreversible.</div>
+          <div class="settings-row-label">Product Tour</div>
+          <div class="settings-row-help">Walk through the upload → audit → negotiate → compare flow again.</div>
         </div>
-        <button class="btn btn-ghost" id="data-delete-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Delete</button>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-main">
-          <div class="settings-row-label">Export all data</div>
-          <div class="settings-row-help">Download every audit, letter, and transcript as a single JSON file.</div>
-        </div>
-        <button class="btn btn-ghost" id="data-export-btn" type="button">Export</button>
+        <button class="btn btn-ghost" id="account-replay-tour-btn" type="button">Product Tour</button>
       </div>
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Signed in as</div>
           <div class="settings-row-help" id="account-email">${escapeHtml(currentUser?.email ?? "")}</div>
         </div>
-        <button class="btn btn-ghost" id="account-logout-btn" type="button">Log out</button>
+        <button class="btn btn-ghost" id="account-logout-btn" type="button" style="color:var(--red);border-color:rgba(139,30,46,.3)">Log out</button>
       </div>
     </div>`;
   root.appendChild(accountGroup);
   accountGroup.querySelector("#account-logout-btn").addEventListener("click", () => logout());
-
-  accountGroup.querySelector("#data-export-btn").addEventListener("click", async (ev) => {
-    const btn = ev.currentTarget;
-    btn.disabled = true;
-    const original = btn.textContent;
-    btn.textContent = "Exporting…";
-    try {
-      const res = await apiFetch("/api/export");
-      if (!res.ok) throw new Error(await res.text());
-      const blob = await res.blob();
-      const cd = res.headers.get("Content-Disposition") ?? "";
-      const m = cd.match(/filename="([^"]+)"/);
-      const filename = m?.[1] ?? `bonsai-export-${new Date().toISOString().slice(0, 10)}.json`;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      alert(`Export failed: ${err?.message ?? err}`);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = original;
-    }
-  });
-
-  accountGroup.querySelector("#data-delete-btn").addEventListener("click", () => {
-    openDeleteAccountModal();
+  accountGroup.querySelector("#account-replay-tour-btn").addEventListener("click", async () => {
+    // Reset every piece of replay state so the tour fires identically
+    // to a fresh first login: server flag cleared, visited chapters
+    // forgotten, any in-flight workflow torn down (so chapter 1 lands
+    // on the upload screen, not lingering audit results), demo data
+    // cleared. The tour itself takes care of overview-nav on start.
+    try { await apiFetch("/api/auth/tour-completed", { method: "DELETE" }); } catch {}
+    try { localStorage.removeItem("bonsai.tour.visited"); } catch {}
+    if (typeof window.startBonsaiTour === "function") window.startBonsaiTour();
   });
 
   // Authorization — heaviest legal copy, sits last so it doesn't dominate
@@ -5587,6 +5651,11 @@ function drawerFreqKey(row) {
 }
 
 function closeBillDrawer() {
+  // During the tour the drawer IS chapter 6 — dismissing it (via
+  // scrim click, X button, or Esc) would yank the spotlight target
+  // out from under the popover. Bail without touching the drawer
+  // until the tour ends.
+  if (document.body.classList.contains("tour-active")) return;
   const drawer = $("#bill-drawer");
   const scrim = $("#drawer-scrim");
   drawer.classList.remove("open");
@@ -7002,5 +7071,14 @@ async function dialVoiceWithConfirm({ runId, providerName, providerPhone, onSucc
   scrim.addEventListener("click", onCancel);
 }
 window.dialVoiceWithConfirm = dialVoiceWithConfirm;
+
+// Expose a small surface for /assets/tour.js (the first-login product
+// tour). tour.js is loaded as a separate classic script after this one,
+// and reaches these via window globals so we don't have to convert the
+// app to ES modules just to wire one feature.
+window.runPhasedFromSample = runPhasedFromSample;
+window.showNav = showNav;
+window.setWorkflowView = setWorkflowView;
+window.__bonsaiRestoreViewChildren = restoreViewChildren;
 
 init();
