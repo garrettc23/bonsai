@@ -3788,17 +3788,24 @@ function scoreLabelFor(score) {
 let offersFilter = "Recommended";
 
 function renderOffers() {
-  // Same logic as renderBills — let the tour-injected demo cards stay
-  // visible during the tour without poll-tick overwrites.
-  if (document.body.classList.contains("tour-active") &&
-      document.querySelector("#offers-grid [data-tour-demo]")) {
-    return;
-  }
+  // Header always updates so the page title matches the active nav, even
+  // mid-tour when card rendering is suppressed below.
   updatePageHeader({
     eyebrow: "Comparison",
     title: "Cheaper alternatives, found for you",
     stats: null,
   });
+  // Suppress all real-offer rendering during the product tour. The bill-001
+  // sample audit kicked off at chapter 1 fires a real offer-hunt server-
+  // side; if the user clicks Comparison from the sidebar at any chapter
+  // before 7, the cached fixture results would otherwise paint a populated
+  // page mid-tour. Chapter 7 explicitly calls injectDemoOffers() to seed
+  // its own demo card, so it doesn't need this function to render cards.
+  // After tour teardown (skip or complete), tour-active is gone and the
+  // next call renders real offers normally.
+  if (document.body.classList.contains("tour-active")) {
+    return;
+  }
 
   const view = $("#view-offers");
   if (!view) return;
