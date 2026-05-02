@@ -287,8 +287,10 @@ describe("stepNegotiation — tool dispatch", () => {
 
 describe("stepNegotiation — no markdown leaks to wire", () => {
   test("persisted outbound body_text has zero ** runs even when Claude returns markdown", async () => {
-    // Bypass the humanizer (it would also try to strip markdown, but we
-    // want to prove the wire-side stripper catches drift on its own).
+    // Belt-and-suspenders: test/setup.ts already sets this, but pin it
+    // here so a refactor of the bootstrap can't silently expose this
+    // test to a real Anthropic call.
+    const prior = process.env.BONSAI_DISABLE_HUMANIZER;
     process.env.BONSAI_DISABLE_HUMANIZER = "1";
     try {
       const { state, client } = await makeStartedState();
@@ -329,7 +331,12 @@ describe("stepNegotiation — no markdown leaks to wire", () => {
       // Snake_case identifier survives.
       expect(persisted).toContain("claim_number CLM-001");
     } finally {
-      delete process.env.BONSAI_DISABLE_HUMANIZER;
+      // Restore — never `delete`. setup.ts preloads this for every test
+      // in the file; deleting it here exposes every subsequent test to a
+      // real Anthropic call inside the humanize() path that startNegotiation
+      // calls during makeStartedState().
+      if (prior === undefined) delete process.env.BONSAI_DISABLE_HUMANIZER;
+      else process.env.BONSAI_DISABLE_HUMANIZER = prior;
     }
   });
 });

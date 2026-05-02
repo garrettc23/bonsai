@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.36.0] - 2026-05-02
+
+### Added
+- **The complaint flow is a real button below the dropzone now, not a buried link.** Two paths into Bonsai: drop a bill at the top, or "Fight a charge or chase a refund" right underneath, separated by an "OR" divider. The card carries a chat-bubble icon, a Display-typeface 22px title, examples of what it covers (late fees, airline refunds, overdraft reversals, customer-service escalations), and an arrow that nudges right on hover. Users who don't have a bill in front of them now see a clear path in instead of having to find a small link tucked inside the upload zone.
+
+### Fixed
+- **Comparison and Negotiation no longer leak real results during the product tour.** The bill-001 sample audit kicked off at chapter 1 was producing real offer-hunt results and a real Bills row server-side. If the user clicked Comparison or Negotiation in the sidebar at any chapter before the dedicated demo seeding, those real results would paint instead of an empty page — the user saw a populated screen mid-tour when they weren't supposed to. Both pages now stay empty until the chapter that explicitly seeds demo content; after the tour ends, real results render normally.
+- **Hitting the daily audit cap mid-tour no longer traps the user behind a darkened screen.** When a free user already over their 5/day cap started the product tour, chapter 1's silent sample audit hit the server's 429 rate limit and the cap-reached error card rendered underneath the tour's spotlight ring. The dim overlay, body scroll-lock, and capture-phase click guards all stayed live on top, so clicks went nowhere and only a hard refresh restored the app. The audit-error path now tears the tour down before flipping to the error view; the tour isn't marked completed, so it auto-fires again on the next session.
+
 ## [0.1.35.4] - 2026-05-01
 
 ### Fixed
