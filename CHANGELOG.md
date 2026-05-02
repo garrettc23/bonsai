@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.35.4] - 2026-05-01
+
+### Fixed
+- **App shell no longer overflows the viewport on phones.** At narrow widths the sidebar collapsed to a horizontal nav, but the inner nav list refused to shrink and pushed the whole sidebar out to ~592px on a 375px screen. Page scrolled horizontally and a slice of nav rendered off the right edge, looking like a stray detail drawer drifting onto the home page. The sidebar is now constrained to the viewport and the nav scrolls horizontally inside it instead.
+- **No more "Reading the bill..." headline lingering above your audit results.** The H1 set during the audit-loading state was never cleared once the audit finished, so the review screen showed two competing headings: a stale "Reading the bill & finding every overcharge" right above the actual "Audit complete · We estimate we can save you $2,760 on this bill." Same issue surfaced on the daily-cap error screen and the post-submission complaint flow. Sub-views that have their own heading now hide the page header; nav switches re-show it.
+- **Comparison page reads in English, not enum names.** The category chips and offer cards on /Comparison printed raw `HOSPITAL_BILL` (snake_case enum, uppercased by CSS) instead of "Hospital bills". Same fix applied to the compare modal and "How to switch" modal so a click into either view doesn't drop the user back into raw-enum land. Unknown categories now title-case automatically, so a new server-side category renders as "Vision plan" instead of "VISION_PLAN" until the label table catches up.
+- **Complaint page no longer prints the same heading twice.** The "Negotiate a complaint or refund" flow had "Tell Bonsai what happened" as both the page H1 and the section H2. The section heading was already meaningful on its own, so the duplicate page header is gone.
+- **Bill viewer hint is honest about how many tabs it actually has.** With one uploaded file the viewer's subtitle said "1 file · click a tab to switch", but the tab nav was empty — there was nothing to click. Single-file viewers now read "Uploaded file"; the click-to-switch hint shows up only when there are multiple tabs.
+
 ## [0.1.35.3] - 2026-05-01
 
 ### Fixed
