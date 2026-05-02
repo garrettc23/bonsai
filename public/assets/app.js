@@ -4012,7 +4012,7 @@ function openCompareModal(offer, card) {
 
   const fmtPlain = (n) => (n ? fmt$(n) : "Free");
 
-  $("#cmp-category").textContent = offer.category ?? "—";
+  $("#cmp-category").textContent = offer.category ? offerCategoryLabel(offer.category) : "—";
   $("#cmp-title").textContent = `${offer.baseline?.current_provider ?? "Your current provider"} vs ${offer.source}`;
   $("#cmp-cur-provider").textContent = offer.baseline?.current_provider ?? "Your current provider";
   $("#cmp-cur-price").textContent = offer.current ? fmt$(offer.current) : "—";
@@ -4145,7 +4145,7 @@ function openSwitchModal(offer) {
   if (!modal || !scrim) return;
 
   $("#switch-category").textContent = offer.category
-    ? `${offer.category} — How to switch`
+    ? `${offerCategoryLabel(offer.category)} — How to switch`
     : "How to switch";
   const recommended = offer.source ?? "the recommended provider";
   const current = offer.baseline?.current_provider ?? "your current provider";
