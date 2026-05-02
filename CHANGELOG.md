@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.36.1] - 2026-05-02
+
+### Fixed
+- **Quitting the product tour midway now leaves a clean account, not a litter of fake examples.** When the tour preloaded its sample bill at chapter 1, that bill was a real audit on the server with a real offer hunt attached. If you bailed out via the X or Escape before the finale, the SPA-nav exit fired the server cleanup AFTER it had already let `historyCache` and `offersCache` repopulate — the deleted-but-cached bill kept showing up as a "synthetic example" in Negotiation and Comparison. The skip path now runs server cleanup first, then hard-reloads `/app` so every in-memory cache (`historyCache`, `offersCache`, `reviewState`, `huntRunIds`, `currentWorkflowView`) drops with the page. Trade-off: brief Getting Started pill flicker on the reload, which beats stale demo data lingering in your live views.
+
+### Changed
+- **Browser tab title on the app reads "Bonsai - Lower your bills" instead of "Bonsai — Sign in".** The SPA shell serves both the unauthenticated sign-in screen and the authed product, and the old title only made sense for the former. The new title matches the landing page and reads correctly whether you're signing in or already inside the product.
+
 ## [0.1.36.0] - 2026-05-02
 
 ### Added
