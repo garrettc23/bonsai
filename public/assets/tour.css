@@ -482,6 +482,18 @@ body.tour-active .tour-rail { display: none; }
 /* Keep nav-counts steady while tour is active — they shift layout. */
 body.tour-active .nav-count:not([hidden]) { visibility: hidden; }
 
+/* The bill-001 sample audit kicks off a real offer hunt in the background,
+ * which makes the Comparison nav-icon pulse via .is-hunting. During the
+ * tour we don't want any signal pointing at Comparison until the user
+ * actually reaches the "Lower your rate" chapter — otherwise it reads as
+ * "there's already a comparison option for you to look at" before the
+ * tour gets there. Freeze the pulse for the duration of the tour. */
+body.tour-active .nav-item.is-hunting .nav-ic,
+body.tour-active .nav-item.is-hunting > span:nth-child(2) {
+  animation: none;
+  opacity: 1;
+}
+
 /* Lock body scroll while tour is active EXCEPT when the chat or the
  * accept button is the spotlight target — those chapters live mid-page
  * and the user needs to scroll to see what they're being shown. The
