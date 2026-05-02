@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.35.3] - 2026-05-01
+
+### Fixed
+- **Sign-in page no longer blanks out for already-signed-in users.** The auth-flash gate added in v0.1.35.2 hid the dashboard markup whenever the URL carried `?auth=signin`/`?auth=signup`, but never removed the gate on the logged-in path — so a returning user clicking "Sign in" on the landing page landed on `/app?auth=signin`, the auth check succeeded, and they saw a blank screen while the (now-hidden) dashboard rendered underneath. `init()` now drops the gate as soon as the user is confirmed signed in, and the inline script in `index.html` also clears it after 2s as a safety net so any stall in `init()` can never leave the page permanently blank.
+
 ## [0.1.35.2] - 2026-05-01
 
 ### Fixed
