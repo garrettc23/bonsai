@@ -52,8 +52,6 @@ export function getDb(): Database {
       google_sub TEXT,
       tour_completed_at INTEGER
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS users_google_sub_idx
-      ON users(google_sub) WHERE google_sub IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS email_verifications (
       token TEXT PRIMARY KEY,
