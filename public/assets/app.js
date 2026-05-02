@@ -296,6 +296,18 @@ function setWorkflowView(view) {
     if (v === view) el.classList.remove("hidden");
     else el.classList.add("hidden");
   }
+  // Sub-views like review/results/complaint/error render their own
+  // heading inside the view (Audit complete + savings line, Tell Bonsai
+  // what happened, "YOU'VE USED YOUR DAILY AUDITS", etc.). Hide the page
+  // header in those states so we don't leave a stale "Reading the bill..."
+  // H1 above the new content or duplicate the H1 the sub-view already
+  // shows.
+  const hdr = $("#page-header");
+  if (hdr) {
+    const ownsHeading =
+      view === "review" || view === "results" || view === "complaint" || view === "error";
+    hdr.hidden = ownsHeading;
+  }
 }
 
 /**
@@ -1527,10 +1539,8 @@ function openComplaintView() {
     errEl.textContent = "";
   }
   setWorkflowView("complaint");
-  updatePageHeader({
-    eyebrow: "Negotiate",
-    title: "Tell Bonsai what happened",
-  });
+  // The complaint view has its own "COMPLAINT & REFUND" eyebrow + matching
+  // H2 inside the form. Don't duplicate the heading at the page header.
   setTimeout(() => $("#complaint-company")?.focus(), 50);
 }
 
@@ -2111,6 +2121,27 @@ function providerKindLabel() {
   return "bill";
 }
 
+// Human label for the snake_case OfferCategory values that come from
+// src/offer-agent.ts. Falls back to title-casing the raw value so a
+// brand-new category added on the server side never leaks to the user as
+// raw `LIKE_THIS`.
+const OFFER_CATEGORY_LABELS = {
+  prescription: "Prescriptions",
+  insurance_plan: "Insurance plans",
+  lab_work: "Lab work",
+  imaging: "Imaging",
+  specialty_infusion: "Specialty infusions",
+  dental: "Dental",
+  hospital_bill: "Hospital bills",
+  urgent_care: "Urgent care",
+  house_insurance: "Home insurance",
+};
+function offerCategoryLabel(c) {
+  if (!c) return "";
+  if (OFFER_CATEGORY_LABELS[c]) return OFFER_CATEGORY_LABELS[c];
+  return String(c).split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
 function renderOpportunitiesSkeleton() {
   $("#opps-total").textContent = "—";
   const qualifierEl = $("#opps-total-qualifier");
@@ -2615,6 +2646,11 @@ function resetPageHeader() {
 function updatePageHeader({ eyebrow, title, stats }) {
   if (eyebrow != null) $("#ph-eyebrow").textContent = eyebrow;
   if (title != null) $("#ph-title").innerHTML = title;
+  // Any explicit header update reveals the header. setWorkflowView() hides
+  // it for sub-views that own their own heading (review/results/complaint);
+  // a subsequent nav-switch path calls updatePageHeader and we re-show.
+  const hdr = $("#page-header");
+  if (hdr) hdr.hidden = false;
   const root = $("#ph-stats");
   root.innerHTML = "";
   if (!stats) return;
@@ -3843,7 +3879,9 @@ function renderOffers() {
     for (const c of cats) {
       const chip = document.createElement("button");
       chip.className = "filter-chip" + (c === offersFilter ? " active" : "");
-      chip.textContent = c;
+      // "Recommended" / "All" pass through; raw category enums get
+      // humanized so users see "Hospital bills" instead of "HOSPITAL_BILL".
+      chip.textContent = (c === "Recommended" || c === "All") ? c : offerCategoryLabel(c);
       chip.addEventListener("click", () => { offersFilter = c; renderOffers(); });
       filtersRoot.appendChild(chip);
     }
@@ -3896,7 +3934,7 @@ function buildOfferCard(o) {
     <div class="offer-head">
       <div class="offer-ic">${ICONS.sparkle}</div>
       <div class="offer-head-main">
-        <div class="offer-meta">${escapeHtml(o.category ?? "")}</div>
+        <div class="offer-meta">${escapeHtml(offerCategoryLabel(o.category))}</div>
         <div class="offer-source">${escapeHtml(o.source ?? "")}</div>
       </div>
     </div>
@@ -3974,7 +4012,7 @@ function openCompareModal(offer, card) {
 
   const fmtPlain = (n) => (n ? fmt$(n) : "Free");
 
-  $("#cmp-category").textContent = offer.category ?? "—";
+  $("#cmp-category").textContent = offer.category ? offerCategoryLabel(offer.category) : "—";
   $("#cmp-title").textContent = `${offer.baseline?.current_provider ?? "Your current provider"} vs ${offer.source}`;
   $("#cmp-cur-provider").textContent = offer.baseline?.current_provider ?? "Your current provider";
   $("#cmp-cur-price").textContent = offer.current ? fmt$(offer.current) : "—";
@@ -4107,7 +4145,7 @@ function openSwitchModal(offer) {
   if (!modal || !scrim) return;
 
   $("#switch-category").textContent = offer.category
-    ? `${offer.category} — How to switch`
+    ? `${offerCategoryLabel(offer.category)} — How to switch`
     : "How to switch";
   const recommended = offer.source ?? "the recommended provider";
   const current = offer.baseline?.current_provider ?? "your current provider";
@@ -5713,7 +5751,12 @@ async function openBillViewer(runId) {
       return;
     }
     $("#bill-viewer-title").textContent = billViewerState.files[0].name;
-    $("#bill-viewer-sub").textContent = `${billViewerState.files.length} file${billViewerState.files.length === 1 ? "" : "s"} · click a tab to switch`;
+    // The "click a tab to switch" hint is only true when there are tabs to
+    // switch between. With a single file, the tab nav is empty and the hint
+    // confuses the user.
+    $("#bill-viewer-sub").textContent = billViewerState.files.length === 1
+      ? "Uploaded file"
+      : `${billViewerState.files.length} files · click a tab to switch`;
     if (billViewerState.files.length > 1) {
       billViewerState.files.forEach((f, i) => {
         const b = document.createElement("button");
