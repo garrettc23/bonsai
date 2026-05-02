@@ -1509,6 +1509,59 @@
     }
   }
 
+  // Completion path: hard-reload to /app so init() runs fresh on Home,
+  // every in-memory cache (offersCache, historyCache, reviewState) gets
+  // dropped, and any leftover SPA navigation state from chapter 7
+  // (currentNav === "offers") is wiped. SPA-navigate to overview FIRST
+  // as a safety net — if the reload doesn't actually fire (some browsers
+  // skip same-URL location.replace, some swallow it under heavy state
+  // changes), the user still ends up on Home instead of staring at the
+  // demo Comparison page. The cache-buster query forces an actual
+  // navigation so the reload happens regardless of current URL.
+  const finishOnComplete = async () => {
+    window.__bonsaiTour = null;
+    try { clearDemoData(); } catch {}
+    try {
+      if (typeof window.showNav === "function") {
+        await window.showNav("overview", { force: true });
+      }
+    } catch (err) {
+      console.warn("[tour] complete nav failed", err);
+    }
+    try { await markCompleted(); } catch {}
+    // Suppress the app's beforeunload "leave this site?" dialog — the
+    // sample audit is still in reviewState when the tour ends, which the
+    // unsaved-work guard would otherwise prompt about.
+    window.__bonsaiSkipUnsavedPrompt = true;
+    try { window.location.replace("/app?_t=" + Date.now()); }
+    catch { try { window.location.assign("/app"); } catch { /* */ } }
+  };
+
+  // Skip (X-click mid-tour): SPA-navigate to Home instead of a full
+  // reload. The reload made the Getting Started pill (X/7 progress chip
+  // in the sidebar) flicker — the pill is JS-mounted, so the page
+  // tear-down + re-mount left a visible gap where the pill was gone,
+  // then back. showNav("overview", { force: true }) drops any in-flight
+  // reviewState left over from the demo audit and lands the user on
+  // Home with the sidebar (and the pill) untouched.
+  const finishOnSkip = async () => {
+    window.__bonsaiTour = null;
+    try { clearDemoData(); } catch {}
+    try {
+      if (typeof window.showNav === "function") {
+        await window.showNav("overview", { force: true });
+      }
+    } catch (err) {
+      console.warn("[tour] skip nav failed", err);
+    }
+    try { await markCompleted(); } catch {}
+    // Refresh pill state — once tour_completed_at is set the visibility
+    // logic (visited >= total → hidden) may flip.
+    if (typeof window.__bonsaiGettingStartedRefresh === "function") {
+      try { window.__bonsaiGettingStartedRefresh(); } catch {}
+    }
+  };
+
   function startBonsaiTour() {
     if (window.__bonsaiTour?.active) return;
     // Clear any stale state from a previous tour run — demo bills/offers,
@@ -1517,54 +1570,6 @@
     // so we DON'T navigate to Home here — the modal opens wherever the
     // user is (Settings, Bills, anywhere) and they advance from there.
     clearDemoData();
-    // Nuclear option for "go to Home when the tour ends": navigate the
-    // browser to /app. Every previous attempt to coordinate showNav +
-    // setWorkflowView + nav-item-click has reportedly missed in real
-    // browsers despite passing automated checks. A full page nav is
-    // physically impossible to land on the wrong tab — /app's init()
-    // always defaults to the Home/overview view, the auth cookie
-    // survives the navigation, the tour is already marked complete on
-    // the server, and any in-flight UI state from the tour is wiped.
-    // We await markCompleted so the server-side flag is set BEFORE
-    // the reload — otherwise the tour might re-fire on the next load.
-    const finishOnComplete = async () => {
-      window.__bonsaiTour = null;
-      try { clearDemoData(); } catch {}
-      try { await markCompleted(); } catch {}
-      // Suppress the app's beforeunload "leave this site?" dialog —
-      // the sample audit is still in reviewState when the tour ends,
-      // which the unsaved-work guard would otherwise prompt about.
-      // The tour intentionally throws away that state on finale.
-      window.__bonsaiSkipUnsavedPrompt = true;
-      // location.replace doesn't add a history entry — the user can't
-      // hit Back and land in the middle of the tour.
-      try { window.location.replace("/app"); }
-      catch { try { window.location.assign("/app"); } catch { /* */ } }
-    };
-    // Skip (X-click mid-tour): use SPA navigation instead of a full
-    // reload. The reload made the Getting Started pill (X/7 progress
-    // chip in the sidebar) flicker — the pill is JS-mounted, so the
-    // page tear-down + re-mount left a visible gap where the pill was
-    // gone, then back. showNav("overview", { force: true }) drops any
-    // in-flight reviewState left over from the demo audit and lands
-    // the user on Home with the sidebar (and the pill) untouched.
-    const finishOnSkip = async () => {
-      window.__bonsaiTour = null;
-      try { clearDemoData(); } catch {}
-      try {
-        if (typeof window.showNav === "function") {
-          await window.showNav("overview", { force: true });
-        }
-      } catch (err) {
-        console.warn("[tour] skip nav failed", err);
-      }
-      try { await markCompleted(); } catch {}
-      // Refresh pill state — once tour_completed_at is set the
-      // visibility logic (visited >= total → hidden) may flip.
-      if (typeof window.__bonsaiGettingStartedRefresh === "function") {
-        try { window.__bonsaiGettingStartedRefresh(); } catch {}
-      }
-    };
     const mgr = new TourManager({
       chapters: CHAPTERS,
       onComplete: finishOnComplete,
@@ -1597,10 +1602,15 @@
       else mgr.skip();
       return;
     }
+    // Use the same handlers as startBonsaiTour. If the user clicks a
+    // chapter in the panel, the manager promotes browse → active and
+    // the user can walk to the finale; the simple onComplete that used
+    // to live here didn't navigate, didn't clear demo data, and left
+    // the user stranded wherever the last chapter parked them.
     const fresh = new TourManager({
       chapters: CHAPTERS,
-      onComplete: () => { window.__bonsaiTour = null; markCompleted(); },
-      onSkip: () => { window.__bonsaiTour = null; markCompleted(); },
+      onComplete: finishOnComplete,
+      onSkip: finishOnSkip,
     });
     window.__bonsaiTour = fresh;
     fresh.openBrowse();

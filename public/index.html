@@ -48,6 +48,13 @@
         var s = window.location.search || "";
         if (s.indexOf("auth=signin") !== -1 || s.indexOf("auth=signup") !== -1) {
           document.documentElement.classList.add("auth-pending");
+          // Safety net: app.js init() removes this class once the auth
+          // check resolves, but if anything stalls (slow /api/auth/me,
+          // a JS error in init, etc.) we don't want the page stuck on a
+          // permanent blank. Drop the gate after 2s no matter what.
+          setTimeout(function () {
+            document.documentElement.classList.remove("auth-pending");
+          }, 2000);
         }
       })();
     </script>

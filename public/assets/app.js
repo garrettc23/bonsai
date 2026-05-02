@@ -865,6 +865,13 @@ async function init() {
     renderAuthScreen();
     return;
   }
+  // index.html sets html.auth-pending when the URL carries ?auth=signin
+  // or ?auth=signup so the dashboard markup doesn't flash on the way to
+  // the sign-in screen. If we got here the user is already logged in —
+  // drop the gate so the dashboard becomes visible. (Without this,
+  // a returning logged-in user clicking the landing page CTA lands on
+  // /app?auth=signin and sees a blank screen.)
+  document.documentElement.classList.remove("auth-pending");
   currentUser = user;
   // Inject sidebar nav icons
   for (const el of $$(".nav-ic")) {
@@ -3245,7 +3252,14 @@ function startHuntStatusPoll() {
 
     if (anyChanged) {
       await loadOffers();
-      if (currentNav === "offers") renderOffers();
+      // Don't repaint the Comparison grid while the tour is active —
+      // chapter 7 has injected demo offer cards into #offers-grid and a
+      // mid-tour render would replace them with real bill-001 hunt
+      // results, breaking the chapter's anchor and confusing the user.
+      // The page reload at tour completion drops in-memory offersCache
+      // anyway, so the real offers reappear on the next paint.
+      const tourActive = document.body.classList.contains("tour-active");
+      if (currentNav === "offers" && !tourActive) renderOffers();
     }
 
     updateNavCounts();
