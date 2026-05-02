@@ -2121,6 +2121,27 @@ function providerKindLabel() {
   return "bill";
 }
 
+// Human label for the snake_case OfferCategory values that come from
+// src/offer-agent.ts. Falls back to title-casing the raw value so a
+// brand-new category added on the server side never leaks to the user as
+// raw `LIKE_THIS`.
+const OFFER_CATEGORY_LABELS = {
+  prescription: "Prescriptions",
+  insurance_plan: "Insurance plans",
+  lab_work: "Lab work",
+  imaging: "Imaging",
+  specialty_infusion: "Specialty infusions",
+  dental: "Dental",
+  hospital_bill: "Hospital bills",
+  urgent_care: "Urgent care",
+  house_insurance: "Home insurance",
+};
+function offerCategoryLabel(c) {
+  if (!c) return "";
+  if (OFFER_CATEGORY_LABELS[c]) return OFFER_CATEGORY_LABELS[c];
+  return String(c).split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
 function renderOpportunitiesSkeleton() {
   $("#opps-total").textContent = "—";
   const qualifierEl = $("#opps-total-qualifier");
@@ -3858,7 +3879,9 @@ function renderOffers() {
     for (const c of cats) {
       const chip = document.createElement("button");
       chip.className = "filter-chip" + (c === offersFilter ? " active" : "");
-      chip.textContent = c;
+      // "Recommended" / "All" pass through; raw category enums get
+      // humanized so users see "Hospital bills" instead of "HOSPITAL_BILL".
+      chip.textContent = (c === "Recommended" || c === "All") ? c : offerCategoryLabel(c);
       chip.addEventListener("click", () => { offersFilter = c; renderOffers(); });
       filtersRoot.appendChild(chip);
     }
@@ -3911,7 +3934,7 @@ function buildOfferCard(o) {
     <div class="offer-head">
       <div class="offer-ic">${ICONS.sparkle}</div>
       <div class="offer-head-main">
-        <div class="offer-meta">${escapeHtml(o.category ?? "")}</div>
+        <div class="offer-meta">${escapeHtml(offerCategoryLabel(o.category))}</div>
         <div class="offer-source">${escapeHtml(o.source ?? "")}</div>
       </div>
     </div>
