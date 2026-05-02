@@ -3375,19 +3375,23 @@ function scheduleBillsPoll() {
 }
 
 function renderBills() {
-  // While the first-login tour is showing demo bills on this view,
-  // skip the real render — otherwise the poll loop would wipe the
-  // injected rows. clearDemoData() at tour teardown puts real state
-  // back; the next render (poll tick or nav) repaints normally.
-  if (document.body.classList.contains("tour-active") &&
-      document.querySelector("#bills-rows [data-tour-demo]")) {
-    return;
-  }
+  // Header always updates so the page title matches the active nav, even
+  // mid-tour when row rendering is suppressed below.
   updatePageHeader({
     eyebrow: "Negotiation",
     title: "Every negotiation in one place",
     stats: null,
   });
+  // Suppress all real-bill rendering during the tour. The bill-001 sample
+  // audit kicked off at chapter 1 produces a real bill row; if the user
+  // clicks Negotiation from the sidebar at any chapter before 5, the
+  // cached audit would otherwise paint a populated page mid-tour. Chapter
+  // 5 explicitly calls injectDemoBills() to seed its own demo rows, so it
+  // doesn't need this function to render rows. After tour teardown, the
+  // tour-active flag is gone and the next call renders real bills.
+  if (document.body.classList.contains("tour-active")) {
+    return;
+  }
 
   const audits = historyCache?.audits ?? [];
 
