@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - **No more dashboard flash on the way to sign in.** Clicking "Sign in" or "Sign up" on the landing page now snaps straight to the auth screen — previously the browser painted the full app shell for a few hundred ms before the auth check resolved, which read as a flash of the dashboard. The login HTML now hides the app markup whenever the URL carries `?auth=signin` or `?auth=signup`, so the user only ever sees the auth screen.
 - **Product tour no longer leaves a fake bill behind.** When you finish the tour, the demo "bill-001" audit + report + offer hunt the tour seeded under your account are deleted, so the Bills tab opens clean instead of showing the synthetic bill the tour walked you through. Reuses the same delete chain `/api/delete` already runs (pending file, report, appeal, uploads, offer hunts).
+- **Getting Started pill no longer flickers when you skip the tour.** Clicking the X on a tour step used to do a full page reload to land the user on Home, which made the X/7 progress pill in the sidebar disappear and reappear during the navigation. Skip now uses an in-app navigation instead — the tour overlay tears down, in-flight review state from the demo audit is dropped, and the pill stays in place while progress refreshes. Completion still does the full reload (it's been the only reliable way to land on Home in real browsers).
 
 ## [0.1.35.1] - 2026-05-01
 
