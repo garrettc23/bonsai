@@ -2735,9 +2735,42 @@ function userPublic(user: User): {
   };
 }
 
+/**
+ * Wipe the demo bill the product tour seeds so the user lands on a clean
+ * Bills tab once the tour ends. The tour calls /api/audit with
+ * `fixture: "bill-001"`, which writes a real PendingRun + report + offer
+ * hunt under the user's data dir — clearDemoData() in tour.js only clears
+ * the DOM, leaving those files behind. Reuses deleteBillByRunId so the
+ * full delete chain (pending file, report, appeal, uploads, offer hunts)
+ * matches what /api/delete does. Best-effort: failures are logged and
+ * ignored so a stale file never blocks tour completion.
+ */
+function clearTourFixtureData(): void {
+  const paths = currentUserPaths();
+  if (!existsSync(paths.pendingDir)) return;
+  for (const file of readdirSync(paths.pendingDir)) {
+    if (!file.endsWith(".json")) continue;
+    const filePath = join(paths.pendingDir, file);
+    try {
+      const run = JSON.parse(readFileSync(filePath, "utf-8")) as { run_id?: string; fixture_name?: string };
+      if (run.fixture_name !== "bill-001" || !run.run_id) continue;
+      deleteBillByRunId(run.run_id, {
+        loadPending,
+        savePending,
+        pendingPath,
+        uploadDir,
+        paths,
+      });
+    } catch (err) {
+      console.warn("[tour-cleanup] skipping unreadable pending file", filePath, err);
+    }
+  }
+}
+
 async function handleMarkTourCompleted(user: User): Promise<Response> {
   const { markTourCompleted } = await import("./lib/auth.ts");
   const updated = markTourCompleted(user.id);
+  clearTourFixtureData();
   return Response.json({ user: userPublic(updated) });
 }
 

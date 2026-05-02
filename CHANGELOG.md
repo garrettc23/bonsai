@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.35.2] - 2026-05-01
+
+### Fixed
+- **No more dashboard flash on the way to sign in.** Clicking "Sign in" or "Sign up" on the landing page now snaps straight to the auth screen — previously the browser painted the full app shell for a few hundred ms before the auth check resolved, which read as a flash of the dashboard. The login HTML now hides the app markup whenever the URL carries `?auth=signin` or `?auth=signup`, so the user only ever sees the auth screen.
+- **Product tour no longer leaves a fake bill behind.** When you finish the tour, the demo "bill-001" audit + report + offer hunt the tour seeded under your account are deleted, so the Bills tab opens clean instead of showing the synthetic bill the tour walked you through. Reuses the same delete chain `/api/delete` already runs (pending file, report, appeal, uploads, offer hunts).
+
 ## [0.1.35.1] - 2026-05-01
 
 ### Fixed

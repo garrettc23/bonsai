@@ -35,6 +35,22 @@
     <link rel="stylesheet" href="/assets/app.css" />
     <link rel="stylesheet" href="/assets/tour.css" />
     <link rel="stylesheet" href="/assets/getting-started.css" />
+    <style>
+      /* When the landing page sends the user here with ?auth=signin/signup,
+         hide the dashboard markup until app.js can swap in the auth screen.
+         Without this gate the browser paints the full app shell for a few
+         hundred ms before fetchCurrentUser() resolves, which reads as a
+         "flash of dashboard" on the way to login. */
+      html.auth-pending .app { display: none; }
+    </style>
+    <script>
+      (function () {
+        var s = window.location.search || "";
+        if (s.indexOf("auth=signin") !== -1 || s.indexOf("auth=signup") !== -1) {
+          document.documentElement.classList.add("auth-pending");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div class="app">
