@@ -399,6 +399,89 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   letter-spacing: 0.02em;
 }
 .dz-sample-link:hover { color: var(--ink); }
+
+/* Two-path intake: dropzone above, complaint flow below as a peer.
+ * The "or" divider tells the user these are sibling options, not a
+ * primary/secondary nested control. */
+.intake-main { display: flex; flex-direction: column; min-width: 0; }
+.intake-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+.intake-or::before,
+.intake-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.intake-or span { padding: 0 4px; }
+
+.intake-alt-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 22px;
+  font: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .15s;
+}
+.intake-alt-card:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-alt);
+}
+.intake-alt-card:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.intake-alt-icon {
+  flex-shrink: 0;
+  width: 40px; height: 40px;
+  border-radius: 10px;
+  background: var(--surface-alt);
+  color: var(--ink-soft);
+  display: flex; align-items: center; justify-content: center;
+}
+.intake-alt-card:hover .intake-alt-icon {
+  background: var(--surface);
+  color: var(--ink);
+}
+.intake-alt-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.intake-alt-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.intake-alt-sub {
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.intake-alt-arrow {
+  flex-shrink: 0;
+  font-size: 18px;
+  color: var(--ink-mute);
+  transition: transform .15s, color .15s;
+}
+.intake-alt-card:hover .intake-alt-arrow {
+  color: var(--ink);
+  transform: translateX(2px);
+}
 .aside-hint {
   margin-top: 18px;
   padding: 12px 14px;
@@ -3173,6 +3256,10 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   .page-header-stats { gap: 18px; flex-wrap: wrap; }
   .content { padding: 22px 20px 32px; }
   .intake-grid { grid-template-columns: 1fr; }
+  .intake-alt-card { padding: 14px 16px; gap: 12px; }
+  .intake-alt-icon { width: 36px; height: 36px; }
+  .intake-alt-title { font-size: 16px; }
+  .intake-alt-sub { font-size: 12.5px; }
   .dz-form { grid-template-columns: 1fr; }
   .dz-form button[type="submit"] { width: 100%; }
   .sidebar { position: static; height: auto; }

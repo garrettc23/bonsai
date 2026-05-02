@@ -119,36 +119,47 @@
             </div>
 
             <div class="intake-grid">
-              <div class="dropzone" id="dropzone">
-                <div class="dz-icon" aria-hidden="true">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="15"/></svg>
-                </div>
-                <div class="dz-title">Drop any bill. We get you the lowest price possible.</div>
-                <div class="dz-sub">Every expense in your life, from medical to insurance to subscriptions, automatically negotiated until you're paying the lowest price possible.</div>
-                <form id="upload-form" class="dz-form">
-                  <label class="file-field file-field-full">
-                    <input type="file" name="bill" multiple required />
-                    <span class="file-field-btn">Choose files</span>
-                  </label>
-                </form>
-                <div class="dz-staging" id="dz-staging" hidden>
-                  <div class="dz-staging-head">
-                    <div class="eyebrow">Uploaded <span id="dz-staging-count">0</span> of 10</div>
-                    <div class="dz-staging-hint">Drag more files or click below. All pages will be audited together.</div>
+              <div class="intake-main">
+                <div class="dropzone" id="dropzone">
+                  <div class="dz-icon" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 5 17 10"/><line x1="12" y1="5" x2="12" y2="15"/></svg>
                   </div>
-                  <div class="dz-staging-grid" id="dz-staging-grid"></div>
-                  <div class="dz-staging-actions">
-                    <label class="dz-add-more" id="dz-add-more">
-                      <input type="file" id="dz-add-input" multiple hidden />
-                      <span>+ Add more files</span>
+                  <div class="dz-title">Drop any bill. We get you the lowest price possible.</div>
+                  <div class="dz-sub">Every expense in your life, from medical to insurance to subscriptions, automatically negotiated until you're paying the lowest price possible.</div>
+                  <form id="upload-form" class="dz-form">
+                    <label class="file-field file-field-full">
+                      <input type="file" name="bill" multiple required />
+                      <span class="file-field-btn">Choose files</span>
                     </label>
-                    <button type="button" id="dz-next" class="btn btn-primary">Audit my bill</button>
+                  </form>
+                  <div class="dz-staging" id="dz-staging" hidden>
+                    <div class="dz-staging-head">
+                      <div class="eyebrow">Uploaded <span id="dz-staging-count">0</span> of 10</div>
+                      <div class="dz-staging-hint">Drag more files or click below. All pages will be audited together.</div>
+                    </div>
+                    <div class="dz-staging-grid" id="dz-staging-grid"></div>
+                    <div class="dz-staging-actions">
+                      <label class="dz-add-more" id="dz-add-more">
+                        <input type="file" id="dz-add-input" multiple hidden />
+                        <span>+ Add more files</span>
+                      </label>
+                      <button type="button" id="dz-next" class="btn btn-primary">Audit my bill</button>
+                    </div>
                   </div>
                 </div>
-                <div class="dz-other-row">
-                  <span>Not a bill?</span>
-                  <button id="open-complaint-btn" class="dz-sample-link" type="button">Negotiate a complaint or refund &nbsp;→</button>
-                </div>
+
+                <div class="intake-or" aria-hidden="true"><span>or</span></div>
+
+                <button id="open-complaint-btn" class="intake-alt-card" type="button">
+                  <span class="intake-alt-icon" aria-hidden="true">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  </span>
+                  <span class="intake-alt-body">
+                    <span class="intake-alt-title">Don't have a bill? Fight a charge or chase a refund.</span>
+                    <span class="intake-alt-sub">Late fees, airline refunds, overdraft reversals, customer-service escalations &mdash; Bonsai writes the complaint and works it on your behalf.</span>
+                  </span>
+                  <span class="intake-alt-arrow" aria-hidden="true">→</span>
+                </button>
               </div>
 
               <div class="intake-aside">
