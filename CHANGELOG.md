@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.35.1] - 2026-05-01
+
+### Fixed
+- **Sign in with Google now works on databases created before v0.1.33.0.** Older Bonsai instances had a `users` table without the `google_sub` column, and the `CREATE UNIQUE INDEX users_google_sub_idx ON users(google_sub)` statement at the top of `getDb()` blew up before the `ALTER TABLE` migration could add the column, so every Google callback hit `SQLiteError: no such column: google_sub`. Removed the redundant index creation from the initial schema block — the same index is already (correctly) created right after the `ALTER TABLE` migration runs, so fresh and legacy databases both end up in the same state.
+
 ## [0.1.35.0] - 2026-05-01
 
 ### Added
