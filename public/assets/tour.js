@@ -1537,29 +1537,20 @@
     catch { try { window.location.assign("/app"); } catch { /* */ } }
   };
 
-  // Skip (X-click mid-tour): SPA-navigate to Home instead of a full
-  // reload. The reload made the Getting Started pill (X/7 progress chip
-  // in the sidebar) flicker — the pill is JS-mounted, so the page
-  // tear-down + re-mount left a visible gap where the pill was gone,
-  // then back. showNav("overview", { force: true }) drops any in-flight
-  // reviewState left over from the demo audit and lands the user on
-  // Home with the sidebar (and the pill) untouched.
+  // Skip (X-click mid-tour): server cleanup FIRST so the bill-001 fixture
+  // is gone before any view can re-fetch and repopulate historyCache /
+  // offersCache with it. Then hard-reload to /app — same pattern as
+  // finishOnComplete — so every in-memory cache (historyCache, offersCache,
+  // reviewState, huntRunIds, currentWorkflowView) gets dropped. SPA-nav
+  // alone leaves those caches intact, which is how the demo bill / offer
+  // hunt surfaces in Negotiation / Comparison after a mid-tour exit.
   const finishOnSkip = async () => {
     window.__bonsaiTour = null;
     try { clearDemoData(); } catch {}
-    try {
-      if (typeof window.showNav === "function") {
-        await window.showNav("overview", { force: true });
-      }
-    } catch (err) {
-      console.warn("[tour] skip nav failed", err);
-    }
     try { await markCompleted(); } catch {}
-    // Refresh pill state — once tour_completed_at is set the visibility
-    // logic (visited >= total → hidden) may flip.
-    if (typeof window.__bonsaiGettingStartedRefresh === "function") {
-      try { window.__bonsaiGettingStartedRefresh(); } catch {}
-    }
+    window.__bonsaiSkipUnsavedPrompt = true;
+    try { window.location.replace("/app?_t=" + Date.now()); }
+    catch { try { window.location.assign("/app"); } catch { /* */ } }
   };
 
   function startBonsaiTour() {
