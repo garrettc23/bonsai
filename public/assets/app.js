@@ -296,6 +296,16 @@ function setWorkflowView(view) {
     if (v === view) el.classList.remove("hidden");
     else el.classList.add("hidden");
   }
+  // Sub-views like review/results/complaint render their own heading
+  // inside the view (Audit complete + savings line, Tell Bonsai what
+  // happened, etc.). Hide the page header in those states so we don't
+  // leave a stale "Reading the bill..." H1 above the new content or
+  // duplicate the H1 the sub-view already shows.
+  const hdr = $("#page-header");
+  if (hdr) {
+    const ownsHeading = view === "review" || view === "results" || view === "complaint";
+    hdr.hidden = ownsHeading;
+  }
 }
 
 /**
@@ -2615,6 +2625,11 @@ function resetPageHeader() {
 function updatePageHeader({ eyebrow, title, stats }) {
   if (eyebrow != null) $("#ph-eyebrow").textContent = eyebrow;
   if (title != null) $("#ph-title").innerHTML = title;
+  // Any explicit header update reveals the header. setWorkflowView() hides
+  // it for sub-views that own their own heading (review/results/complaint);
+  // a subsequent nav-switch path calls updatePageHeader and we re-show.
+  const hdr = $("#page-header");
+  if (hdr) hdr.hidden = false;
   const root = $("#ph-stats");
   root.innerHTML = "";
   if (!stats) return;
