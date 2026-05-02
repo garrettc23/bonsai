@@ -296,14 +296,16 @@ function setWorkflowView(view) {
     if (v === view) el.classList.remove("hidden");
     else el.classList.add("hidden");
   }
-  // Sub-views like review/results/complaint render their own heading
-  // inside the view (Audit complete + savings line, Tell Bonsai what
-  // happened, etc.). Hide the page header in those states so we don't
-  // leave a stale "Reading the bill..." H1 above the new content or
-  // duplicate the H1 the sub-view already shows.
+  // Sub-views like review/results/complaint/error render their own
+  // heading inside the view (Audit complete + savings line, Tell Bonsai
+  // what happened, "YOU'VE USED YOUR DAILY AUDITS", etc.). Hide the page
+  // header in those states so we don't leave a stale "Reading the bill..."
+  // H1 above the new content or duplicate the H1 the sub-view already
+  // shows.
   const hdr = $("#page-header");
   if (hdr) {
-    const ownsHeading = view === "review" || view === "results" || view === "complaint";
+    const ownsHeading =
+      view === "review" || view === "results" || view === "complaint" || view === "error";
     hdr.hidden = ownsHeading;
   }
 }
