@@ -1693,6 +1693,13 @@ async function readErrorPayload(res) {
 // Routes an audit error into either the friendly daily-cap card or the
 // generic "Something went wrong" view, depending on the server's `code`.
 function showAuditError(err) {
+  // Tour can't proceed when an audit fails (chapter 1 needs the sample
+  // audit to succeed) — without this teardown, the spotlight ring and
+  // body scroll-lock stay on top of the cap-reached card and trap the
+  // user. No flags so the tour replays next session.
+  if (window.__bonsaiTour?.active) {
+    window.__bonsaiTour.destroy({});
+  }
   const payload = err?.payload;
   const view = $("#view-error");
   const eyebrow = view?.querySelector(".eyebrow");
