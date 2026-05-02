@@ -1537,10 +1537,8 @@ function openComplaintView() {
     errEl.textContent = "";
   }
   setWorkflowView("complaint");
-  updatePageHeader({
-    eyebrow: "Negotiate",
-    title: "Tell Bonsai what happened",
-  });
+  // The complaint view has its own "COMPLAINT & REFUND" eyebrow + matching
+  // H2 inside the form. Don't duplicate the heading at the page header.
   setTimeout(() => $("#complaint-company")?.focus(), 50);
 }
 
@@ -5751,7 +5749,12 @@ async function openBillViewer(runId) {
       return;
     }
     $("#bill-viewer-title").textContent = billViewerState.files[0].name;
-    $("#bill-viewer-sub").textContent = `${billViewerState.files.length} file${billViewerState.files.length === 1 ? "" : "s"} · click a tab to switch`;
+    // The "click a tab to switch" hint is only true when there are tabs to
+    // switch between. With a single file, the tab nav is empty and the hint
+    // confuses the user.
+    $("#bill-viewer-sub").textContent = billViewerState.files.length === 1
+      ? "Uploaded file"
+      : `${billViewerState.files.length} files · click a tab to switch`;
     if (billViewerState.files.length > 1) {
       billViewerState.files.forEach((f, i) => {
         const b = document.createElement("button");
