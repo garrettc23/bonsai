@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.37.0] - 2026-05-02
+
+### Added
+- **Pick how the agent finishes a negotiation.** Settings now leads with a Mode toggle: Autonomous closes anything at or below your target price without asking, Co-pilot returns every offer to you for accept-or-push-back. New threads pick up the mode you set; the toggle was promoted to the top of the Settings page so it's the first thing you tweak.
+- **The agent never signs anything binding without you.** When the rep proposes a settlement that needs your signature (insurance release, debt-settlement agreement, "reply YES to confirm"), the agent ALWAYS hands the thread back to you for review, regardless of mode. The notification email subject calls it out with "(signature required)" so it's obvious in your inbox.
+- **Accept or push back on every offer in Co-pilot mode.** Push back twice on the same thread and the agent force-escalates instead of pestering the rep a third time and burning their goodwill at the provider.
+- **Resolution notifications.** When the agent reaches a final state — resolved, awaiting your call, or escalated — you get an email and a durable in-app record. Multiple resolutions in the same 30-minute window roll into one digest email so your inbox doesn't fill up. Honors your existing Weekly digest setting.
+- **API endpoints for the new flow:** `POST /api/threads/:id/accept`, `POST /api/threads/:id/push-back`, `GET /api/threads/:id/state`, `GET /api/notifications/inbox`. Accept/push-back calls accept an `Idempotency-Key` header (5-minute dedupe, scoped per-user) and an `If-Match: <seq>` header to reject stale UI clicks with 412.
+
+### Changed
+- **Outbound emails are tighter.** Hard caps now: 200 words for the first email, 120 words for follow-ups, 60 characters on the subject line. The humanizer enforces them — if its first rewrite goes over, it retries with stricter instructions, then truncates at a paragraph boundary. The deterministic appeal letter caps the disputed-findings list at the top 3 by dollar impact and summarizes the rest as "additional errors totaling $X".
+- **Tone settings respect the word cap.** Aggressive used to add length (statute citations, escalation paths). All three tone presets now end with "stay within the word cap regardless of tone — cut sentences, do not shorten them."
+- **Settings page reordered.** Agent personalization (Tone, Mode, Channels) sits at the top of Settings, ahead of Personal details. Mode is the most-changed setting; users shouldn't scroll past contact info to find it.
+
+### Fixed
+- **Stale-thread escalation can no longer race with user actions.** The 7-day sweep that force-escalates threads waiting for your response wraps state mutations in `withThreadLock`, so a click on Accept the same second the sweep runs can't have your resolution silently overwritten by an escalation.
+- **Per-thread lock cleanup actually works now.** The lock map's cleanup compare-by-reference was always false (the chained promise was rebuilt twice with different identities), so the map grew unboundedly per thread. Idle threads release their lock entries.
+- **Idempotency cache is scoped per-user.** Cross-user collisions on the same `Idempotency-Key` value (whether random or replayed maliciously) could surface another user's cached response. Cache keys are now `userId:endpoint:idempotency-key`. Cache size is also hard-capped to prevent OOM under unique-key floods.
+- **Push-back notes are sanitized before reaching the agent's prompt.** Newline injection, quote escaping, and a 500-character cap prevent a careless or malicious user from breaking out of the quoted directive block.
+- **Resend notification calls have a 15-second timeout.** Without it, a hung Resend stalled the webhook step (which holds the thread lock) until subsequent webhook deliveries queued up indefinitely.
+
 ## [0.1.36.2] - 2026-05-02
 
 ### Changed

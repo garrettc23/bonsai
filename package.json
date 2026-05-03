@@ -1,6 +1,6 @@
 {
   "name": "bill-agent",
-  "version": "0.1.36.2",
+  "version": "0.1.37.0",
   "description": "Agents to manage personal bills — open-source agents that audit, dispute, and renegotiate insurance, utilities, medical, credit, and subscription costs.",
   "license": "MIT",
   "private": true,
