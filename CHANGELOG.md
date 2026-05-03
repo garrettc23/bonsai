@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.37.1] - 2026-05-03
+
+### Changed
+- **Hero headline is louder.** "Get your money back" now scales fluidly to ~88px on desktop and never falls below 40px on mobile. The bill mockup beside it shrank ~15% so the headline wins the visual hierarchy.
+- **Mobile nav fits the thumb.** Sign in / Sign up now flush right on phones (was left-of-center), matching what every iOS app does.
+- **"What Bonsai negotiates" — completely different mobile experience.** Desktop keeps the sticky scroll-driven category rotation it already had. Mobile drops the scrolljack entirely: each category is now a stacked card with title, description, photo, and a single non-wrapping row of category chips. Mirrors the read pattern people already know from native apps.
+- **Mobile chip rows trimmed to fit.** Removed `Streaming` from Recurring and `Parking & tickets` from Disputes on mobile only — the desktop rotator still shows all five/four chips. Chips no longer get cut off mid-pill on narrow phones.
+
 ## [0.1.37.0] - 2026-05-02
 
 ### Added
