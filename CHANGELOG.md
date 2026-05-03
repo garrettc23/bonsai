@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.36.2] - 2026-05-02
+
+### Changed
+- **Landing headline is now "Automatically lower bills".** Tightened from "You're being overcharged. Bonsai gets your money back." to a single direct line. The pain-first opener was working but reading abstract; the new line names the action and the outcome in three words. Browser tab and og:/twitter: titles updated to match so iMessage and Twitter previews stay consistent with the page.
+- **Hero illustration is ~40% larger and finally fills its column.** The grid was a 1.3fr / 0.7fr split with the art column the narrow one, so the SVG hit its 460px cap inside a ~400px column. Re-balanced to 0.85fr / 1.15fr so the art column gets the larger share, and bumped the SVG cap to 660px so the negotiation-receipt card actually fills the space. The receipt label reads REFUNDED instead of SAVED — same outcome, tighter wording.
+- **Container width tightened to 1200px (was 1280px).** All landing sections (nav, hero, features, FAQ, footer) share the same inner container. The 80px reduction shows up as ~40px more side margin on each side at wide viewports, giving the page a more polished, magazine-y feel. Below 1240px viewports, behavior is unchanged.
+- **Primary button hover finally registers.** The `.btn-primary:hover` shifted from `#0E0E0C` to `#1a1a17` — about a 5% brightness bump, completely invisible. Now uses the existing `--ink-soft` token (`#525248`) for a clear charcoal-gray hover. Change is in `app.css`, so it applies globally to every primary button in the app, not just landing.
+
 ## [0.1.36.1] - 2026-05-02
 
 ### Fixed
