@@ -607,7 +607,7 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
   color: var(--surface);
   border-color: var(--ink);
 }
-.btn-primary:hover:not(:disabled) { background: #1a1a17; }
+.btn-primary:hover:not(:disabled) { background: var(--ink-soft); border-color: var(--ink-soft); }
 .btn-ghost {
   background: transparent;
   color: var(--ink);

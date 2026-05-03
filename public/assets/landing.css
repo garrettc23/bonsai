@@ -38,7 +38,7 @@
   border-bottom: 1px solid var(--line);
 }
 .landing-nav-inner {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 14px 20px;
   display: grid;
@@ -84,10 +84,10 @@ a.btn { text-decoration: none; }
   border-bottom: 1px solid var(--line);
 }
 .landing-hero-inner {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: 1.3fr 0.7fr;
+  grid-template-columns: 0.85fr 1.15fr;
   gap: 48px;
   align-items: center;
 }
@@ -180,7 +180,7 @@ a.btn { text-decoration: none; }
 }
 .landing-hero-art svg {
   width: 100%;
-  max-width: 460px;
+  max-width: 660px;
   height: auto;
   filter: drop-shadow(0 18px 32px rgba(14, 14, 12, 0.06))
           drop-shadow(0 4px 8px rgba(14, 14, 12, 0.04));
@@ -255,7 +255,7 @@ a.btn { text-decoration: none; }
 .landing-how-inner,
 .landing-faq-inner,
 .landing-final-cta-inner {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
 }
 .landing-eyebrow {
@@ -729,7 +729,7 @@ a.btn { text-decoration: none; }
 }
 
 .landing-how-inner {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
   width: 100%;
   display: grid;
@@ -1119,7 +1119,7 @@ a.btn { text-decoration: none; }
   border-bottom: none;
 }
 .landing-footer-inner {
-  max-width: 1280px;
+  max-width: 1200px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
