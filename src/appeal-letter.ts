@@ -120,8 +120,26 @@ export function generateAppealLetter(result: AnalyzerResult): AppealLetter {
   const provider = present(meta.provider_name);
   const patient = present(meta.patient_name);
 
-  const findings = high.length
-    ? high.map(renderFindingBullet).join("\n\n")
+  // Cap the findings list at top 3 by impact (dollar_impact * confidence
+  // weight; HIGH is already the only confidence here, so dollar_impact is
+  // the sort key). Multi-finding disputes were producing 5–6 paragraph
+  // letters that the humanizer can't restructure. Top-3 keeps the strongest
+  // arguments visible; the rest get a one-line tally so the rep knows the
+  // dispute is broader than what's itemized.
+  const FINDINGS_CAP = 3;
+  const sortedHigh = [...high].sort((a, b) => b.dollar_impact - a.dollar_impact);
+  const featured = sortedHigh.slice(0, FINDINGS_CAP);
+  const remainder = sortedHigh.slice(FINDINGS_CAP);
+  const remainderTotal = remainder.reduce((s, e) => s + e.dollar_impact, 0);
+  const remainderLine =
+    remainder.length > 0
+      ? `\n\n${featured.length + 1}. Additional disputed errors: ${remainder.length} more${
+          remainderTotal > 0 ? ` totaling ${fmtDollar(remainderTotal)}` : ""
+        }. Full itemization available on request.`
+      : "";
+
+  const findings = featured.length
+    ? featured.map(renderFindingBullet).join("\n\n") + remainderLine
     : "No high-confidence findings. (This letter should not be sent.)";
 
   // EOB-vs-bill comparison line. Only renders when both numbers are

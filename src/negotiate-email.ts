@@ -26,18 +26,54 @@ import type { AnalyzerResult, BillKind } from "./types.ts";
 import { generateAppealLetter } from "./appeal-letter.ts";
 import { loadThread, saveThread } from "./clients/email-mock.ts";
 import { newId } from "./clients/email.ts";
-import type { AgentTone } from "./lib/user-settings.ts";
+import type { AgentTone, AgentMode } from "./lib/user-settings.ts";
 import { toneGuidance } from "./lib/feedback-parser.ts";
 import { humanize } from "./lib/humanizer.ts";
 
 const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 2048;
 const MAX_TURNS_PER_STEP = 4;
+/** Push-back rounds the user can request before the third proposal forces
+ * an escalation with reason "user_judgment_required". 2 rounds matches the
+ * existing system-prompt "after 2-3 denials, escalate" guidance. */
+export const MAX_PUSH_BACK_ROUNDS = 2;
+
+export type ResolutionKind = "full_adjustment" | "reduced" | "no_adjustment";
+
+export type EscalationReason =
+  | "hostile"
+  | "legal"
+  | "unclear"
+  | "deadlock"
+  | "user_judgment_required";
 
 export type NegotiationOutcome =
   | { status: "in_progress" }
-  | { status: "resolved"; resolution: "full_adjustment" | "reduced" | "no_adjustment"; final_amount_owed: number; notes: string }
-  | { status: "escalated"; reason: "hostile" | "legal" | "unclear" | "deadlock"; notes: string };
+  | {
+      status: "resolved";
+      resolution: ResolutionKind;
+      final_amount_owed: number;
+      notes: string;
+      /** True when the rep is asking the user to sign anything binding
+       * (insurance release, debt-settlement agreement, lease addendum,
+       * "reply YES to confirm"). Set even though the status is "resolved"
+       * — the resolved record persists the fact that a signature was asked
+       * for and accepted by the user. */
+      requires_signature?: boolean;
+      signature_doc_summary?: string;
+    }
+  | {
+      status: "awaiting_user_review";
+      resolution: ResolutionKind;
+      proposed_amount: number;
+      summary: string;
+      push_back_count: number;
+      /** When true, the autonomous-mode auto-close was overridden because
+       * the rep asked the user to sign something. The user MUST review. */
+      requires_signature?: boolean;
+      signature_doc_summary?: string;
+    }
+  | { status: "escalated"; reason: EscalationReason; notes: string };
 
 export interface NegotiationState {
   thread_id: string;
@@ -80,13 +116,43 @@ export interface NegotiationState {
    * in sync. The webhook backstops Reply-by-itself by forwarding rep
    * replies. */
   cc?: string[];
+  /** Mode locked at thread creation. Controls whether `mark_resolved` from
+   * the agent terminates immediately ("autonomous") or routes through a
+   * user accept/push-back gate ("copilot"). Snapshotted onto state — never
+   * read from `user-settings` mid-thread. */
+  agent_mode?: AgentMode;
+  /** Monotonic mutation counter. Incremented on every state save. The
+   * accept/push-back endpoints accept `If-Match: <seq>` and 412 on
+   * mismatch so a stale UI can't clobber a later mutation. */
+  seq?: number;
+  /** Number of push-back rounds the user has issued on this thread. After
+   * MAX_PUSH_BACK_ROUNDS, the next agent proposal is force-escalated with
+   * reason "user_judgment_required". */
+  push_back_count?: number;
 }
 
-function buildSystemPrompt(state: Pick<NegotiationState, "user_directives" | "agent_tone">): string {
+function buildSystemPrompt(
+  state: Pick<NegotiationState, "user_directives" | "agent_tone" | "agent_mode" | "push_back_count">,
+): string {
   const parts: string[] = [SYSTEM_PROMPT];
   if (state.agent_tone) {
     parts.push(
       `\n\n## User-specified tone: ${state.agent_tone}\n\n${toneGuidance(state.agent_tone)}`,
+    );
+  }
+  // Mode-specific closing instruction. Autonomous closes anything at or
+  // below the floor without asking; co-pilot returns every proposed
+  // resolution to the user for accept/push-back. The signature rule
+  // applies in both modes — see SYSTEM_PROMPT.
+  const mode: AgentMode = state.agent_mode ?? "autonomous";
+  if (mode === "copilot") {
+    const remaining = Math.max(0, MAX_PUSH_BACK_ROUNDS - (state.push_back_count ?? 0));
+    parts.push(
+      `\n\n## Mode: co-pilot\n\nMark resolved when the rep agrees to a final figure. The user will then accept the resolution or instruct you to push back; you do not close threads on your own. The user has ${remaining} push-back round${remaining === 1 ? "" : "s"} remaining.`,
+    );
+  } else {
+    parts.push(
+      `\n\n## Mode: autonomous\n\nClose anything at or below the final_acceptable_floor without asking. The user has authorized you to settle on their behalf. Notify-on-resolution happens automatically; you do NOT need to "check in" before mark_resolved.`,
     );
   }
   if (state.user_directives && state.user_directives.trim()) {
@@ -111,6 +177,17 @@ A separate humanizer pass rewrites every outbound email before it's sent — it 
 6. If a reply offers a reduced amount that's at or below the final_acceptable_floor, call mark_resolved with resolution=reduced.
 7. If a reply denies the dispute outright, push back once with the strongest grounded fact (EOB, contract terms, the original price). After 2-3 denials with no movement, escalate_human with reason=deadlock.
 8. If a reply is hostile, contains legal threats, or references collections/attorneys, escalate_human immediately.
+
+## Signature rule (applies in BOTH modes — autonomous and co-pilot)
+
+If the rep proposes a settlement that requires the user to sign, initial, or otherwise commit to anything binding — including:
+- Insurance settlement releases
+- Debt-settlement agreements
+- Lease addenda or rent-concession agreements
+- "Reply YES to confirm" or "click this link to accept"
+- Any document the user must sign before the resolution takes effect
+
+…then call mark_resolved with requires_signature=true and a one-sentence signature_doc_summary describing what they're being asked to sign. When you set requires_signature=true, the user is ALWAYS notified for review — the agent does NOT auto-close, even in autonomous mode. When in doubt, set it to true.
 
 ## Who to address
 
@@ -150,7 +227,11 @@ Do NOT emit prose; the tool call is your entire output.
 ## Email style (the humanizer handles polish — keep your draft factual)
 
 - Subject for replies: keep the original subject; prepend "Re: " if not already there.
-- Body: 1–3 short paragraphs by default. Only go longer if the situation genuinely demands it (multi-finding medical dispute, complex back-and-forth). Cut anything not load-bearing.
+- Subject hard cap: under 60 characters.
+- Body length is enforced by the humanizer. Hard caps:
+  - Initial outreach: under 200 words.
+  - Follow-ups: under 120 words.
+  Cut anything not load-bearing — quotes, ask, deadline. That's the whole shape.
 - No markdown. The body ships as plain text — \`**bold**\` renders as literal asterisks, \`## headings\` as literal hashes, backticks as literal backticks. Forbidden: \`**\`, \`__\`, \`_x_\`, \`*x*\`, \`# headings\`, \`> blockquotes\`, backticks. Hyphen-space bullets (\`- item\`) are fine because they read as plain text. Snake_case identifiers (claim_number, account_number) are fine — they're not emphasis.
 - Don't open with "I hope this email finds you well", "I am writing to formally", or other AI-isms — the humanizer will strip them, but skipping them yourself saves a hop.
 - Reference the original appeal letter ("as documented in my initial dispute") rather than re-attaching the whole findings list on follow-ups.`;
@@ -181,7 +262,7 @@ const SEND_EMAIL_TOOL: Anthropic.Tool = {
 const MARK_RESOLVED_TOOL: Anthropic.Tool = {
   name: "mark_resolved",
   description:
-    "Call when the billing department has agreed to correct the account or reduce the balance to an acceptable amount. Terminates the negotiation.",
+    "Call when the billing department has agreed to correct the account or reduce the balance to an acceptable amount. In autonomous mode this terminates the thread. In co-pilot mode it routes the proposed resolution to the user for accept/push-back. If the rep is asking the user to sign anything binding, set requires_signature=true and the user will always be asked to confirm regardless of mode.",
   input_schema: {
     type: "object",
     required: ["resolution", "final_amount_owed", "notes"],
@@ -202,6 +283,16 @@ const MARK_RESOLVED_TOOL: Anthropic.Tool = {
         minLength: 10,
         description: "1–3 sentence summary of how we got here and what the provider committed to.",
       },
+      requires_signature: {
+        type: "boolean",
+        description:
+          "True when the rep is asking the user to sign, initial, or otherwise commit to a binding document (insurance release, debt-settlement agreement, lease addendum, 'reply YES to confirm', etc). When true, the user is ALWAYS asked to review before the resolution is final, even in autonomous mode. When in doubt, set true.",
+      },
+      signature_doc_summary: {
+        type: "string",
+        description:
+          "Required when requires_signature=true. One-sentence plain-English description of what the user is being asked to sign (e.g., 'a release of all future claims related to this hospital stay').",
+      },
     },
   },
 };
@@ -214,11 +305,68 @@ const ESCALATE_HUMAN_TOOL: Anthropic.Tool = {
     type: "object",
     required: ["reason", "notes"],
     properties: {
-      reason: { type: "string", enum: ["hostile", "legal", "unclear", "deadlock"] },
+      reason: {
+        type: "string",
+        enum: ["hostile", "legal", "unclear", "deadlock", "user_judgment_required"],
+      },
       notes: { type: "string", minLength: 10 },
     },
   },
 };
+
+/**
+ * Decide what an agent's `mark_resolved` call becomes on `state.outcome`.
+ * Three paths:
+ *  - `requires_signature=true` → ALWAYS gate (override autonomous mode).
+ *    The user must explicitly confirm any binding signature.
+ *  - autonomous mode → close immediately, status=resolved.
+ *  - copilot mode → gate as awaiting_user_review, OR force-escalate
+ *    when the user has already exhausted MAX_PUSH_BACK_ROUNDS rounds.
+ *    Escalation reason is "user_judgment_required" so the UI can surface
+ *    "you've been pushing back; we need you to make the final call."
+ */
+function resolveOrGate(
+  state: Pick<NegotiationState, "agent_mode" | "push_back_count">,
+  input: {
+    resolution: ResolutionKind;
+    final_amount_owed: number;
+    notes: string;
+    requires_signature?: boolean;
+    signature_doc_summary?: string;
+  },
+): NegotiationOutcome {
+  const requires_signature = !!input.requires_signature;
+  const sigSummary = requires_signature ? input.signature_doc_summary?.trim() || undefined : undefined;
+  const mode: AgentMode = state.agent_mode ?? "autonomous";
+  const pushBacks = state.push_back_count ?? 0;
+
+  if (!requires_signature && mode === "autonomous") {
+    return {
+      status: "resolved",
+      resolution: input.resolution,
+      final_amount_owed: input.final_amount_owed,
+      notes: input.notes,
+    };
+  }
+  // copilot or signature-required path. If the user has already used up
+  // their push-back budget, force-escalate instead of looping a third time.
+  if (mode === "copilot" && pushBacks >= MAX_PUSH_BACK_ROUNDS) {
+    return {
+      status: "escalated",
+      reason: "user_judgment_required",
+      notes: `User has exhausted ${MAX_PUSH_BACK_ROUNDS} push-back rounds. Latest agent proposal: ${input.notes} Final amount: $${input.final_amount_owed.toFixed(2)}.`,
+    };
+  }
+  return {
+    status: "awaiting_user_review",
+    resolution: input.resolution,
+    proposed_amount: input.final_amount_owed,
+    summary: input.notes,
+    push_back_count: pushBacks,
+    requires_signature: requires_signature || undefined,
+    signature_doc_summary: sigSummary,
+  };
+}
 
 function renderThreadForClaude(thread: { outbound: SentEmail[]; inbound: InboundEmail[] }): string {
   const items: Array<{ ts: string; role: "us" | "them"; body: string; subject: string }> = [];
@@ -312,6 +460,9 @@ export interface StartOpts {
   final_acceptable_floor?: number; // defaults to eob patient responsibility
   user_directives?: string;
   agent_tone?: AgentTone;
+  /** Mode for this thread. Snapshotted onto state at creation; mid-thread
+   * settings changes don't affect in-flight threads. Defaults to autonomous. */
+  agent_mode?: AgentMode;
   /** Compact summary of prior negotiation attempts on other channels.
    * Stored on state so every step's analyzer context includes it. */
   prior_attempts_summary?: string;
@@ -384,9 +535,12 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     outcome: { status: "in_progress" },
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    agent_mode: opts.agent_mode ?? "autonomous",
     prior_attempts_summary: opts.prior_attempts_summary,
     cc: opts.cc,
     run_id: opts.run_id,
+    seq: 0,
+    push_back_count: 0,
   };
   return { thread_id, sent, state };
 }
@@ -494,20 +648,26 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
         terminated = true;
       } else if (block.name === "mark_resolved") {
         const input = block.input as {
-          resolution: "full_adjustment" | "reduced" | "no_adjustment";
+          resolution: ResolutionKind;
           final_amount_owed: number;
           notes: string;
+          requires_signature?: boolean;
+          signature_doc_summary?: string;
         };
-        newOutcome = {
-          status: "resolved",
-          resolution: input.resolution,
-          final_amount_owed: input.final_amount_owed,
-          notes: input.notes,
-        };
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: "Resolution recorded." });
+        newOutcome = resolveOrGate(state, input);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content:
+            newOutcome.status === "awaiting_user_review"
+              ? "Resolution recorded; user has been asked to review."
+              : newOutcome.status === "escalated"
+                ? "Force-escalated: user has exhausted push-back rounds."
+                : "Resolution recorded; thread closed.",
+        });
         terminated = true;
       } else if (block.name === "escalate_human") {
-        const input = block.input as { reason: "hostile" | "legal" | "unclear" | "deadlock"; notes: string };
+        const input = block.input as { reason: EscalationReason; notes: string };
         newOutcome = { status: "escalated", reason: input.reason, notes: input.notes };
         toolResults.push({ type: "tool_result", tool_use_id: block.id, content: "Escalated to human." });
         terminated = true;
@@ -546,8 +706,212 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
     last_inbound_received_at: latestTs,
     email_outbound_sent_at: outboundSentAt ?? state.email_outbound_sent_at,
     outcome: newOutcome,
+    seq: (state.seq ?? 0) + 1,
   };
   return nextState;
+}
+
+export interface UserPushBackOpts {
+  state: NegotiationState;
+  client: EmailClient;
+  /** Free-text or structured-chip note from the user — appended to
+   * user_directives so the next agent turn honors it. */
+  note: string;
+  anthropic?: Anthropic;
+  threadsDir?: string;
+}
+
+/**
+ * User pushed back on a proposed resolution. Different shape from
+ * stepNegotiation — there's no new inbound to respond to. We're driving the
+ * agent to compose a fresh follow-up referencing the rep's last offer plus
+ * the user's note.
+ *
+ * Push-back budget is enforced two ways:
+ *  - At entry: if push_back_count is already >= MAX_PUSH_BACK_ROUNDS, we
+ *    refuse and force-escalate without burning an LLM turn.
+ *  - At resolution: resolveOrGate also force-escalates if the agent tries
+ *    to propose again at count >= MAX_PUSH_BACK_ROUNDS. This is the path
+ *    taken when this driver IS allowed to run and the agent comes back
+ *    with another mark_resolved on the next round.
+ */
+export async function stepNegotiationOnUserPushBack(
+  opts: UserPushBackOpts,
+): Promise<NegotiationState> {
+  const { state, client, note } = opts;
+  const anthropic = opts.anthropic ?? new Anthropic();
+
+  if (state.outcome.status !== "awaiting_user_review") {
+    // Idempotency / race: another mutation already advanced the state.
+    // Caller should have verified `seq` before invoking; bail rather than
+    // double-step.
+    return state;
+  }
+
+  const currentPushBacks = state.push_back_count ?? 0;
+  const trimmedNote = note.trim();
+  const newDirectives = [state.user_directives?.trim(), trimmedNote ? `Push-back round ${currentPushBacks + 1}: ${trimmedNote}` : null]
+    .filter(Boolean)
+    .join("\n\n");
+
+  // Budget exhausted? Force-escalate now without an LLM turn.
+  if (currentPushBacks >= MAX_PUSH_BACK_ROUNDS) {
+    return {
+      ...state,
+      outcome: {
+        status: "escalated",
+        reason: "user_judgment_required",
+        notes: `User attempted push-back round ${currentPushBacks + 1}; budget is ${MAX_PUSH_BACK_ROUNDS}. Latest user note: ${trimmedNote || "(empty)"}.`,
+      },
+      push_back_count: currentPushBacks + 1,
+      seq: (state.seq ?? 0) + 1,
+    };
+  }
+
+  const thread = loadThread(state.thread_id, opts.threadsDir);
+  const context = renderAnalyzerContext(
+    state.analyzer,
+    state.final_acceptable_floor,
+    state.prior_attempts_summary,
+  );
+  const rendered = renderThreadForClaude(thread);
+
+  // The state we hand the agent has push_back_count incremented (so the
+  // mode-specific system-prompt block tells it "X push-back rounds remain")
+  // and outcome reset to in_progress so it doesn't short-circuit.
+  const draftState: NegotiationState = {
+    ...state,
+    outcome: { status: "in_progress" },
+    user_directives: newDirectives,
+    push_back_count: currentPushBacks + 1,
+  };
+
+  const messages: Anthropic.MessageParam[] = [
+    {
+      role: "user",
+      content: `${context}\n\n## Thread so far\n\n${rendered}\n\n## User push-back\n\nThe user reviewed your previous proposed resolution and pushed back. Their note: "${trimmedNote || "(no specific guidance)"}".\n\nCompose the next outbound message that pushes back on the rep's last offer, incorporating the user's guidance. Call send_email with the next message; do NOT call mark_resolved on this turn (the user just rejected the prior resolution).`,
+    },
+  ];
+
+  let outboundSentAt: string | undefined;
+  let nextOutcome: NegotiationOutcome = { status: "in_progress" };
+  let terminated = false;
+
+  for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
+    const response = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: MAX_TOKENS,
+      system: buildSystemPrompt(draftState),
+      tools: [SEND_EMAIL_TOOL, MARK_RESOLVED_TOOL, ESCALATE_HUMAN_TOOL],
+      messages,
+    });
+    messages.push({ role: "assistant", content: response.content });
+    if (response.stop_reason !== "tool_use") break;
+
+    const toolUses = response.content.filter(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use",
+    );
+    const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+
+    for (const block of toolUses) {
+      if (block.name === "send_email") {
+        const input = block.input as { subject: string; body_text: string };
+        const lastInbound = thread.inbound[thread.inbound.length - 1];
+        const humanized = await humanize({
+          body: input.body_text,
+          subject: input.subject,
+          tone: state.agent_tone,
+          bill_kind: state.analyzer.metadata.bill_kind,
+          is_first_contact: false,
+          user_name: state.analyzer.metadata.patient_name,
+          preserve_facts: collectPreserveFacts(state.analyzer),
+          anthropic,
+        });
+        const out: OutboundEmail = {
+          to: state.provider_email,
+          from: state.user_email,
+          subject: humanized.subject,
+          body_text: humanized.body,
+          thread_id: state.thread_id,
+          in_reply_to: lastInbound?.message_id,
+          cc: state.cc,
+        };
+        const sent = await client.send(out);
+        outboundSentAt = sent.sent_at ?? new Date().toISOString();
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: `Email sent. message_id=${sent.message_id}.`,
+        });
+        terminated = true;
+      } else if (block.name === "mark_resolved") {
+        // Agent ignored "do NOT mark_resolved" — let resolveOrGate handle
+        // the budget. With push_back_count incremented this round, hitting
+        // MAX_PUSH_BACK_ROUNDS forces escalation.
+        const input = block.input as {
+          resolution: ResolutionKind;
+          final_amount_owed: number;
+          notes: string;
+          requires_signature?: boolean;
+          signature_doc_summary?: string;
+        };
+        nextOutcome = resolveOrGate(draftState, input);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: "Resolution recorded.",
+        });
+        terminated = true;
+      } else if (block.name === "escalate_human") {
+        const input = block.input as { reason: EscalationReason; notes: string };
+        nextOutcome = { status: "escalated", reason: input.reason, notes: input.notes };
+        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: "Escalated." });
+        terminated = true;
+      }
+    }
+    messages.push({ role: "user", content: toolResults });
+    if (terminated) break;
+  }
+
+  if (!terminated) {
+    nextOutcome = {
+      status: "escalated",
+      reason: "unclear",
+      notes: `Agent did not produce a terminal tool call within ${MAX_TURNS_PER_STEP} turns on push-back; escalating.`,
+    };
+  }
+
+  return {
+    ...state,
+    user_directives: newDirectives,
+    push_back_count: currentPushBacks + 1,
+    outcome: nextOutcome,
+    email_outbound_sent_at: outboundSentAt ?? state.email_outbound_sent_at,
+    seq: (state.seq ?? 0) + 1,
+  };
+}
+
+/**
+ * Mark a co-pilot proposed resolution as accepted by the user. Promotes
+ * `awaiting_user_review` → `resolved` with the same amounts, preserving any
+ * signature record. Idempotent on repeated calls (already-resolved threads
+ * pass through unchanged).
+ */
+export function acceptProposedResolution(state: NegotiationState): NegotiationState {
+  if (state.outcome.status !== "awaiting_user_review") return state;
+  const o = state.outcome;
+  return {
+    ...state,
+    outcome: {
+      status: "resolved",
+      resolution: o.resolution,
+      final_amount_owed: o.proposed_amount,
+      notes: o.summary,
+      requires_signature: o.requires_signature,
+      signature_doc_summary: o.signature_doc_summary,
+    },
+    seq: (state.seq ?? 0) + 1,
+  };
 }
 
 /**
@@ -572,5 +936,23 @@ export function loadNegotiationState(thread_id: string, threadsDir?: string): Ne
   const dir = threadsDir ?? stateDir();
   const path = join(dir, `${thread_id}.state.json`);
   if (!existsSync(path)) return null;
-  return JSON.parse(readFileSync(path, "utf8"));
+  const raw = JSON.parse(readFileSync(path, "utf8")) as NegotiationState;
+  // Migrate-on-read: pre-v0.1.36 threads have no agent_mode, seq, or
+  // push_back_count. Default to autonomous (preserves prior behavior:
+  // mark_resolved closed the thread immediately) and seed counters at 0.
+  let dirty = false;
+  if (raw.agent_mode === undefined) {
+    raw.agent_mode = "autonomous";
+    dirty = true;
+  }
+  if (raw.seq === undefined) {
+    raw.seq = 0;
+    dirty = true;
+  }
+  if (raw.push_back_count === undefined) {
+    raw.push_back_count = 0;
+    dirty = true;
+  }
+  if (dirty) saveNegotiationState(raw, threadsDir);
+  return raw;
 }
