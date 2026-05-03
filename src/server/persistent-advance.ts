@@ -27,6 +27,7 @@ import type { User } from "../lib/auth.ts";
 import type { BillContact, BillKind } from "../types.ts";
 import type { BonsaiReport } from "../orchestrator.ts";
 import { notifyUser } from "../lib/notify-user.ts";
+import { withThreadLock } from "../lib/thread-store.ts";
 
 const ESCALATION_THRESHOLD_HOURS = 24;
 const ADVANCE_THROTTLE_MS = 5 * 60 * 1000;
@@ -218,29 +219,40 @@ export async function sweepStaleAwaitingUserReview(user_id: string): Promise<voi
     if (stat.mtimeMs > cutoffMs) continue;
 
     const thread_id = file.slice(0, -".state.json".length);
-    const state = loadNegotiationState(thread_id, threadsDir);
-    if (!state || state.outcome.status !== "awaiting_user_review") continue;
 
-    const provider = state.analyzer.metadata.provider_name ?? "Unknown provider";
-    const proposed_amount = state.outcome.proposed_amount;
-    const summary = state.outcome.summary;
+    // Run the state mutation inside withThreadLock so the sweep can't
+    // race with /accept, /push-back, or webhook stepNegotiation. Without
+    // this, a user clicking Accept the same second the sweep runs could
+    // have their resolution silently overwritten by a stale-escalation.
+    // Re-read state INSIDE the lock — mtime check above is a fast filter,
+    // not a synchronization barrier.
+    const escalated = await withThreadLock(thread_id, async () => {
+      const state = loadNegotiationState(thread_id, threadsDir);
+      if (!state || state.outcome.status !== "awaiting_user_review") return null;
 
-    const next: NegotiationState = {
-      ...state,
-      outcome: {
-        status: "escalated",
-        reason: "user_judgment_required",
-        notes: `No user response in ${STALE_AWAITING_USER_REVIEW_DAYS} days. Latest agent proposal: ${summary} Proposed amount: $${proposed_amount.toFixed(2)}.`,
-      },
-      seq: (state.seq ?? 0) + 1,
-    };
-    saveNegotiationState(next, threadsDir);
+      const provider = state.analyzer.metadata.provider_name ?? "Unknown provider";
+      const proposed_amount = state.outcome.proposed_amount;
+      const summary = state.outcome.summary;
+
+      const next: NegotiationState = {
+        ...state,
+        outcome: {
+          status: "escalated",
+          reason: "user_judgment_required",
+          notes: `No user response in ${STALE_AWAITING_USER_REVIEW_DAYS} days. Latest agent proposal: ${summary} Proposed amount: $${proposed_amount.toFixed(2)}.`,
+        },
+        seq: (state.seq ?? 0) + 1,
+      };
+      saveNegotiationState(next, threadsDir);
+      return { provider };
+    });
+    if (!escalated) continue;
     try {
       await notifyUser({
         user_id,
         thread_id,
         kind: "escalated",
-        provider_name: provider,
+        provider_name: escalated.provider,
         summary: `We waited ${STALE_AWAITING_USER_REVIEW_DAYS} days for your call on this offer. The thread is paused — open Bonsai to decide.`,
       });
     } catch (err) {

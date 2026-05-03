@@ -191,6 +191,12 @@ Rewrite the body in the user's tone. Preserve every grounded fact (dollar figure
     if (capWords > 0) {
       result = await enforceWordCap(result, capWords, anthropic, system);
     }
+    // Defensive: if compression / truncation produced an empty body, fall
+    // back to the original draft so we never ship a blank email to a rep.
+    if (!result.body.trim()) {
+      console.warn("[humanizer] empty body after enforceWordCap, falling back to original");
+      return { subject: result.subject || opts.subject, body: opts.body };
+    }
     return result;
   } catch (err) {
     // Never block a send on a humanizer failure — log and fall through.

@@ -94,17 +94,24 @@ function ensureDir(path: string): void {
 export function readInbox(user_id: string): NotificationRecord[] {
   const path = inboxPath(user_id);
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8")
+  let dropped = 0;
+  const records = readFileSync(path, "utf8")
     .split("\n")
     .filter((l) => l.trim())
     .map((l) => {
       try {
         return JSON.parse(l) as NotificationRecord;
       } catch {
+        dropped += 1;
         return null;
       }
     })
     .filter((r): r is NotificationRecord => r !== null);
+  // Loud on corruption — silent drops hide partial-write data loss.
+  if (dropped > 0) {
+    console.warn(`[notify-user] dropped ${dropped} malformed inbox line(s) for user=${user_id}`);
+  }
+  return records;
 }
 
 function writeInbox(user_id: string, records: NotificationRecord[]): void {
