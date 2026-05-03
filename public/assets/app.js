@@ -1696,7 +1696,9 @@ function showAuditError(err) {
   // Tour can't proceed when an audit fails (chapter 1 needs the sample
   // audit to succeed) — without this teardown, the spotlight ring and
   // body scroll-lock stay on top of the cap-reached card and trap the
-  // user. No flags so the tour replays next session.
+  // user. No flags so the tour replays next session — a daily-cap user
+  // shouldn't have onboarding silently disabled forever just because
+  // their first-ever audit hit the rate limit.
   if (window.__bonsaiTour?.active) {
     window.__bonsaiTour.destroy({});
   }

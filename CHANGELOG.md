@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.36.2] - 2026-05-02
+
+### Changed
+- **Landing headline is now "Automatically lower bills".** Tightened from "You're being overcharged. Bonsai gets your money back." to a single direct line. The pain-first opener was working but reading abstract; the new line names the action and the outcome in three words. Browser tab and og:/twitter: titles updated to match so iMessage and Twitter previews stay consistent with the page.
+- **Hero illustration is ~40% larger and finally fills its column.** The grid was a 1.3fr / 0.7fr split with the art column the narrow one, so the SVG hit its 460px cap inside a ~400px column. Re-balanced to 0.85fr / 1.15fr so the art column gets the larger share, and bumped the SVG cap to 660px so the negotiation-receipt card actually fills the space. The receipt label reads REFUNDED instead of SAVED — same outcome, tighter wording.
+- **Container width tightened to 1200px (was 1280px).** All landing sections (nav, hero, features, FAQ, footer) share the same inner container. The 80px reduction shows up as ~40px more side margin on each side at wide viewports, giving the page a more polished, magazine-y feel. Below 1240px viewports, behavior is unchanged.
+- **Primary button hover finally registers.** The `.btn-primary:hover` shifted from `#0E0E0C` to `#1a1a17` — about a 5% brightness bump, completely invisible. Now uses the existing `--ink-soft` token (`#525248`) for a clear charcoal-gray hover. Change is in `app.css`, so it applies globally to every primary button in the app, not just landing.
+
+## [0.1.36.1] - 2026-05-02
+
+### Fixed
+- **Quitting the product tour midway now leaves a clean account, not a litter of fake examples.** When the tour preloaded its sample bill at chapter 1, that bill was a real audit on the server with a real offer hunt attached. If you bailed out via the X or Escape before the finale, the SPA-nav exit fired the server cleanup AFTER it had already let `historyCache` and `offersCache` repopulate — the deleted-but-cached bill kept showing up as a "synthetic example" in Negotiation and Comparison. The skip path now runs server cleanup first, then hard-reloads `/app` so every in-memory cache (`historyCache`, `offersCache`, `reviewState`, `huntRunIds`, `currentWorkflowView`) drops with the page. Trade-off: brief Getting Started pill flicker on the reload, which beats stale demo data lingering in your live views.
+
+### Changed
+- **Browser tab title on the app reads "Bonsai - Lower your bills" instead of "Bonsai — Sign in".** The SPA shell serves both the unauthenticated sign-in screen and the authed product, and the old title only made sense for the former. The new title matches the landing page and reads correctly whether you're signing in or already inside the product.
+
 ## [0.1.36.0] - 2026-05-02
 
 ### Added
