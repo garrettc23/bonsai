@@ -13,7 +13,7 @@
  * The 24-working-hour threshold is computed in the user's timezone via
  * src/lib/business-hours.ts so weekends and after-hours don't count.
  */
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { workingHoursElapsed } from "../lib/business-hours.ts";
 import {
@@ -26,9 +26,17 @@ import { userPaths } from "../lib/user-paths.ts";
 import type { User } from "../lib/auth.ts";
 import type { BillContact, BillKind } from "../types.ts";
 import type { BonsaiReport } from "../orchestrator.ts";
+import { notifyUser } from "../lib/notify-user.ts";
+import { withThreadLock } from "../lib/thread-store.ts";
 
 const ESCALATION_THRESHOLD_HOURS = 24;
 const ADVANCE_THROTTLE_MS = 5 * 60 * 1000;
+/** A thread sitting in `awaiting_user_review` for this many days gets
+ * force-escalated to `escalated` with reason "user_judgment_required".
+ * The rep is silently waiting on the user's "we'll review" reply; if the
+ * user doesn't act in a week, the thread is functionally dead and should
+ * tell the user that explicitly. */
+const STALE_AWAITING_USER_REVIEW_DAYS = 7;
 
 const lastAdvanceByUser = new Map<string, number>();
 
@@ -163,6 +171,92 @@ export async function maybeAdvancePersistentForUser(user: User): Promise<void> {
       await advancePersistentNegotiation({ user, run, threadsDir });
     } catch (err) {
       console.error(`[persistent ${run.run_id}] advance failed:`, err);
+    }
+  }
+
+  // Independent sweep: find any `awaiting_user_review` threads older than
+  // STALE_AWAITING_USER_REVIEW_DAYS and force-escalate them. Decoupled from
+  // the pending-runs loop because awaiting_user_review threads aren't
+  // necessarily in "negotiating" status — they're waiting on the user.
+  try {
+    await sweepStaleAwaitingUserReview(user.id);
+  } catch (err) {
+    console.error(`[stale-awaiting] sweep failed for user ${user.id}:`, err);
+  }
+}
+
+/**
+ * Walk the user's threads dir and force-escalate any `awaiting_user_review`
+ * thread that's been sitting unreviewed for >7 days. Force-escalation
+ * uses reason "user_judgment_required" so the UI can render "we waited a
+ * week, you didn't reply, here's the offer — what do you want to do?"
+ *
+ * Idempotent: subsequent passes see the thread as `escalated` and skip.
+ * Notifies the user once on transition (notify-user is itself durable +
+ * email-best-effort).
+ */
+export async function sweepStaleAwaitingUserReview(user_id: string): Promise<void> {
+  const paths = userPaths(user_id);
+  const threadsDir = paths.threadsDir;
+  if (!existsSync(threadsDir)) return;
+  const cutoffMs = Date.now() - STALE_AWAITING_USER_REVIEW_DAYS * 24 * 60 * 60 * 1000;
+
+  for (const file of readdirSync(threadsDir)) {
+    if (!file.endsWith(".state.json")) continue;
+    const fullPath = join(threadsDir, file);
+    let stat;
+    try {
+      stat = statSync(fullPath);
+    } catch {
+      continue;
+    }
+    // mtime is the closest signal we have to "when did the agent transition
+    // this to awaiting_user_review" — saveNegotiationState rewrites the
+    // file on every state change, and awaiting_user_review is terminal
+    // until the user acts. A migrate-on-read save will reset mtime, but
+    // by then the state has agent_mode set so the sweep catches it on
+    // the next periodic tick.
+    if (stat.mtimeMs > cutoffMs) continue;
+
+    const thread_id = file.slice(0, -".state.json".length);
+
+    // Run the state mutation inside withThreadLock so the sweep can't
+    // race with /accept, /push-back, or webhook stepNegotiation. Without
+    // this, a user clicking Accept the same second the sweep runs could
+    // have their resolution silently overwritten by a stale-escalation.
+    // Re-read state INSIDE the lock — mtime check above is a fast filter,
+    // not a synchronization barrier.
+    const escalated = await withThreadLock(thread_id, async () => {
+      const state = loadNegotiationState(thread_id, threadsDir);
+      if (!state || state.outcome.status !== "awaiting_user_review") return null;
+
+      const provider = state.analyzer.metadata.provider_name ?? "Unknown provider";
+      const proposed_amount = state.outcome.proposed_amount;
+      const summary = state.outcome.summary;
+
+      const next: NegotiationState = {
+        ...state,
+        outcome: {
+          status: "escalated",
+          reason: "user_judgment_required",
+          notes: `No user response in ${STALE_AWAITING_USER_REVIEW_DAYS} days. Latest agent proposal: ${summary} Proposed amount: $${proposed_amount.toFixed(2)}.`,
+        },
+        seq: (state.seq ?? 0) + 1,
+      };
+      saveNegotiationState(next, threadsDir);
+      return { provider };
+    });
+    if (!escalated) continue;
+    try {
+      await notifyUser({
+        user_id,
+        thread_id,
+        kind: "escalated",
+        provider_name: escalated.provider,
+        summary: `We waited ${STALE_AWAITING_USER_REVIEW_DAYS} days for your call on this offer. The thread is paused — open Bonsai to decide.`,
+      });
+    } catch (err) {
+      console.warn(`[stale-awaiting] notify failed for ${thread_id}:`, (err as Error).message);
     }
   }
 }

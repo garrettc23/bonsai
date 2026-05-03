@@ -4640,15 +4640,18 @@ async function renderSettings() {
 
   root.innerHTML = "";
 
-  // Order: personal details → personalization (tune) → account → authorization.
+  // Order: personalization (tune) → personal details → account → authorization.
+  // Personalization is at the top because the agent-mode toggle is the
+  // most-changed setting and the one that shapes how the agent behaves —
+  // users shouldn't have to scroll past contact info to find it.
   // Authorization sits at the bottom because the legal copy is heavy and we
   // don't want it dominating the form. Account sits above it so logout /
   // delete are reachable without scrolling past the consent block.
-  const profile = mkProfileCard(sdata.profile ?? {});
-  root.appendChild(profile.el);
-
   const tune = mkTuneCard(sdata.tune ?? {});
   root.appendChild(tune.el);
+
+  const profile = mkProfileCard(sdata.profile ?? {});
+  root.appendChild(profile.el);
 
   // Account — signed-in user, replay tour, log out. (Export and Delete
   // were both deliberately removed; export was unused and delete needs
@@ -4924,15 +4927,32 @@ function mkTuneCard(tune) {
   const channels = tune.channels ?? { email: true, voice: true };
   const digestOn = tune.email_digest !== false;
   const mobileOn = tune.mobile_alerts !== false;
+  const agentMode = tune.agent_mode === "copilot" ? "copilot" : "autonomous";
   const toneOpt = (v, label, help) =>
     `<label class="tone-opt ${tone === v ? "tone-opt-sel" : ""}">
        <input type="radio" name="tune-tone" value="${v}" ${tone === v ? "checked" : ""} />
        <span class="tone-opt-label">${label}</span>
        <span class="tone-opt-help">${help}</span>
      </label>`;
+  const modeOpt = (v, label, help) =>
+    `<label class="tone-opt ${agentMode === v ? "tone-opt-sel" : ""}">
+       <input type="radio" name="tune-mode" value="${v}" ${agentMode === v ? "checked" : ""} />
+       <span class="tone-opt-label">${label}</span>
+       <span class="tone-opt-help">${help}</span>
+     </label>`;
   g.innerHTML = `
     <div class="settings-group-title">Agent personalization</div>
     <div class="settings-card">
+      <div class="settings-row">
+        <div class="settings-row-main">
+          <div class="settings-row-label">Mode</div>
+          <div class="settings-row-help">Who decides when a negotiation is done. The agent always asks before signing anything binding (insurance releases, debt agreements), regardless of mode.</div>
+          <div class="tone-picker">
+            ${modeOpt("autonomous", "Autonomous", "Agent closes anything at or below your target price without asking. You get notified after.")}
+            ${modeOpt("copilot", "Co-pilot", "Every offer the agent reaches comes back to you. Accept it, or push back to keep negotiating.")}
+          </div>
+        </div>
+      </div>
       <div class="settings-row">
         <div class="settings-row-main">
           <div class="settings-row-label">Tone</div>
@@ -4974,20 +4994,26 @@ function mkTuneCard(tune) {
       </div>
     </div>`;
 
-  // Tone radios: keep selected-style class in sync.
-  for (const opt of g.querySelectorAll(".tone-opt")) {
-    const input = opt.querySelector("input");
-    input.addEventListener("change", () => {
-      for (const o of g.querySelectorAll(".tone-opt")) o.classList.remove("tone-opt-sel");
-      opt.classList.add("tone-opt-sel");
-    });
-  }
+  // Radio groups: keep selected-style in sync within each group separately
+  // (mode + tone share the .tone-opt class but live in different groupings).
+  const syncGroup = (groupName) => {
+    const opts = g.querySelectorAll(`input[name="${groupName}"]`);
+    for (const input of opts) {
+      input.addEventListener("change", () => {
+        for (const o of opts) o.closest(".tone-opt").classList.remove("tone-opt-sel");
+        input.closest(".tone-opt").classList.add("tone-opt-sel");
+      });
+    }
+  };
+  syncGroup("tune-tone");
+  syncGroup("tune-mode");
   // Notification toggles.
   for (const id of ["#tune-digest", "#tune-alerts"]) {
     g.querySelector(id).addEventListener("click", (ev) => ev.currentTarget.classList.toggle("on"));
   }
   const getValues = () => ({
     tone: g.querySelector('input[name="tune-tone"]:checked')?.value ?? "firm",
+    agent_mode: g.querySelector('input[name="tune-mode"]:checked')?.value ?? "autonomous",
     channels: {
       email: g.querySelector("#tune-ch-email").checked,
       voice: g.querySelector("#tune-ch-voice").checked,

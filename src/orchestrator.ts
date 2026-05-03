@@ -79,6 +79,9 @@ export interface RunBonsaiOpts {
   user_directives?: string;
   /** Tone the user asked the agent to strike. */
   agent_tone?: "polite" | "firm" | "aggressive";
+  /** Mode for this thread. Snapshotted onto NegotiationState at startup;
+   * mid-thread settings changes don't affect already-running threads. */
+  agent_mode?: "autonomous" | "copilot";
   /** CC recipients on every outbound email — typically the user's own
    * inbox so they stay in the loop on every message the agent sends. */
   cc?: string[];
@@ -254,6 +257,7 @@ export async function runNegotiationPhase(
       channels_enabled: opts.channels_enabled,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
+      agent_mode: opts.agent_mode,
       cc: opts.cc,
       run_id: opts.run_id,
     });
@@ -308,6 +312,7 @@ export async function runNegotiationPhase(
       final_acceptable_floor: opts.final_acceptable_floor,
       user_directives: opts.user_directives,
       agent_tone: opts.agent_tone,
+      agent_mode: opts.agent_mode,
       cc: opts.cc,
       run_id: opts.run_id,
     });

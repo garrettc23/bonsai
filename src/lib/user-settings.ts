@@ -17,6 +17,7 @@ function settingsPath(): string {
 }
 
 export type AgentTone = "polite" | "firm" | "aggressive";
+export type AgentMode = "autonomous" | "copilot";
 
 interface PersistedSettings {
   profile?: {
@@ -40,6 +41,7 @@ interface PersistedSettings {
     floor_pct?: number;
     email_digest?: boolean;
     mobile_alerts?: boolean;
+    agent_mode?: AgentMode;
   };
   integrations?: {
     anthropic_api_key?: string;
@@ -169,6 +171,10 @@ export interface TuneConfig {
   floor_pct: number;
   email_digest: boolean;
   mobile_alerts: boolean;
+  /** Default mode for new threads. Autonomous closes anything at or below
+   * the floor without asking. Co-pilot returns every proposed resolution
+   * to the user for accept-or-push-back. Locked at thread start. */
+  agent_mode: AgentMode;
 }
 
 export function getTuneConfig(): TuneConfig {
@@ -185,6 +191,7 @@ export function getTuneConfig(): TuneConfig {
       t.email_digest !== undefined ? !!t.email_digest : s.notify_email_digest !== false,
     mobile_alerts:
       t.mobile_alerts !== undefined ? !!t.mobile_alerts : s.notify_mobile_alerts !== false,
+    agent_mode: t.agent_mode === "copilot" ? "copilot" : "autonomous",
   };
 }
 
@@ -275,6 +282,7 @@ export function setTuneConfig(input: {
   floor_pct?: number;
   email_digest?: boolean;
   mobile_alerts?: boolean;
+  agent_mode?: AgentMode;
 }): void {
   const current = load();
   const next: PersistedSettings = { ...current, tune: { ...(current.tune ?? {}) } };
@@ -289,5 +297,8 @@ export function setTuneConfig(input: {
   }
   if (input.email_digest !== undefined) t.email_digest = !!input.email_digest;
   if (input.mobile_alerts !== undefined) t.mobile_alerts = !!input.mobile_alerts;
+  if (input.agent_mode === "autonomous" || input.agent_mode === "copilot") {
+    t.agent_mode = input.agent_mode;
+  }
   save(next);
 }

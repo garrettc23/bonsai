@@ -78,6 +78,13 @@ Bill / contract / statement
 - **Email** (`src/negotiate-email.ts`) — Claude drafts replies using only facts from grounded findings, has 3 tools (`send_email`, `mark_resolved`, `escalate_human`), and holds to a configurable floor. State persists in `out/threads/{thread_id}.state.json`.
 - **Voice** (`src/voice/`) — generates an ElevenLabs Conversational AI agent config with 5 server tools. Real outbound calls go through ElevenLabs + Twilio when the env is wired; otherwise a dual-Claude simulator role-plays both sides so day-to-day dev never burns minutes.
 
+Negotiation runs in one of two **agent modes** (per-user setting, top of the Settings page):
+
+- **Autonomous** (default) — the agent decides when to accept, push back, or escalate. The user only gets pinged when something needs a human (`escalate_human`, signature required, or stalemate).
+- **Co-pilot** — the agent pauses on every proposed resolution and hands off to the user. The user accepts via `POST /api/threads/:id/accept` or counters via `POST /api/threads/:id/push-back`. After `MAX_PUSH_BACK_ROUNDS` rounds the next push-back force-escalates to a human. Any finding flagged `requires_signature` always gates on the user, regardless of mode. Threads that sit in `awaiting_user_review` for more than 7 days are swept into `escalated_human` so nothing rots silently.
+
+Notifications (durable in-app inbox + Resend email) are written by `src/lib/notify-user.ts` and read via `GET /api/notifications/inbox`.
+
 **Comparison.** When the cheaper move is to switch providers (insurance, telecom, utilities, credit), the comparison agent surveys alternatives via Anthropic managed agents and gates them on switch-probability before surfacing. The probability floor is configurable per category.
 
 ## Channel strategy
@@ -278,6 +285,10 @@ PORT=3333 bun run serve
 
 - `POST /webhooks/resend-inbound` — Resend posts parsed inbound mail here, signed via svix. Handler verifies the signature against `RESEND_WEBHOOK_SECRET` (constant-time HMAC, 5-minute replay window), correlates to a thread (`X-Bonsai-Thread-Id` → `In-Reply-To` → `References`), appends to `out/threads/{thread_id}.json` deduplicated by `message_id`, and kicks one `stepNegotiation`. Returns `401` on bad signature, `202` if no thread correlation, `200` (idempotent) on duplicate message ids.
 - `GET /api/receipts` — projects completed `out/report-*.json` files into per-bill rows plus a cumulative savings total. The Home page renders a green hero counter and the three most recent receipts above the dropzone.
+- `GET /api/threads/:id/state` — returns the `NegotiationState` plus the thread's outbound + inbound emails. Powers the bill-detail timeline and the proposed-resolution card. 404 if the state doesn't belong to the calling user.
+- `POST /api/threads/:id/accept` — co-pilot endpoint. The user accepts the agent's currently proposed resolution; thread transitions to `resolved`. Idempotency-keyed (5-minute TTL) so the UI's confirm-double-click can't double-advance state.
+- `POST /api/threads/:id/push-back` — co-pilot endpoint. The user counters the proposed resolution with free-text guidance for the agent's next turn. After `MAX_PUSH_BACK_ROUNDS` rounds the next call force-escalates to `escalated_human` instead of looping again. Idempotency-keyed identically.
+- `GET /api/notifications/inbox` — returns the calling user's notification inbox (durable JSONL written by `src/lib/notify-user.ts`), newest-first. Same records that drive the Resend "your input is needed" emails.
 
 ## Tests
 
@@ -308,7 +319,7 @@ src/
   tools/                 # record-metadata, record-error (grounding contract), finalize
   voice/                 # agent-config, client, simulator, tool-handlers
   lib/                   # ground-truth, thread-store, provider-contact, pdf-extract,
-                         # auth, db, backup, rate-limit, user-settings, etc.
+                         # auth, db, backup, rate-limit, user-settings, notify-user, etc.
 scripts/                 # day1-poc, day2..5, run-bonsai, voice-smoke, resend-inbound-smoke
 fixtures/                # synthetic bill + EOB markdown + generated PDFs
 public/                  # static web UI (index, landing, terms, privacy)

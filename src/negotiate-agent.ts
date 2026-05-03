@@ -30,7 +30,7 @@ import {
 import { simulateReply, type Persona as EmailPersona } from "./simulate-reply.ts";
 import { simulateCall, type RepPersona as VoicePersona } from "./voice/simulator.ts";
 import type { CallState } from "./voice/tool-handlers.ts";
-import type { AgentTone } from "./lib/user-settings.ts";
+import type { AgentTone, AgentMode } from "./lib/user-settings.ts";
 
 export type AttemptChannel = "email" | "voice";
 
@@ -87,6 +87,8 @@ export interface RunNegotiationAgentOpts {
   user_directives?: string;
   /** Tone override for every negotiator's system prompt. */
   agent_tone?: AgentTone;
+  /** Mode for new threads kicked off by this run. Locked at thread start. */
+  agent_mode?: AgentMode;
   /** CC recipients on every outbound email — typically the user's own
    * inbox so they stay in the loop on every message the agent sends.
    * Visible to the rep on purpose. */
@@ -121,6 +123,7 @@ async function runEmailAttempt(opts: {
   original_balance: number;
   user_directives?: string;
   agent_tone?: AgentTone;
+  agent_mode?: AgentMode;
   prior_attempts_summary?: string;
   cc?: string[];
   run_id?: string;
@@ -141,6 +144,7 @@ async function runEmailAttempt(opts: {
     final_acceptable_floor: opts.floor,
     user_directives: opts.user_directives,
     agent_tone: opts.agent_tone,
+    agent_mode: opts.agent_mode,
     prior_attempts_summary: opts.prior_attempts_summary,
     cc: opts.cc,
     run_id: opts.run_id,
@@ -314,6 +318,7 @@ export async function runNegotiationAgent(
         original_balance,
         user_directives: opts.user_directives,
         agent_tone: opts.agent_tone,
+        agent_mode: opts.agent_mode,
         cc: opts.cc,
         run_id: opts.run_id,
         anthropic,

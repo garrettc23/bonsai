@@ -60,11 +60,26 @@ export function parseFeedbackDirectives(feedback: string[]): FeedbackDirectives 
 }
 
 export function toneGuidance(tone: AgentTone): string {
+  // Trailing rule applies to every tone: the humanizer enforces a hard
+  // word cap (200 first contact / 120 follow-ups) and the aggressive tone
+  // in particular tends to add length (statute citations, escalation
+  // paths). Tone wins on word choice; the cap wins on length.
+  const lengthRule =
+    " Stay within the word cap regardless of tone — cut sentences, do not shorten them.";
   if (tone === "polite") {
-    return "Dial back any confrontational language. Lead with gratitude and cooperation. Still cite facts and statutes when relevant, but phrase every request as an ask, never a demand. Offer to work with the rep.";
+    return (
+      "Dial back any confrontational language. Lead with gratitude and cooperation. Still cite facts and statutes when relevant, but phrase every request as an ask, never a demand. Offer to work with the rep." +
+      lengthRule
+    );
   }
   if (tone === "aggressive") {
-    return "Be assertive. Set firm short deadlines (7 days, not 14). Make consequences explicit — NSA enforcement, CFPB complaint, attorney referral, state AG if relevant. Stay professional but do not soften.";
+    return (
+      "Be assertive. Set firm short deadlines (7 days, not 14). Make consequences explicit — NSA enforcement, CFPB complaint, attorney referral, state AG if relevant. Stay professional but do not soften." +
+      lengthRule
+    );
   }
-  return "Be firm and matter-of-fact. Direct requests, clear deadlines, no hedging. Not hostile — but not apologetic either.";
+  return (
+    "Be firm and matter-of-fact. Direct requests, clear deadlines, no hedging. Not hostile — but not apologetic either." +
+    lengthRule
+  );
 }

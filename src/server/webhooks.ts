@@ -27,11 +27,13 @@ import {
   loadNegotiationState,
   saveNegotiationState,
   stepNegotiation,
+  type NegotiationState,
 } from "../negotiate-email.ts";
 import {
   appendInboundIdempotent,
   withThreadLock,
 } from "../lib/thread-store.ts";
+import { notifyUser } from "../lib/notify-user.ts";
 import { loadThread } from "../clients/email-mock.ts";
 import type { InboundEmail } from "../clients/email.ts";
 import { autoEmailClient } from "../clients/email-resend.ts";
@@ -448,8 +450,63 @@ async function stepInBackground(thread_id: string, threadsDir?: string): Promise
       const client = await autoEmailClient(threadsDir);
       const next = await stepNegotiation({ state, client, threadsDir });
       saveNegotiationState(next, threadsDir);
+      // Side-effect: if the agent reached a terminal state on this step,
+      // notify the user. In-app record is durable; email is best-effort.
+      // Wrap in try so a Resend outage does not blow up the webhook step.
+      try {
+        await maybeNotifyOnTerminal(next, threadsDir);
+      } catch (err) {
+        console.warn(`[webhook] notify failed for ${thread_id}:`, (err as Error).message);
+      }
     });
   } catch (err) {
     console.error(`[webhook] step failed for ${thread_id}:`, err);
+  }
+}
+
+/**
+ * Bridge from negotiation outcome → notify-user. No-op for in-progress
+ * states. Resolves user_id from the threads dir; if we can't (legacy
+ * out/threads/ tree, no per-user owner), the notification is silently
+ * skipped — the data wouldn't be reachable to the user anyway.
+ */
+export async function maybeNotifyOnTerminal(
+  state: NegotiationState,
+  threadsDir?: string,
+): Promise<void> {
+  const user_id = threadsDir ? userIdFromThreadsDir(threadsDir) : null;
+  if (!user_id) return;
+  const provider = state.analyzer.metadata.provider_name ?? "Unknown provider";
+  const o = state.outcome;
+  if (o.status === "resolved") {
+    await notifyUser({
+      user_id,
+      thread_id: state.thread_id,
+      kind: "resolved",
+      provider_name: provider,
+      summary: o.notes,
+      amount: o.final_amount_owed,
+      requires_signature: o.requires_signature,
+      signature_doc_summary: o.signature_doc_summary,
+    });
+  } else if (o.status === "awaiting_user_review") {
+    await notifyUser({
+      user_id,
+      thread_id: state.thread_id,
+      kind: "awaiting_user_review",
+      provider_name: provider,
+      summary: o.summary,
+      amount: o.proposed_amount,
+      requires_signature: o.requires_signature,
+      signature_doc_summary: o.signature_doc_summary,
+    });
+  } else if (o.status === "escalated") {
+    await notifyUser({
+      user_id,
+      thread_id: state.thread_id,
+      kind: "escalated",
+      provider_name: provider,
+      summary: o.notes,
+    });
   }
 }

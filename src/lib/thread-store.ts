@@ -32,13 +32,23 @@ export async function withThreadLock<T>(
   const next = new Promise<void>((resolve) => {
     release = resolve;
   });
-  locks.set(thread_id, prev.then(() => next));
+  // Two correctness fixes:
+  //  1. Stash the chained promise in a variable so the cleanup compare-by-
+  //     reference actually matches (calling prev.then() twice produces
+  //     two different promise objects, so the equality check never
+  //     fired and the map grew unboundedly per thread).
+  //  2. Catch on prev so a rejection from a prior holder does NOT
+  //     short-circuit the chain — without the catch, `await prev`
+  //     throws synchronously and the next caller proceeds without
+  //     awaiting `next`, which lets two writers run concurrently.
+  const chained = prev.catch(() => undefined).then(() => next);
+  locks.set(thread_id, chained);
   try {
-    await prev;
+    await prev.catch(() => undefined);
     return await fn();
   } finally {
     release();
-    if (locks.get(thread_id) === prev.then(() => next)) {
+    if (locks.get(thread_id) === chained) {
       locks.delete(thread_id);
     }
   }

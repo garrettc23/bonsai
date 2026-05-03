@@ -63,6 +63,14 @@ export interface HumanizeOpts {
    * survive the rewrite verbatim. The humanizer is told NOT to invent or
    * paraphrase these. */
   preserve_facts?: string[];
+  /** Hard word cap for the rewritten body. Defaults to 200 for first
+   * contact, 120 for follow-ups. After the rewrite returns, we count
+   * words; if it's > 20% over cap, we retry once with a stricter prompt.
+   * If the retry is still over, we truncate at the nearest paragraph
+   * boundary and log a `humanizer.cap_violation` warning. Set to 0 to
+   * disable the cap entirely (used by the appeal-letter pre-pass where
+   * a long structured letter is intentional). */
+  max_words?: number;
   /** Inject an Anthropic client so tests / orchestrators can mock or share
    * one. Defaults to a fresh `new Anthropic()` from env. */
   anthropic?: Anthropic;
@@ -88,6 +96,16 @@ export async function humanize(opts: HumanizeOpts): Promise<HumanizeResult> {
   }
   const tone: AgentTone = opts.tone ?? "firm";
   const kind: BillKind = opts.bill_kind ?? "other";
+  // Default caps come from the plan: 200 words for first contact (room for
+  // the dispute framing), 120 words for follow-ups (the rep already knows
+  // what we're asking). Caller can override per-call. 0 disables the cap
+  // entirely — used by the appeal-letter pre-pass.
+  const capWords =
+    opts.max_words !== undefined
+      ? Math.max(0, opts.max_words)
+      : opts.is_first_contact
+        ? 200
+        : 120;
   const playbook = pickPlaybook(kind);
 
   const factsBlock = opts.preserve_facts?.length
@@ -113,12 +131,12 @@ Return your rewrite via the \`humanize_email\` tool. No prose outside the tool c
 
 ## Style rules
 
-5. Default length: 1–3 short paragraphs. Only go longer if the original genuinely requires it (e.g., a multi-finding medical dispute with itemized lines). When in doubt, cut.
+5. Hard length cap: ${capWords > 0 ? `the body MUST be at or under ${capWords} words. Count your words. If your draft would go over, cut sentences (don't shorten them — drop the least load-bearing ones entirely). Default ${opts.is_first_contact ? "first-contact" : "follow-up"} structure: greeting (1 line), the ask + the strongest grounded fact (1 short paragraph), close (1 line)` : "1–3 short paragraphs. Only go longer if the original genuinely requires it (e.g., a multi-finding medical dispute with itemized lines). When in doubt, cut"}. The user has already complained these emails are too long — when you can choose between cutting and keeping, cut.
 6. Strip AI-isms and corporate boilerplate: "I hope this email finds you well", "I am writing to formally", "pursuant to our records", "as per", "I would like to take this opportunity to". Open with the actual reason for the email.
 7. Use plain, natural English. Contractions are fine. No hedging ("I just wanted to ask…"). No throat-clearing.
 8. No markdown formatting. The body ships to the recipient as plain text — markdown punctuation renders as literal characters in Gmail/Outlook. Do NOT introduce \`**bold**\`, \`__bold__\`, \`_italic_\`, \`*italic*\`, \`# headings\`, \`> blockquotes\`, or backticks. If the input has any of these, drop the punctuation and keep the words. Hyphen-space bullets (\`- item\`) are fine — they read as plain text. Snake_case identifiers (claim_number, account_number_123) are not emphasis; preserve them verbatim.
 9. ${signBlock}
-10. Keep the subject line if it's already concrete; tighten if it's flabby. Never lengthen it.
+10. Keep the subject line if it's already concrete; tighten if it's flabby. Never lengthen it. Subject hard cap: 60 characters.
 
 ## Tone — user selected: ${tone}
 
@@ -169,12 +187,132 @@ Rewrite the body in the user's tone. Preserve every grounded fact (dollar figure
       return { subject: opts.subject, body: opts.body };
     }
     const input = tool.input as { subject: string; body_markdown: string };
-    return { subject: input.subject, body: input.body_markdown };
+    let result: HumanizeResult = { subject: input.subject, body: input.body_markdown };
+    if (capWords > 0) {
+      result = await enforceWordCap(result, capWords, anthropic, system);
+    }
+    // Defensive: if compression / truncation produced an empty body, fall
+    // back to the original draft so we never ship a blank email to a rep.
+    if (!result.body.trim()) {
+      console.warn("[humanizer] empty body after enforceWordCap, falling back to original");
+      return { subject: result.subject || opts.subject, body: opts.body };
+    }
+    return result;
   } catch (err) {
     // Never block a send on a humanizer failure — log and fall through.
     console.warn(`[humanizer] failed, sending original: ${(err as Error).message}`);
     return { subject: opts.subject, body: opts.body };
   }
+}
+
+/** Tokenize on whitespace. Cheap, deterministic, good enough for a cap. */
+function countWords(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+/**
+ * Enforce the word cap on the rewritten body. Three-tier strategy:
+ *   1. Under cap or at most 20% over → return as-is. The cap is a target
+ *      not a hard line; LLM word counts wobble.
+ *   2. Over cap by >20% → ONE retry with a stricter compress prompt.
+ *      Specifically tells Opus the previous word count and the cap so it
+ *      can't fudge the comparison.
+ *   3. Retry still over → truncate at the nearest paragraph break that
+ *      fits, append nothing (no ellipsis). Log a `humanizer.cap_violation`
+ *      so dashboards can track drift.
+ *
+ * No infinite re-prompts. Two API calls max per humanize().
+ */
+async function enforceWordCap(
+  draft: HumanizeResult,
+  cap: number,
+  anthropic: Anthropic,
+  originalSystem: string,
+): Promise<HumanizeResult> {
+  const initial = countWords(draft.body);
+  if (initial <= cap * 1.2) return draft;
+
+  const RETRY_TOOL: Anthropic.Tool = {
+    name: "humanize_email",
+    description: "Return the compressed subject + body.",
+    input_schema: {
+      type: "object",
+      required: ["subject", "body_markdown"],
+      properties: {
+        subject: { type: "string", minLength: 3 },
+        body_markdown: { type: "string", minLength: 20 },
+      },
+    },
+  };
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: MAX_TOKENS,
+      system: originalSystem,
+      tools: [RETRY_TOOL],
+      tool_choice: { type: "tool", name: "humanize_email" },
+      messages: [
+        {
+          role: "user",
+          content: `Your previous output was ${initial} words. The cap is ${cap} words. Cut sentences — don't shorten them, drop the least load-bearing ones entirely. Return the compressed subject + body via the humanize_email tool.\n\nPrevious subject: ${draft.subject}\n\nPrevious body:\n${draft.body}`,
+        },
+      ],
+    });
+    const tool = resp.content.find(
+      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "humanize_email",
+    );
+    if (tool) {
+      const input = tool.input as { subject: string; body_markdown: string };
+      const retryWords = countWords(input.body_markdown);
+      if (retryWords <= cap * 1.2) {
+        return { subject: input.subject, body: input.body_markdown };
+      }
+      // Still over after one retry — truncate the retry at a paragraph
+      // boundary; it's already the best version we'll get.
+      console.warn(`[humanizer.cap_violation] retry still over: cap=${cap} got=${retryWords}`);
+      return {
+        subject: input.subject,
+        body: truncateAtParagraph(input.body_markdown, cap),
+      };
+    }
+  } catch (err) {
+    console.warn(`[humanizer] retry failed: ${(err as Error).message}`);
+  }
+  // Retry totally failed — truncate the original draft.
+  console.warn(`[humanizer.cap_violation] truncating draft: cap=${cap} got=${initial}`);
+  return { subject: draft.subject, body: truncateAtParagraph(draft.body, cap) };
+}
+
+/** Cut the body to a paragraph boundary that fits under the cap. If the
+ * first paragraph alone is over cap, fall back to a hard word slice
+ * — without that fallback, the loop pushes the over-cap paragraph
+ * (because acc.length === 0 disables the guard) and returns more than
+ * cap words. */
+function truncateAtParagraph(body: string, cap: number): string {
+  const paragraphs = body.split(/\n\n+/);
+  // First paragraph alone exceeds cap → there's no paragraph boundary that
+  // fits, hard-slice instead. Common case for one-sentence rep responses
+  // that the agent over-pads.
+  const firstWords = countWords(paragraphs[0] ?? "");
+  if (firstWords > cap) {
+    return body.trim().split(/\s+/).slice(0, cap).join(" ");
+  }
+  let acc: string[] = [];
+  let words = 0;
+  for (const p of paragraphs) {
+    const w = countWords(p);
+    if (words + w > cap) break;
+    acc.push(p);
+    words += w;
+    if (words >= cap) break;
+  }
+  if (acc.length === 0) {
+    return body.trim().split(/\s+/).slice(0, cap).join(" ");
+  }
+  return acc.join("\n\n");
 }
 
 /**
