@@ -120,9 +120,9 @@ a.btn { text-decoration: none; }
 .landing-headline {
   font-family: var(--font-display);
   font-weight: 400;
-  font-size: clamp(32px, 5.4vw, 76px);
+  font-size: clamp(40px, 6.4vw, 88px);
   line-height: 1.05;
-  letter-spacing: -0.024em;
+  letter-spacing: -0.026em;
   color: var(--ink);
   margin: 0 0 22px;
 }
@@ -180,7 +180,7 @@ a.btn { text-decoration: none; }
 }
 .landing-hero-art svg {
   width: 100%;
-  max-width: 660px;
+  max-width: 560px;
   height: auto;
   filter: drop-shadow(0 18px 32px rgba(14, 14, 12, 0.06))
           drop-shadow(0 4px 8px rgba(14, 14, 12, 0.04));
@@ -997,6 +997,10 @@ a.btn { text-decoration: none; }
   .cat-chip { opacity: 1; transform: none; }
 }
 
+/* Mobile-only stacked categories — hidden on desktop, shown <=760px.
+   Photo above, single-row chips below (horizontal scroll if overflow). */
+.landing-cats-mobile { display: none; }
+
 /* ─── FAQ (2-column, brand-book) ────────────────────────── */
 
 .landing-faq-inner {
@@ -1316,13 +1320,13 @@ a.btn { text-decoration: none; }
     padding: 12px 18px;
   }
   .landing-nav-links { display: none; }
-  .landing-nav-cta { gap: 10px; }
+  .landing-nav-cta { gap: 10px; justify-self: end; }
   .landing-hero { padding: 48px 20px 56px; }
   .landing-headline-sm { font-size: 32px; }
   .landing-sub { font-size: 16px; }
   .landing-marquee-track span { font-size: 22px; }
   .landing-features,
-  .landing-how,
+  .landing-cats-mobile,
   .landing-faq,
   .landing-final-cta { padding: 56px 20px; }
   .landing-section-title { font-size: 28px; margin-bottom: 28px; }
@@ -1335,44 +1339,107 @@ a.btn { text-decoration: none; }
   .landing-feature h3 { font-size: 24px; }
   .landing-faq-inner { grid-template-columns: 1fr; gap: 32px; }
 
-  /* How-it-works: drop sticky scroll, stack steps vertically */
-  .landing-how { padding: 56px 20px; }
-  .landing-how-track { height: auto; }
-  .landing-how-sticky {
-    position: static;
-    height: auto;
-    padding: 0;
-    overflow: visible;
+  /* Categories on mobile: hide the desktop sticky scrolljack and show
+     the stacked layout — title, desc, photo, then chips in a single
+     non-wrapping row (horizontal scroll if they overflow). */
+  .landing-how { display: none; }
+  .landing-cats-mobile {
+    display: block;
+    background: var(--amber-tint);
+    border-bottom: 1px solid var(--line);
   }
-  .landing-how-inner {
-    grid-template-columns: 1fr;
-    gap: 32px;
-  }
-  .landing-how-keywords { gap: 8px; margin-bottom: 24px; }
-  .how-keyword {
+  .landing-cats-intro { margin-bottom: 24px; }
+  .landing-cats-lead {
+    font-family: var(--font-display);
+    font-weight: 400;
     font-size: 32px;
-    opacity: 1;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
     color: var(--ink);
+    margin: 0 0 10px;
   }
-  .how-arrow { display: none; }
-  .landing-how-descs {
-    position: static;
-    min-height: 0;
+  .landing-cats-lead em {
+    font-style: normal;
+    text-decoration: underline;
+    text-decoration-color: var(--amber);
+    text-decoration-thickness: 0.045em;
+    text-underline-offset: 0.07em;
+  }
+  .landing-cats-sublead {
+    font-family: var(--font-ui);
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+  .landing-cats-mobile .landing-cat {
+    display: block;
+    padding: 32px 0;
+    border-top: 1px solid rgba(14, 14, 12, 0.08);
+    margin: 0;
+  }
+  .landing-cats-mobile .landing-cat-name {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 30px;
+    line-height: 1.05;
+    letter-spacing: -0.022em;
+    color: var(--ink);
+    margin: 0 0 12px;
     display: flex;
-    flex-direction: column;
-    gap: 18px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
   }
-  .how-desc {
+  .landing-cats-mobile .landing-cat-word { font-style: normal; line-height: 1; }
+  .landing-cats-mobile .landing-cat-stat {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--green);
+    background: rgba(23, 114, 69, 0.1);
+    border: 1px solid rgba(23, 114, 69, 0.25);
+    border-radius: 999px;
+    padding: 5px 10px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .landing-cats-mobile .landing-cat-desc {
+    font-family: var(--font-ui);
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0 0 18px;
+  }
+  .landing-cats-mobile .landing-cat-photo { margin: 0 0 16px; }
+  .landing-cats-mobile .landing-cat-photo img {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 14px;
+    box-shadow: 0 18px 32px rgba(14, 14, 12, 0.08),
+                0 4px 8px rgba(14, 14, 12, 0.04);
+  }
+  /* Single-row chips, never wrap. Sized to fit the chip counts on mobile. */
+  .cat-chips--row {
     position: static;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 0;
+    margin: 0;
+  }
+  .cat-chips--row .cat-chip {
+    position: static;
+    flex: 0 0 auto;
+    font-size: 11.5px;
+    padding: 5px 10px;
     opacity: 1;
     transform: none;
-    padding: 16px;
-    background: var(--surface);
-    border-radius: 10px;
-    font-size: 14.5px;
+    transition: none;
   }
-  .landing-how-visuals { display: none; }
-  .how-marker { display: none; }
   .landing-faq-list summary { font-size: 17px; padding: 20px 4px 20px 0; }
   .landing-feature-num { font-size: 28px; margin-bottom: 14px; }
   .landing-steps li { grid-template-columns: 56px 1fr; gap: 18px; }
