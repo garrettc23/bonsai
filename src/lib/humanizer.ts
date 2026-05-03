@@ -286,16 +286,25 @@ async function enforceWordCap(
   return { subject: draft.subject, body: truncateAtParagraph(draft.body, cap) };
 }
 
-/** Cut the body to a paragraph boundary that fits under the cap. If no
- * paragraph boundary fits, fall back to a hard word slice (rare — the
- * body would have to be a single >cap-word paragraph). */
+/** Cut the body to a paragraph boundary that fits under the cap. If the
+ * first paragraph alone is over cap, fall back to a hard word slice
+ * — without that fallback, the loop pushes the over-cap paragraph
+ * (because acc.length === 0 disables the guard) and returns more than
+ * cap words. */
 function truncateAtParagraph(body: string, cap: number): string {
   const paragraphs = body.split(/\n\n+/);
+  // First paragraph alone exceeds cap → there's no paragraph boundary that
+  // fits, hard-slice instead. Common case for one-sentence rep responses
+  // that the agent over-pads.
+  const firstWords = countWords(paragraphs[0] ?? "");
+  if (firstWords > cap) {
+    return body.trim().split(/\s+/).slice(0, cap).join(" ");
+  }
   let acc: string[] = [];
   let words = 0;
   for (const p of paragraphs) {
     const w = countWords(p);
-    if (words + w > cap && acc.length > 0) break;
+    if (words + w > cap) break;
     acc.push(p);
     words += w;
     if (words >= cap) break;

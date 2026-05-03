@@ -335,7 +335,13 @@ function resolveOrGate(
     signature_doc_summary?: string;
   },
 ): NegotiationOutcome {
-  const requires_signature = !!input.requires_signature;
+  // Strict-equality on a boolean. The model can drift to string "true"
+  // /"false" under length pressure; double-negation would treat "false"
+  // (truthy string) as a signature gate. We only honor the literal
+  // boolean true. The system prompt already says "when in doubt, set
+  // true" — if the model emits a string we'd rather miss the gate than
+  // gate on every "false" response forever.
+  const requires_signature = input.requires_signature === true;
   const sigSummary = requires_signature ? input.signature_doc_summary?.trim() || undefined : undefined;
   const mode: AgentMode = state.agent_mode ?? "autonomous";
   const pushBacks = state.push_back_count ?? 0;

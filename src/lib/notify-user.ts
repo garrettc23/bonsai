@@ -231,10 +231,14 @@ async function defaultSendEmail(msg: NotifyEmail): Promise<void> {
     console.warn("[notify-user] RESEND_API_KEY/RESEND_FROM unset — skipping email");
     return;
   }
+  // 15s timeout — without it, a hung Resend hangs the webhook step (which
+  // holds the thread lock) until the retry path bails on the second 30s
+  // sleep. Subsequent webhook deliveries for this thread queue indefinitely.
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ from, to: [msg.to], subject: msg.subject, text: msg.text }),
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
     const text = await res.text();
