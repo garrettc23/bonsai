@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0.0] - 2026-05-09
+
+### Added
+- **The agent gets smarter every time you negotiate with the same provider.** Every closed thread now writes a pattern-level playbook for that provider (Aetna, Comcast, PG&E, etc.) — what tactic unlocked the concession, what the rep typically opens with, whether they demanded a signature. The next negotiation against the same provider gets that playbook injected into the agent's context. Cross-user, opt-out, with a strict PII gate that rejects any event containing dollar amounts, claim numbers, or emails. Off by default — set `BONSAI_BRAIN=1` and `BONSAI_BRAIN_HMAC_KEY` in your env to turn it on.
+- **A second model fact-checks every draft before it sends.** Claude writes the negotiation reply; an independent GPT-5 pass verifies that every dollar figure, claim number, and EOB citation in the draft actually came from the analyzer. On a violation the agent gets the specifics back as a tool error and redrafts once. Drafts that fabricate a claim number can no longer reach the rep. Off by default — set `BONSAI_CROSSMODAL=1` to turn on.
+- **An adversarial reviewer plays the rep before the email goes out.** GPT-5 reads the draft after fact-check passes and looks for weak ask, missing leverage, weak deadline, easy deflection — the kinds of things a real billing rep would exploit. High-severity weak points trigger a redraft with the specific issues fed back. Same `BONSAI_CROSSMODAL=1` gate.
+- **The rep's reply gets classified before the agent drafts.** GPT-5 reads the latest inbound and tags it (concession / partial / stall / denial / signature_demand / hostile / etc) with a confidence score. Injected as a non-binding prior into the agent's context — gives the agent a structured second opinion on the rep's posture before it picks a move.
+
+### Changed
+- **Email-outreach pipeline is now a chain of composable skills.** Per Garry Tan's "fat skills, thin harness" architecture (see his post on personal AI). Every prompt and tool that used to live as inline TypeScript constants now lives in `src/skills/*.md` files with YAML frontmatter declaring the model, provider, and inputs. Iterating on a prompt no longer requires a code redeploy. The pipeline is now: classify-reply → consult-provider-brain → draft-reply → fact-check → adversarial-review → humanize → send → on-close → propagate-to-brain.
+- **Models are interchangeable per skill.** Added `src/llm/provider.ts` with `callLLM({ provider, model, ...})` returning a normalized `tool_use` shape across both Anthropic and OpenAI SDKs. Each skill declares its provider in frontmatter — claude-opus-4-7 for tactics + tone, gpt-5 for independent eval passes.
+- **OpenAI is now a first-class provider.** Added `openai@6` for the cross-modal eval skills. Lazy-loaded — workspaces using only Claude skills never import the OpenAI SDK.
+
+### Infrastructure
+- 50 new tests (515 → 565+ across the rebuild) covering skill loader, LLM provider, fact-check, brain PII gate + HMAC, brain compound loop, classify-reply, adversarial-review.
+- New env vars: `OPENAI_API_KEY`, `BONSAI_CROSSMODAL`, `BONSAI_BRAIN`, `BONSAI_BRAIN_HMAC_KEY`, `BONSAI_BRAIN_OPT_OUT`. All new behaviors are off by default — flip the gates per the rollout note in the PR.
+
 ## [0.1.37.1] - 2026-05-03
 
 ### Changed

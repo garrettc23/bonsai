@@ -448,7 +448,11 @@ async function stepInBackground(thread_id: string, threadsDir?: string): Promise
       }
       if (state.outcome.status !== "in_progress") return;
       const client = await autoEmailClient(threadsDir);
-      const next = await stepNegotiation({ state, client, threadsDir });
+      // Resolve thread owner so the brain propagation pass can HMAC-hash
+      // the user_id when this step closes the thread. Null for legacy
+      // threads under out/threads/ — those skip the propagate.
+      const user_id = threadsDir ? (userIdFromThreadsDir(threadsDir) ?? undefined) : undefined;
+      const next = await stepNegotiation({ state, client, threadsDir, user_id });
       saveNegotiationState(next, threadsDir);
       // Side-effect: if the agent reached a terminal state on this step,
       // notify the user. In-app record is durable; email is best-effort.

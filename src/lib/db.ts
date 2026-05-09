@@ -133,6 +133,40 @@ export function getDb(): Database {
       succeeded_at INTEGER NOT NULL,
       bytes INTEGER NOT NULL
     );
+
+    -- Cross-user provider playbooks ("brain pages"). Each row is one
+    -- provider (Aetna, Comcast, PG&E, …) keyed by a normalized slug.
+    -- compiled_truth is an LLM-rewritten short summary of what works
+    -- against this provider; it gets injected into draft-reply context
+    -- in Phase 5. Updated by the propagate-to-brain skill at thread
+    -- close.
+    CREATE TABLE IF NOT EXISTS provider_brains (
+      provider_key TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      bill_kind TEXT NOT NULL,
+      compiled_truth TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Append-only event log per provider. Pattern-level facts only —
+    -- the propagate-to-brain skill emits events through a constrained
+    -- tool schema and the writer applies a PII regex gate before
+    -- insert. user_id_hash is HMAC(BONSAI_BRAIN_HMAC_KEY, user_id)
+    -- so we can detect "one user spamming this provider" without
+    -- storing the user_id. thread_id is for traceability — kept inside
+    -- the same DB but never joined cross-user.
+    CREATE TABLE IF NOT EXISTS provider_brain_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider_key TEXT NOT NULL REFERENCES provider_brains(provider_key) ON DELETE CASCADE,
+      thread_id TEXT NOT NULL,
+      user_id_hash TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS provider_brain_events_provider_idx
+      ON provider_brain_events(provider_key, occurred_at);
   `);
   // Light-touch column migrations for users — older DBs (pre-email-
   // verification, pre-terms-acceptance) already have a `users` table from

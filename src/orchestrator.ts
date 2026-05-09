@@ -260,6 +260,7 @@ export async function runNegotiationPhase(
       agent_mode: opts.agent_mode,
       cc: opts.cc,
       run_id: opts.run_id,
+      user_id: maybeCurrentUser()?.id,
     });
     report.persistent_run = run;
     // Surface the transcripts in the existing thread fields so the current
@@ -320,6 +321,11 @@ export async function runNegotiationPhase(
     saveNegotiationState(state);
 
     const maxRounds = opts.max_email_rounds ?? 4;
+    // Resolve the current user so brain propagation can HMAC-hash on
+    // thread close. The orchestrator runs in both server (logged-in)
+    // and CLI (no user context) modes — undefined falls through to
+    // skip-propagate, which is the right CLI behavior.
+    const orchestratorUserId = maybeCurrentUser()?.id;
     if (!isReal) {
       // Demo mode — synthetic loop. Real mode dispatches one email and
       // waits for the inbound webhook to step the agent on actual replies.
@@ -337,7 +343,7 @@ export async function runNegotiationPhase(
           latest_outbound_body: latest?.body_text ?? "",
           client: client as MockEmailClient,
         });
-        state = await stepNegotiation({ state, client });
+        state = await stepNegotiation({ state, client, user_id: orchestratorUserId });
         saveNegotiationState(state);
         if (state.outcome.status !== "in_progress") break;
       }

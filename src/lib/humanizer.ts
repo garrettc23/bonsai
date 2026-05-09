@@ -35,13 +35,24 @@
  * appeal-letter.ts, never by an LLM, so it never gets the tone/style
  * treatment without a separate pass.
  */
-import Anthropic from "@anthropic-ai/sdk";
 import type { AgentTone } from "./user-settings.ts";
 import type { BillKind } from "../types.ts";
 import { toneGuidance } from "./feedback-parser.ts";
+import { loadSkill, renderSkill } from "../skills/_harness/skill-loader.ts";
+import { callLLM, type LLMTool, type ProviderRunners } from "../llm/provider.ts";
 
-const MODEL = "claude-opus-4-7";
-const MAX_TOKENS = 2048;
+const HUMANIZE_TOOL: LLMTool = {
+  name: "humanize_email",
+  description: "Return the rewritten subject + body.",
+  input_schema: {
+    type: "object",
+    required: ["subject", "body_markdown"],
+    properties: {
+      subject: { type: "string", minLength: 3 },
+      body_markdown: { type: "string", minLength: 20 },
+    },
+  },
+};
 
 export interface HumanizeOpts {
   /** The drafted email body (markdown). */
@@ -71,9 +82,9 @@ export interface HumanizeOpts {
    * disable the cap entirely (used by the appeal-letter pre-pass where
    * a long structured letter is intentional). */
   max_words?: number;
-  /** Inject an Anthropic client so tests / orchestrators can mock or share
-   * one. Defaults to a fresh `new Anthropic()` from env. */
-  anthropic?: Anthropic;
+  /** Inject mock LLM runners so tests can stub provider calls. Production
+   * leaves this undefined and the real Anthropic/OpenAI SDKs are used. */
+  runners?: ProviderRunners;
 }
 
 export interface HumanizeResult {
@@ -90,7 +101,7 @@ export async function humanize(opts: HumanizeOpts): Promise<HumanizeResult> {
   // Test escape hatch — set in unit tests so the humanizer doesn't make a
   // real Anthropic call. Production never sets this. Integration tests
   // that need to exercise the humanizer should leave it unset and inject
-  // an Anthropic mock via opts.anthropic.
+  // mock runners via opts.runners.
   if (process.env.BONSAI_DISABLE_HUMANIZER === "1") {
     return { subject: opts.subject, body: opts.body };
   }
@@ -108,56 +119,15 @@ export async function humanize(opts: HumanizeOpts): Promise<HumanizeResult> {
         : 120;
   const playbook = pickPlaybook(kind);
 
-  const factsBlock = opts.preserve_facts?.length
-    ? `\n\n## Facts that MUST survive verbatim\n\nThese came from a grounded audit. Do not rephrase, round, or omit them — they are the basis of the dispute:\n${opts.preserve_facts.map((f, i) => `${i + 1}. ${f}`).join("\n")}`
-    : "";
-
-  const signBlock = opts.user_name
-    ? `Sign the email as: ${opts.user_name}.`
-    : `If a sign-off is needed, use a generic close ("Thanks," "Best,") with no name. Do not insert a placeholder like "[NAME]".`;
-
-  const system = `You are Bonsai's humanizer. You receive a drafted external email and rewrite it so it sounds like a real customer wrote it — not a template, not an AI, not a lawyer. You preserve every grounded fact and the substantive ask, and you apply the user's tone preference to the surface language.
-
-## Required output
-
-Return your rewrite via the \`humanize_email\` tool. No prose outside the tool call.
-
-## Hard rules (non-negotiable)
-
-1. Preserve every dollar figure, claim number, account number, date, and direct quote from the original. If the original quotes a bill line in quotation marks, that quote is verbatim and must survive the rewrite unchanged.
-2. Do NOT invent claim numbers, account numbers, or dates that are not in the input. If the original has a placeholder like "[CLAIM NUMBER]" or "[ACCOUNT NUMBER]", drop the entire reference (and the surrounding sentence if needed). Never leave brackets in the output.
-3. Do NOT change the substantive ask. If the original asks for a refund of $X, the rewrite asks for a refund of $X.
-4. Do NOT add legal threats, statutes, or escalation paths that weren't in the original. Soften or keep — never add.
-
-## Style rules
-
-5. Hard length cap: ${capWords > 0 ? `the body MUST be at or under ${capWords} words. Count your words. If your draft would go over, cut sentences (don't shorten them — drop the least load-bearing ones entirely). Default ${opts.is_first_contact ? "first-contact" : "follow-up"} structure: greeting (1 line), the ask + the strongest grounded fact (1 short paragraph), close (1 line)` : "1–3 short paragraphs. Only go longer if the original genuinely requires it (e.g., a multi-finding medical dispute with itemized lines). When in doubt, cut"}. The user has already complained these emails are too long — when you can choose between cutting and keeping, cut.
-6. Strip AI-isms and corporate boilerplate: "I hope this email finds you well", "I am writing to formally", "pursuant to our records", "as per", "I would like to take this opportunity to". Open with the actual reason for the email.
-7. Use plain, natural English. Contractions are fine. No hedging ("I just wanted to ask…"). No throat-clearing.
-8. No markdown formatting. The body ships to the recipient as plain text — markdown punctuation renders as literal characters in Gmail/Outlook. Do NOT introduce \`**bold**\`, \`__bold__\`, \`_italic_\`, \`*italic*\`, \`# headings\`, \`> blockquotes\`, or backticks. If the input has any of these, drop the punctuation and keep the words. Hyphen-space bullets (\`- item\`) are fine — they read as plain text. Snake_case identifiers (claim_number, account_number_123) are not emphasis; preserve them verbatim.
-9. ${signBlock}
-10. Keep the subject line if it's already concrete; tighten if it's flabby. Never lengthen it. Subject hard cap: 60 characters.
-
-## Tone — user selected: ${tone}
-
-${toneGuidance(tone)}
-
-## Playbook for this bill kind: ${kind}
-
-${playbook}${factsBlock}`;
-
-  const HUMANIZE_TOOL: Anthropic.Tool = {
-    name: "humanize_email",
-    description: "Return the rewritten subject + body.",
-    input_schema: {
-      type: "object",
-      required: ["subject", "body_markdown"],
-      properties: {
-        subject: { type: "string", minLength: 3 },
-        body_markdown: { type: "string", minLength: 20 },
-      },
-    },
-  };
+  const system = renderSkill(loadSkill("humanize"), {
+    tone,
+    tone_guidance: toneGuidance(tone),
+    bill_kind: kind,
+    playbook,
+    length_rule: lengthRule(capWords, opts.is_first_contact ?? false),
+    sign_block: signBlock(opts.user_name),
+    facts_block: factsBlock(opts.preserve_facts),
+  });
 
   const userMsg = `## Original drafted email
 
@@ -170,26 +140,27 @@ ${opts.body}
 Rewrite the body in the user's tone. Preserve every grounded fact (dollar figures, dates, claim/account numbers, direct quotes) verbatim. Drop empty placeholders. Apply the playbook above. Return via the humanize_email tool.${opts.is_first_contact ? "\n\nThis is the FIRST contact on this thread, so the playbook's opening framing applies." : "\n\nThis is a FOLLOW-UP on an existing thread; skip introductions and respond to whatever the rep last said."}`;
 
   try {
-    const anthropic = opts.anthropic ?? new Anthropic();
-    const resp = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system,
-      tools: [HUMANIZE_TOOL],
-      tool_choice: { type: "tool", name: "humanize_email" },
-      messages: [{ role: "user", content: userMsg }],
-    });
-    const tool = resp.content.find(
-      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "humanize_email",
+    const skill = loadSkill("humanize");
+    const resp = await callLLM(
+      {
+        provider: skill.frontmatter.provider,
+        model: skill.frontmatter.model,
+        max_tokens: skill.frontmatter.max_tokens,
+        system,
+        user: userMsg,
+        tools: [HUMANIZE_TOOL],
+        force_tool: "humanize_email",
+      },
+      opts.runners,
     );
-    if (!tool) {
+    if (!resp.tool_use || resp.tool_use.name !== "humanize_email") {
       console.warn("[humanizer] no tool call in response, falling back to original");
       return { subject: opts.subject, body: opts.body };
     }
-    const input = tool.input as { subject: string; body_markdown: string };
+    const input = resp.tool_use.input as { subject: string; body_markdown: string };
     let result: HumanizeResult = { subject: input.subject, body: input.body_markdown };
     if (capWords > 0) {
-      result = await enforceWordCap(result, capWords, anthropic, system);
+      result = await enforceWordCap(result, capWords, system, skill.frontmatter, opts.runners);
     }
     // Defensive: if compression / truncation produced an empty body, fall
     // back to the original draft so we never ship a blank email to a rep.
@@ -228,44 +199,28 @@ function countWords(text: string): number {
 async function enforceWordCap(
   draft: HumanizeResult,
   cap: number,
-  anthropic: Anthropic,
   originalSystem: string,
+  skillFm: { provider: "anthropic" | "openai"; model: string; max_tokens: number },
+  runners: ProviderRunners | undefined,
 ): Promise<HumanizeResult> {
   const initial = countWords(draft.body);
   if (initial <= cap * 1.2) return draft;
 
-  const RETRY_TOOL: Anthropic.Tool = {
-    name: "humanize_email",
-    description: "Return the compressed subject + body.",
-    input_schema: {
-      type: "object",
-      required: ["subject", "body_markdown"],
-      properties: {
-        subject: { type: "string", minLength: 3 },
-        body_markdown: { type: "string", minLength: 20 },
-      },
-    },
-  };
-
   try {
-    const resp = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: originalSystem,
-      tools: [RETRY_TOOL],
-      tool_choice: { type: "tool", name: "humanize_email" },
-      messages: [
-        {
-          role: "user",
-          content: `Your previous output was ${initial} words. The cap is ${cap} words. Cut sentences — don't shorten them, drop the least load-bearing ones entirely. Return the compressed subject + body via the humanize_email tool.\n\nPrevious subject: ${draft.subject}\n\nPrevious body:\n${draft.body}`,
-        },
-      ],
-    });
-    const tool = resp.content.find(
-      (b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use" && b.name === "humanize_email",
+    const resp = await callLLM(
+      {
+        provider: skillFm.provider,
+        model: skillFm.model,
+        max_tokens: skillFm.max_tokens,
+        system: originalSystem,
+        user: `Your previous output was ${initial} words. The cap is ${cap} words. Cut sentences — don't shorten them, drop the least load-bearing ones entirely. Return the compressed subject + body via the humanize_email tool.\n\nPrevious subject: ${draft.subject}\n\nPrevious body:\n${draft.body}`,
+        tools: [HUMANIZE_TOOL],
+        force_tool: "humanize_email",
+      },
+      runners,
     );
-    if (tool) {
-      const input = tool.input as { subject: string; body_markdown: string };
+    if (resp.tool_use && resp.tool_use.name === "humanize_email") {
+      const input = resp.tool_use.input as { subject: string; body_markdown: string };
       const retryWords = countWords(input.body_markdown);
       if (retryWords <= cap * 1.2) {
         return { subject: input.subject, body: input.body_markdown };
@@ -313,6 +268,31 @@ function truncateAtParagraph(body: string, cap: number): string {
     return body.trim().split(/\s+/).slice(0, cap).join(" ");
   }
   return acc.join("\n\n");
+}
+
+/**
+ * The "Hard length cap" sentence that gets injected into the humanize
+ * skill's style-rule #5. The wording shifts depending on whether the cap
+ * is enforced (capWords > 0) and whether this is first contact vs a
+ * follow-up (drives the structural template the model is told to hit).
+ */
+function lengthRule(capWords: number, isFirstContact: boolean): string {
+  if (capWords > 0) {
+    const which = isFirstContact ? "first-contact" : "follow-up";
+    return `the body MUST be at or under ${capWords} words. Count your words. If your draft would go over, cut sentences (don't shorten them — drop the least load-bearing ones entirely). Default ${which} structure: greeting (1 line), the ask + the strongest grounded fact (1 short paragraph), close (1 line)`;
+  }
+  return `1–3 short paragraphs. Only go longer if the original genuinely requires it (e.g., a multi-finding medical dispute with itemized lines). When in doubt, cut`;
+}
+
+function signBlock(userName: string | null | undefined): string {
+  return userName
+    ? `Sign the email as: ${userName}.`
+    : `If a sign-off is needed, use a generic close ("Thanks," "Best,") with no name. Do not insert a placeholder like "[NAME]".`;
+}
+
+function factsBlock(facts: string[] | undefined): string {
+  if (!facts?.length) return "";
+  return `\n\n## Facts that MUST survive verbatim\n\nThese came from a grounded audit. Do not rephrase, round, or omit them — they are the basis of the dispute:\n${facts.map((f, i) => `${i + 1}. ${f}`).join("\n")}`;
 }
 
 /**
