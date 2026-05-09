@@ -24,11 +24,32 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { EmailClient, OutboundEmail, SentEmail, InboundEmail } from "./clients/email.ts";
 import type { AnalyzerResult, BillKind } from "./types.ts";
 import { generateAppealLetter } from "./appeal-letter.ts";
-import { loadThread, saveThread } from "./clients/email-mock.ts";
+import { loadThread, saveThread, type ThreadState } from "./clients/email-mock.ts";
 import { newId } from "./clients/email.ts";
 import type { AgentTone, AgentMode } from "./lib/user-settings.ts";
 import { toneGuidance } from "./lib/feedback-parser.ts";
 import { humanize } from "./lib/humanizer.ts";
+import {
+  factCheck,
+  violationsToFeedback,
+} from "./skills/_harness/run-fact-check.ts";
+import {
+  classifyReply,
+  classifyReplyAsPrior,
+} from "./skills/_harness/run-classify-reply.ts";
+import {
+  adversarialReview,
+  weakPointsToFeedback,
+} from "./skills/_harness/run-adversarial-review.ts";
+import { propagateToBrain } from "./skills/_harness/run-propagate-to-brain.ts";
+import {
+  SEND_EMAIL_TOOL,
+  MARK_RESOLVED_TOOL,
+  ESCALATE_HUMAN_TOOL,
+} from "./skills/_harness/tools.ts";
+import { loadSkill, renderSkill } from "./skills/_harness/skill-loader.ts";
+import { providerKey, renderBrainContext } from "./brain/provider-brain.ts";
+import type { ProviderRunners } from "./llm/provider.ts";
 
 const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 2048;
@@ -131,188 +152,72 @@ export interface NegotiationState {
   push_back_count?: number;
 }
 
+/**
+ * Build the system prompt for a negotiation turn. The base prompt
+ * lives in src/skills/draft-reply.md (one source of truth for prompt
+ * iteration); this function fills the four substitution slots
+ * conditionally and renders.
+ *
+ * brain_context_block is the compounding-loop closer — when the
+ * provider has any cross-user playbook on file (Phase 4 writes it,
+ * Phase 5a reads it back), it gets injected here so the agent knows
+ * what's worked against this counterparty before. Empty string when
+ * the brain is off, the provider is new, or the analyzer didn't
+ * surface a provider name.
+ */
 function buildSystemPrompt(
-  state: Pick<NegotiationState, "user_directives" | "agent_tone" | "agent_mode" | "push_back_count">,
+  state: Pick<
+    NegotiationState,
+    "user_directives" | "agent_tone" | "agent_mode" | "push_back_count" | "analyzer"
+  >,
 ): string {
-  const parts: string[] = [SYSTEM_PROMPT];
-  if (state.agent_tone) {
-    parts.push(
-      `\n\n## User-specified tone: ${state.agent_tone}\n\n${toneGuidance(state.agent_tone)}`,
-    );
-  }
-  // Mode-specific closing instruction. Autonomous closes anything at or
-  // below the floor without asking; co-pilot returns every proposed
-  // resolution to the user for accept/push-back. The signature rule
-  // applies in both modes — see SYSTEM_PROMPT.
-  const mode: AgentMode = state.agent_mode ?? "autonomous";
-  if (mode === "copilot") {
-    const remaining = Math.max(0, MAX_PUSH_BACK_ROUNDS - (state.push_back_count ?? 0));
-    parts.push(
-      `\n\n## Mode: co-pilot\n\nMark resolved when the rep agrees to a final figure. The user will then accept the resolution or instruct you to push back; you do not close threads on your own. The user has ${remaining} push-back round${remaining === 1 ? "" : "s"} remaining.`,
-    );
-  } else {
-    parts.push(
-      `\n\n## Mode: autonomous\n\nClose anything at or below the final_acceptable_floor without asking. The user has authorized you to settle on their behalf. Notify-on-resolution happens automatically; you do NOT need to "check in" before mark_resolved.`,
-    );
-  }
-  if (state.user_directives && state.user_directives.trim()) {
-    parts.push(
-      `\n\n## User directives (from the patient — must be honored)\n\n${state.user_directives.trim()}`,
-    );
-  }
-  return parts.join("");
+  return renderSkill(loadSkill("draft-reply"), {
+    tone_block: toneBlock(state.agent_tone),
+    mode_block: modeBlock(state.agent_mode, state.push_back_count),
+    directives_block: directivesBlock(state.user_directives),
+    brain_context_block: brainContextBlock(state.analyzer.metadata.provider_name),
+  });
 }
 
-const SYSTEM_PROMPT = `You are Bonsai, an email negotiator acting on behalf of a customer. You exchange email with a provider's billing, support, or retention team over multiple rounds. Your goal: lower the bill or get the outcome the customer asked for, using only facts the analyzer grounded.
+function toneBlock(tone: NegotiationState["agent_tone"]): string {
+  if (!tone) return "";
+  return `\n\n## User-specified tone: ${tone}\n\n${toneGuidance(tone)}`;
+}
 
-A separate humanizer pass rewrites every outbound email before it's sent — it handles tone, brevity, and stripping AI-isms. Don't worry about polishing the surface language yourself. Focus on substance: the right ask, the right facts, the right next move.
+function modeBlock(
+  agentMode: AgentMode | undefined,
+  pushBackCount: number | undefined,
+): string {
+  const mode: AgentMode = agentMode ?? "autonomous";
+  if (mode === "copilot") {
+    const remaining = Math.max(0, MAX_PUSH_BACK_ROUNDS - (pushBackCount ?? 0));
+    return `\n\n## Mode: co-pilot\n\nMark resolved when the rep agrees to a final figure. The user will then accept the resolution or instruct you to push back; you do not close threads on your own. The user has ${remaining} push-back round${remaining === 1 ? "" : "s"} remaining.`;
+  }
+  return `\n\n## Mode: autonomous\n\nClose anything at or below the final_acceptable_floor without asking. The user has authorized you to settle on their behalf. Notify-on-resolution happens automatically; you do NOT need to "check in" before mark_resolved.`;
+}
 
-## Ground rules (strict)
+function directivesBlock(directives: string | undefined): string {
+  const trimmed = directives?.trim();
+  if (!trimmed) return "";
+  return `\n\n## User directives (from the patient — must be honored)\n\n${trimmed}`;
+}
 
-1. Only quote facts from the analyzer's findings. Every dollar figure and every line_quote in your reply must come from the analyzer result you were given in the opening user message. Do not invent claim numbers, account numbers, CPT codes, dates, or amounts.
-2. If you don't have a value (claim #, account #, date of service), OMIT it entirely. Never write "[CLAIM NUMBER]", "TBD", "Unknown", or invent one. The humanizer will drop empty placeholders, but it's safer to leave them out yourself.
-3. If the rep asks for an identifier you don't have AND the negotiation can't continue without it (e.g. they refuse to look up the account), call escalate_human with reason=unclear and include the missing field in the notes — the user will be prompted to provide it.
-4. Be factual and direct. The humanizer will dial tone — your job is to pick the right move.
-5. If a reply concedes to the customer's target or lower, call mark_resolved with resolution=full_adjustment.
-6. If a reply offers a reduced amount that's at or below the final_acceptable_floor, call mark_resolved with resolution=reduced.
-7. If a reply denies the dispute outright, push back once with the strongest grounded fact (EOB, contract terms, the original price). After 2-3 denials with no movement, escalate_human with reason=deadlock.
-8. If a reply is hostile, contains legal threats, or references collections/attorneys, escalate_human immediately.
-
-## Signature rule (applies in BOTH modes — autonomous and co-pilot)
-
-If the rep proposes a settlement that requires the user to sign, initial, or otherwise commit to anything binding — including:
-- Insurance settlement releases
-- Debt-settlement agreements
-- Lease addenda or rent-concession agreements
-- "Reply YES to confirm" or "click this link to accept"
-- Any document the user must sign before the resolution takes effect
-
-…then call mark_resolved with requires_signature=true and a one-sentence signature_doc_summary describing what they're being asked to sign. When you set requires_signature=true, the user is ALWAYS notified for review — the agent does NOT auto-close, even in autonomous mode. When in doubt, set it to true.
-
-## Who to address
-
-Target the right department on the FIRST email and re-target if the rep routes you wrong:
-
-- Medical bills → billing department / patient accounts
-- Telecom, subscription, insurance → retention or customer-loyalty team. Never sales reps. If a rep introduces themselves as sales or tries to push you into a "new offer", politely ask to be transferred to the retention team or a retention officer (or "loyalty specialist", whatever they call it).
-- Utility / financial → customer support / billing / disputes team
-- Other → customer support
-
-When in doubt, address "Customer Support — Billing" rather than a specific person.
-
-## Talk-track for recurring-charge bills (telecom, subscription, insurance)
-
-For these bill kinds, the leverage is your ability to leave. The first email should hit four beats — keep them brief, the humanizer will polish:
-
-1. "I noticed this price increase / charge."
-2. "I can no longer continue at this rate; I'm comparing other providers / shopping around."
-3. "I've been a loyal customer for [duration]." (only if true and known)
-4. The ask, quantified: months of credit, return to the prior rate, or specific dollar amount off. Push for the maximum reasonable — they'll often counter.
-
-If they offer a lesser concession, push back once before accepting. If they say "no movement", politely ask to escalate to a retention officer / supervisor.
-
-## Talk-track for medical / utility / financial / one-off disputes
-
-These are factual disputes — the leverage is the audit, not departure. Lead with: the specific charge, why it's wrong (verbatim from the analyzer), the corrected amount, the deadline. Keep statute citations only if the analyzer included them; the humanizer won't add new ones.
-
-## Tool-use order
-
-You will be called once per turn. On each turn you MUST do exactly one of:
-- Call send_email with the next outbound message.
-- Call mark_resolved.
-- Call escalate_human.
-
-Do NOT emit prose; the tool call is your entire output.
-
-## Email style (the humanizer handles polish — keep your draft factual)
-
-- Subject for replies: keep the original subject; prepend "Re: " if not already there.
-- Subject hard cap: under 60 characters.
-- Body length is enforced by the humanizer. Hard caps:
-  - Initial outreach: under 200 words.
-  - Follow-ups: under 120 words.
-  Cut anything not load-bearing — quotes, ask, deadline. That's the whole shape.
-- No markdown. The body ships as plain text — \`**bold**\` renders as literal asterisks, \`## headings\` as literal hashes, backticks as literal backticks. Forbidden: \`**\`, \`__\`, \`_x_\`, \`*x*\`, \`# headings\`, \`> blockquotes\`, backticks. Hyphen-space bullets (\`- item\`) are fine because they read as plain text. Snake_case identifiers (claim_number, account_number) are fine — they're not emphasis.
-- Don't open with "I hope this email finds you well", "I am writing to formally", or other AI-isms — the humanizer will strip them, but skipping them yourself saves a hop.
-- Reference the original appeal letter ("as documented in my initial dispute") rather than re-attaching the whole findings list on follow-ups.`;
-
-const SEND_EMAIL_TOOL: Anthropic.Tool = {
-  name: "send_email",
-  description:
-    "Draft and send the next outbound email in the negotiation thread. This sends the message immediately; do not compose a draft and then call this as a preview.",
-  input_schema: {
-    type: "object",
-    required: ["subject", "body_text"],
-    properties: {
-      subject: {
-        type: "string",
-        minLength: 3,
-        description: "Subject line. For replies, preserve the original subject with 'Re: ' prefix.",
-      },
-      body_text: {
-        type: "string",
-        minLength: 50,
-        description:
-          "Plain-text email body. Do NOT use markdown formatting — the message ships as plain text, so any markdown punctuation renders as literal characters in Gmail/Outlook. Forbidden: `**bold**`, `__bold__`, `_italic_`, `*italic*`, `# Headings`, `> blockquotes`, and backticks. Hyphen-space bullets (`- item`) are fine because they read as plain text. Include a greeting, 1–3 short paragraphs, and a signature block.\n\nDo: We're disputing the $900 balance-billing charge on claim CLM-001. Per the EOB, patient responsibility is $100.\nDon't: **We are disputing** the `$900` balance-billing charge on _claim CLM-001_. ## Background — per the EOB, patient responsibility is $100.",
-      },
-    },
-  },
-};
-
-const MARK_RESOLVED_TOOL: Anthropic.Tool = {
-  name: "mark_resolved",
-  description:
-    "Call when the billing department has agreed to correct the account or reduce the balance to an acceptable amount. In autonomous mode this terminates the thread. In co-pilot mode it routes the proposed resolution to the user for accept/push-back. If the rep is asking the user to sign anything binding, set requires_signature=true and the user will always be asked to confirm regardless of mode.",
-  input_schema: {
-    type: "object",
-    required: ["resolution", "final_amount_owed", "notes"],
-    properties: {
-      resolution: {
-        type: "string",
-        enum: ["full_adjustment", "reduced", "no_adjustment"],
-        description:
-          "full_adjustment = balance reduced to EOB responsibility or below; reduced = between EOB and original bill but at/under final_acceptable_floor; no_adjustment = patient conceded original balance (should be rare).",
-      },
-      final_amount_owed: {
-        type: "number",
-        minimum: 0,
-        description: "Final dollar amount the patient owes after resolution.",
-      },
-      notes: {
-        type: "string",
-        minLength: 10,
-        description: "1–3 sentence summary of how we got here and what the provider committed to.",
-      },
-      requires_signature: {
-        type: "boolean",
-        description:
-          "True when the rep is asking the user to sign, initial, or otherwise commit to a binding document (insurance release, debt-settlement agreement, lease addendum, 'reply YES to confirm', etc). When true, the user is ALWAYS asked to review before the resolution is final, even in autonomous mode. When in doubt, set true.",
-      },
-      signature_doc_summary: {
-        type: "string",
-        description:
-          "Required when requires_signature=true. One-sentence plain-English description of what the user is being asked to sign (e.g., 'a release of all future claims related to this hospital stay').",
-      },
-    },
-  },
-};
-
-const ESCALATE_HUMAN_TOOL: Anthropic.Tool = {
-  name: "escalate_human",
-  description:
-    "Call when the situation needs a human: hostile reply, legal threats, deadlock after 3 denials, or unclear/missing info.",
-  input_schema: {
-    type: "object",
-    required: ["reason", "notes"],
-    properties: {
-      reason: {
-        type: "string",
-        enum: ["hostile", "legal", "unclear", "deadlock", "user_judgment_required"],
-      },
-      notes: { type: "string", minLength: 10 },
-    },
-  },
-};
+/**
+ * Render the cross-user provider playbook for this provider, or empty
+ * string when there's nothing yet. Wrapped in a leading "\n\n" so the
+ * skill template's tail-concatenation doesn't need conditionals.
+ *
+ * The brain table only fills up when someone has flipped BONSAI_BRAIN=1
+ * AND BONSAI_BRAIN_HMAC_KEY is set — same gates that guard the write
+ * path. When the table is empty (early adopters, new providers), this
+ * is a single SQLite point lookup that returns null and we emit "".
+ */
+function brainContextBlock(providerName: string | null | undefined): string {
+  if (!providerName) return "";
+  const ctx = renderBrainContext(providerKey(providerName));
+  if (!ctx) return "";
+  return `\n\n${ctx}`;
+}
 
 /**
  * Decide what an agent's `mark_resolved` call becomes on `state.outcome`.
@@ -399,6 +304,25 @@ function renderThreadForClaude(thread: { outbound: SentEmail[]; inbound: Inbound
  * If a field is null we skip it; the humanizer is also told to drop empty
  * placeholders, but providing a tight list helps it decide what to keep.
  */
+/**
+ * Compact "floor=$X; original=$Y" context string used by the
+ * cross-model classifier and adversarial reviewer. Both pass it as a
+ * skill input so they can distinguish concession (at/below floor)
+ * from partial concession (between floor and original).
+ *
+ * Bonsai-internal only — these LLM calls are server-side and the
+ * dollar values are part of the customer's own bill, not cross-user
+ * brain content. The provider-brain PII gate does not apply here.
+ */
+function floorContextString(state: NegotiationState): string {
+  const original = state.analyzer.metadata.bill_current_balance_due;
+  const eob = state.analyzer.metadata.eob_patient_responsibility;
+  const parts = [`floor=$${state.final_acceptable_floor}`];
+  if (original != null) parts.push(`original=$${original}`);
+  if (eob != null) parts.push(`eob_amount=$${eob}`);
+  return parts.join("; ");
+}
+
 function collectPreserveFacts(result: AnalyzerResult): string[] {
   const out: string[] = [];
   const m = result.metadata;
@@ -516,7 +440,6 @@ export async function startNegotiation(opts: StartOpts): Promise<StartResult> {
     is_first_contact: true,
     user_name: analyzer.metadata.patient_name,
     preserve_facts: collectPreserveFacts(analyzer),
-    anthropic: opts.anthropic,
   });
 
   const msg: OutboundEmail = {
@@ -558,6 +481,13 @@ export interface StepOpts {
   /** Override on-disk thread directory. Defaults to out/threads/. Tests
    * use this to point at a tmpdir so parallel runs don't collide. */
   threadsDir?: string;
+  /** Inject mock LLM runners (anthropic / openai). Used by the
+   * cross-modal fact-check pass. Production leaves undefined. */
+  runners?: ProviderRunners;
+  /** Owner of this thread. Used to HMAC-hash for cross-user provider
+   * brain events. Optional — when absent, the brain write path is
+   * skipped. CLI replays and unit tests typically omit it. */
+  user_id?: string;
 }
 
 /**
@@ -587,17 +517,40 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
   );
   const rendered = renderThreadForClaude(thread);
 
+  // Phase 5b: cross-model classifier (gpt-5) gives the agent a structured
+  // prior on what kind of reply this is. No-op when BONSAI_CROSSMODAL is
+  // off; null on any error (fail-open). Injected as an extra block into
+  // the user message — the agent treats it as a hint, not a directive.
+  const latestInbound = inboundSinceLast[inboundSinceLast.length - 1];
+  const lastOutbound = thread.outbound[thread.outbound.length - 1];
+  const classification = await classifyReply({
+    latest_inbound: latestInbound?.body_text ?? "",
+    prior_outbound: lastOutbound?.body_text ?? "(no prior outbound)",
+    bill_kind: state.analyzer.metadata.bill_kind ?? "other",
+    floor_context: floorContextString(state),
+    runners: opts.runners,
+  });
+  const classifierBlock = classifyReplyAsPrior(classification);
+
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
       content:
-        `${context}\n\n## Thread so far (newest inbound is the message to respond to)\n\n${rendered}\n\n## Your task\n\nDecide the next action. Call exactly one of: send_email, mark_resolved, escalate_human.`,
+        `${context}\n\n## Thread so far (newest inbound is the message to respond to)\n\n${rendered}${classifierBlock}\n\n## Your task\n\nDecide the next action. Call exactly one of: send_email, mark_resolved, escalate_human.`,
     },
   ];
 
   let newOutcome: NegotiationOutcome = { status: "in_progress" };
   let terminatedCleanly = false;
   let outboundSentAt: string | undefined;
+  // Cross-modal eval budgets, each independent. Both failures inside a
+  // single step can burn turns separately; MAX_TURNS_PER_STEP caps the
+  // total at 4. Fail-open: when budgets exhaust, ship the draft and
+  // log a cap_violation warning.
+  let factCheckRetries = 0;
+  let adversarialRetries = 0;
+  const MAX_FACT_CHECK_RETRIES = 1;
+  const MAX_ADVERSARIAL_RETRIES = 1;
 
   for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
     const response = await anthropic.messages.create({
@@ -621,6 +574,69 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
       if (block.name === "send_email") {
         const input = block.input as { subject: string; body_text: string };
         const lastInbound = inboundSinceLast[inboundSinceLast.length - 1];
+        const preserveFacts = collectPreserveFacts(state.analyzer);
+        // Cross-modal fact-check (gpt-5) BEFORE humanize. No-op when
+        // BONSAI_CROSSMODAL is unset. On first failure we feed
+        // violations back so Claude redrafts; on a repeat failure we
+        // log and ship the draft anyway. Humanizer can't fix a
+        // fabricated claim number — the redraft has to come from the
+        // negotiation agent.
+        const fc = await factCheck({
+          draft_subject: input.subject,
+          draft_body: input.body_text,
+          preserve_facts: preserveFacts,
+          runners: opts.runners,
+        });
+        if (!fc.passed && factCheckRetries < MAX_FACT_CHECK_RETRIES) {
+          factCheckRetries++;
+          console.warn(
+            `[fact-check.retry] thread=${state.thread_id} violations=${fc.violations.length} — asking agent to redraft`,
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: violationsToFeedback(fc.violations),
+            is_error: true,
+          });
+          // Don't set terminated — the next turn will redraft.
+          continue;
+        }
+        if (!fc.passed) {
+          console.warn(
+            `[fact-check.cap_violation] thread=${state.thread_id} shipping draft after ${factCheckRetries} retry(s) with ${fc.violations.length} unresolved violations`,
+          );
+        }
+        // Phase 6: adversarial-review (gpt-5). Plays the rep, finds
+        // weak points the agent should fix before the email goes out.
+        // Only HIGH-severity weak points trigger a redraft — we don't
+        // burn the budget on minor issues the humanizer would handle.
+        const adv = await adversarialReview({
+          draft_subject: input.subject,
+          draft_body: input.body_text,
+          bill_kind: state.analyzer.metadata.bill_kind ?? "other",
+          prior_outbound: lastOutbound?.body_text ?? "(no prior outbound)",
+          latest_inbound: latestInbound?.body_text ?? "",
+          floor_context: floorContextString(state),
+          runners: opts.runners,
+        });
+        if (!adv.passed && adversarialRetries < MAX_ADVERSARIAL_RETRIES) {
+          adversarialRetries++;
+          console.warn(
+            `[adversarial.retry] thread=${state.thread_id} weak_points=${adv.weak_points.length} — asking agent to redraft`,
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: weakPointsToFeedback(adv.weak_points),
+            is_error: true,
+          });
+          continue;
+        }
+        if (!adv.passed) {
+          console.warn(
+            `[adversarial.cap_violation] thread=${state.thread_id} shipping draft after ${adversarialRetries} retry(s) with ${adv.weak_points.length} unresolved weak points`,
+          );
+        }
         // Humanizer pass on every follow-up. Same contract as the initial
         // letter — preserves grounded facts, applies tone + playbook, strips
         // AI-isms. is_first_contact: false so the humanizer doesn't open
@@ -632,8 +648,7 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
           bill_kind: state.analyzer.metadata.bill_kind,
           is_first_contact: false,
           user_name: state.analyzer.metadata.patient_name,
-          preserve_facts: collectPreserveFacts(state.analyzer),
-          anthropic,
+          preserve_facts: preserveFacts,
         });
         const out: OutboundEmail = {
           to: state.provider_email,
@@ -714,7 +729,61 @@ export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState>
     outcome: newOutcome,
     seq: (state.seq ?? 0) + 1,
   };
+  // Fire-and-forget brain propagation when this step closed the thread.
+  // The propagate runner has its own env gate (BONSAI_BRAIN=1) and
+  // fail-open behavior — if anything errors, the thread closure is
+  // unaffected. We await it (not truly fire-and-forget) so tests can
+  // assert deterministically; in prod the cost is one extra Anthropic
+  // call per closed thread.
+  await maybePropagateBrain(state, nextState, thread, opts.user_id, opts.runners);
   return nextState;
+}
+
+/**
+ * Fire propagate-to-brain when a step transitions a thread into a
+ * terminal outcome (resolved or escalated). awaiting_user_review is
+ * NOT terminal — the user may push back and the brain should record
+ * the FINAL state, not a mid-flight one.
+ *
+ * Coverage gap (closed in Phase 5): co-pilot threads that the user
+ * approves via acceptProposedResolution() also reach `resolved`, but
+ * that path is sync today and not threaded through here. Phase 5's
+ * harness routes every terminal transition through a single chokepoint
+ * so brain propagation fires uniformly.
+ */
+async function maybePropagateBrain(
+  prevState: NegotiationState,
+  nextState: NegotiationState,
+  thread: ThreadState,
+  user_id: string | undefined,
+  runners: ProviderRunners | undefined,
+): Promise<void> {
+  const status = nextState.outcome.status;
+  if (status !== "resolved" && status !== "escalated") return;
+  if (prevState.outcome.status === status) return; // already propagated on a prior step
+  if (!user_id) return; // CLI replays / unit tests without owner: skip
+  const provider = nextState.analyzer.metadata.provider_name;
+  const billKind = nextState.analyzer.metadata.bill_kind;
+  if (!provider) return;
+  await propagateToBrain({
+    provider_display_name: provider,
+    bill_kind: billKind ?? "other",
+    thread_summary: renderThreadForClaude(thread),
+    final_outcome: renderFinalOutcome(nextState.outcome),
+    thread_id: nextState.thread_id,
+    user_id,
+    runners,
+  });
+}
+
+function renderFinalOutcome(outcome: NegotiationOutcome): string {
+  if (outcome.status === "resolved") {
+    return `RESOLVED — resolution=${outcome.resolution}; signature_required=${outcome.requires_signature ? "yes" : "no"}; notes: ${outcome.notes}`;
+  }
+  if (outcome.status === "escalated") {
+    return `ESCALATED — reason=${outcome.reason}; notes: ${outcome.notes}`;
+  }
+  return `STATUS: ${outcome.status}`;
 }
 
 export interface UserPushBackOpts {
@@ -725,6 +794,12 @@ export interface UserPushBackOpts {
   note: string;
   anthropic?: Anthropic;
   threadsDir?: string;
+  /** Inject mock LLM runners (anthropic / openai). Used by the
+   * cross-modal fact-check pass. Production leaves undefined. */
+  runners?: ProviderRunners;
+  /** Owner of this thread. Used to HMAC-hash for cross-user provider
+   * brain events. Optional. */
+  user_id?: string;
 }
 
 /**
@@ -792,16 +867,39 @@ export async function stepNegotiationOnUserPushBack(
     push_back_count: currentPushBacks + 1,
   };
 
+  // Phase 5b: classifier prior on the rep's last reply (if any). On
+  // a push-back step there's no NEW inbound, so we classify the most
+  // recent inbound on the thread — that's the message the user is
+  // pushing back about.
+  const lastInboundPb = thread.inbound[thread.inbound.length - 1];
+  const lastOutboundPb = thread.outbound[thread.outbound.length - 1];
+  const classification = lastInboundPb
+    ? await classifyReply({
+        latest_inbound: lastInboundPb.body_text,
+        prior_outbound: lastOutboundPb?.body_text ?? "(no prior outbound)",
+        bill_kind: state.analyzer.metadata.bill_kind ?? "other",
+        floor_context: floorContextString(state),
+        runners: opts.runners,
+      })
+    : null;
+  const classifierBlock = classifyReplyAsPrior(classification);
+
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
-      content: `${context}\n\n## Thread so far\n\n${rendered}\n\n## User push-back\n\nThe user reviewed your previous proposed resolution and pushed back. Their note: "${trimmedNote || "(no specific guidance)"}".\n\nCompose the next outbound message that pushes back on the rep's last offer, incorporating the user's guidance. Call send_email with the next message; do NOT call mark_resolved on this turn (the user just rejected the prior resolution).`,
+      content: `${context}\n\n## Thread so far\n\n${rendered}${classifierBlock}\n\n## User push-back\n\nThe user reviewed your previous proposed resolution and pushed back. Their note: "${trimmedNote || "(no specific guidance)"}".\n\nCompose the next outbound message that pushes back on the rep's last offer, incorporating the user's guidance. Call send_email with the next message; do NOT call mark_resolved on this turn (the user just rejected the prior resolution).`,
     },
   ];
 
   let outboundSentAt: string | undefined;
   let nextOutcome: NegotiationOutcome = { status: "in_progress" };
   let terminated = false;
+  // Same fact-check + adversarial budgets as stepNegotiation: one retry
+  // each, then ship with a logged warning.
+  let factCheckRetries = 0;
+  let adversarialRetries = 0;
+  const MAX_FACT_CHECK_RETRIES = 1;
+  const MAX_ADVERSARIAL_RETRIES = 1;
 
   for (let turn = 0; turn < MAX_TURNS_PER_STEP; turn++) {
     const response = await anthropic.messages.create({
@@ -823,6 +921,61 @@ export async function stepNegotiationOnUserPushBack(
       if (block.name === "send_email") {
         const input = block.input as { subject: string; body_text: string };
         const lastInbound = thread.inbound[thread.inbound.length - 1];
+        const preserveFacts = collectPreserveFacts(state.analyzer);
+        const fc = await factCheck({
+          draft_subject: input.subject,
+          draft_body: input.body_text,
+          preserve_facts: preserveFacts,
+          runners: opts.runners,
+        });
+        if (!fc.passed && factCheckRetries < MAX_FACT_CHECK_RETRIES) {
+          factCheckRetries++;
+          console.warn(
+            `[fact-check.retry] thread=${state.thread_id} pushback violations=${fc.violations.length} — asking agent to redraft`,
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: violationsToFeedback(fc.violations),
+            is_error: true,
+          });
+          continue;
+        }
+        if (!fc.passed) {
+          console.warn(
+            `[fact-check.cap_violation] thread=${state.thread_id} pushback shipping after ${factCheckRetries} retry(s) with ${fc.violations.length} unresolved violations`,
+          );
+        }
+        // Phase 6: adversarial-review on the push-back path too. The
+        // lastInboundPb / lastOutboundPb were captured at the top of
+        // the function before the loop started.
+        const adv = await adversarialReview({
+          draft_subject: input.subject,
+          draft_body: input.body_text,
+          bill_kind: state.analyzer.metadata.bill_kind ?? "other",
+          prior_outbound: lastOutboundPb?.body_text ?? "(no prior outbound)",
+          latest_inbound: lastInboundPb?.body_text ?? "",
+          floor_context: floorContextString(state),
+          runners: opts.runners,
+        });
+        if (!adv.passed && adversarialRetries < MAX_ADVERSARIAL_RETRIES) {
+          adversarialRetries++;
+          console.warn(
+            `[adversarial.retry] thread=${state.thread_id} pushback weak_points=${adv.weak_points.length} — asking agent to redraft`,
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: weakPointsToFeedback(adv.weak_points),
+            is_error: true,
+          });
+          continue;
+        }
+        if (!adv.passed) {
+          console.warn(
+            `[adversarial.cap_violation] thread=${state.thread_id} pushback shipping after ${adversarialRetries} retry(s) with ${adv.weak_points.length} unresolved weak points`,
+          );
+        }
         const humanized = await humanize({
           body: input.body_text,
           subject: input.subject,
@@ -830,8 +983,7 @@ export async function stepNegotiationOnUserPushBack(
           bill_kind: state.analyzer.metadata.bill_kind,
           is_first_contact: false,
           user_name: state.analyzer.metadata.patient_name,
-          preserve_facts: collectPreserveFacts(state.analyzer),
-          anthropic,
+          preserve_facts: preserveFacts,
         });
         const out: OutboundEmail = {
           to: state.provider_email,
@@ -887,7 +1039,7 @@ export async function stepNegotiationOnUserPushBack(
     };
   }
 
-  return {
+  const nextState: NegotiationState = {
     ...state,
     user_directives: newDirectives,
     push_back_count: currentPushBacks + 1,
@@ -895,6 +1047,8 @@ export async function stepNegotiationOnUserPushBack(
     email_outbound_sent_at: outboundSentAt ?? state.email_outbound_sent_at,
     seq: (state.seq ?? 0) + 1,
   };
+  await maybePropagateBrain(state, nextState, thread, opts.user_id, opts.runners);
+  return nextState;
 }
 
 /**

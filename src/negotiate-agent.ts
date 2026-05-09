@@ -97,6 +97,9 @@ export interface RunNegotiationAgentOpts {
    * NegotiationState so the persistent-mode advance pass can correlate
    * a stale email thread back to its run for voice escalation. */
   run_id?: string;
+  /** Owner of this thread. Forwarded to stepNegotiation so brain
+   * propagation can HMAC-hash on terminal states. */
+  user_id?: string;
   anthropic?: Anthropic;
 }
 
@@ -127,6 +130,7 @@ async function runEmailAttempt(opts: {
   prior_attempts_summary?: string;
   cc?: string[];
   run_id?: string;
+  user_id?: string;
   anthropic: Anthropic;
 }): Promise<{ attempt: NegotiationAttempt; view: PersistentNegotiationResult["email"] }> {
   // Pick Resend if env is configured, else fall back to MockEmailClient.
@@ -170,7 +174,12 @@ async function runEmailAttempt(opts: {
         client: client as MockEmailClient,
         anthropic: opts.anthropic,
       });
-      state = await stepNegotiation({ state, client, anthropic: opts.anthropic });
+      state = await stepNegotiation({
+        state,
+        client,
+        anthropic: opts.anthropic,
+        user_id: opts.user_id,
+      });
       saveNegotiationState(state);
       turns = round;
       if (state.outcome.status !== "in_progress") break;
@@ -321,6 +330,7 @@ export async function runNegotiationAgent(
         agent_mode: opts.agent_mode,
         cc: opts.cc,
         run_id: opts.run_id,
+        user_id: opts.user_id,
         anthropic,
       });
       attempts.push(attempt);

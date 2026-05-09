@@ -1889,7 +1889,13 @@ async function handlePushBackProposal(req: Request, thread_id: string): Promise<
       return Response.json({ ok: true, status: state.outcome.status, seq: state.seq ?? 0 });
     }
     const client = await autoEmailClient(threadsDir);
-    const next = await stepNegotiationOnUserPushBack({ state, client, note, threadsDir });
+    const next = await stepNegotiationOnUserPushBack({
+      state,
+      client,
+      note,
+      threadsDir,
+      user_id: userId,
+    });
     saveNegotiationState(next, threadsDir);
     if (next.outcome.status === "escalated") {
       try {
