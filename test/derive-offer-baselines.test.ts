@@ -83,11 +83,41 @@ describe("deriveOfferBaselines", () => {
     expect(result.find((b) => b.category === "insurance_plan")).toBeDefined();
   });
 
-  test("bill_kind=utility yields no baseline (no current OfferCategory)", () => {
+  test("bill_kind=utility + PG&E yields an electricity baseline", () => {
     const result = deriveOfferBaselines(
       audit({ provider_name: "PG&E", bill_current_balance_due: 240, bill_kind: "utility" }),
     );
-    expect(result).toEqual([]);
+    expect(result.find((b) => b.category === "electricity")).toBeDefined();
+    expect(result[0].cadence).toBe("monthly");
+  });
+
+  test("bill_kind=telecom + Comcast yields an internet baseline", () => {
+    const result = deriveOfferBaselines(
+      audit({ provider_name: "Comcast Xfinity", bill_current_balance_due: 85, bill_kind: "telecom" }),
+    );
+    expect(result.find((b) => b.category === "internet")).toBeDefined();
+  });
+
+  test("bill_kind=insurance + Geico yields a car_insurance baseline", () => {
+    const result = deriveOfferBaselines(
+      audit({ provider_name: "Geico", bill_current_balance_due: 250, bill_kind: "insurance" }),
+    );
+    expect(result.find((b) => b.category === "car_insurance")).toBeDefined();
+  });
+
+  test("bill_kind=financial + Rocket Mortgage yields a mortgage_refi baseline", () => {
+    const result = deriveOfferBaselines(
+      audit({ provider_name: "Rocket Mortgage", bill_current_balance_due: 2100, bill_kind: "financial" }),
+    );
+    expect(result.find((b) => b.category === "mortgage_refi")).toBeDefined();
+  });
+
+  test("unrecognized non-medical provider falls back to the bill_kind default", () => {
+    const result = deriveOfferBaselines(
+      audit({ provider_name: "Obscure Local ISP LLC", bill_current_balance_due: 70, bill_kind: "telecom" }),
+    );
+    // telecom default is internet
+    expect(result.find((b) => b.category === "internet")).toBeDefined();
   });
 
   test("missing provider_name yields no baseline", () => {
