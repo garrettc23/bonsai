@@ -167,6 +167,28 @@ export function getDb(): Database {
     );
     CREATE INDEX IF NOT EXISTS provider_brain_events_provider_idx
       ON provider_brain_events(provider_key, occurred_at);
+
+    -- Per-user autonomy consent (Workstream A3). Governs whether Bonsai may
+    -- act WITHOUT a human in the loop. Stored in SQLite (not the file-based
+    -- user-settings) because the email-ingestion webhook reads it outside any
+    -- authenticated request context, keyed by user_id. Default for users with
+    -- no row is "copilot" (resolved in code) — safe by default.
+    CREATE TABLE IF NOT EXISTS autonomy_consent (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL,
+      auto_send_ceiling_usd REAL NOT NULL DEFAULT 0,
+      allowed_categories TEXT NOT NULL DEFAULT '[]',
+      updated_at INTEGER NOT NULL
+    );
+
+    -- Idempotency ledger for inbound email ingestion (Workstream A2). One row
+    -- per Resend message_id we've already processed, so a provider re-delivery
+    -- can't create a duplicate audit/negotiation.
+    CREATE TABLE IF NOT EXISTS ingested_messages (
+      message_id TEXT PRIMARY KEY,
+      user_id TEXT,
+      received_at INTEGER NOT NULL
+    );
   `);
   // Light-touch column migrations for users — older DBs (pre-email-
   // verification, pre-terms-acceptance) already have a `users` table from

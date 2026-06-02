@@ -13,13 +13,19 @@
 import { z } from "zod";
 
 export const ErrorType = z.enum([
-  "duplicate",          // Same CPT+date charged twice in the bill
+  // --- Medical (EOB-grounded) ---
+  "duplicate",          // Same CPT+date charged twice in the bill (also cross-category)
   "denied_service",     // EOB explicitly denied this line; bill still charges
   "balance_billing",    // Bill's patient portion exceeds EOB's stated responsibility
   "unbundling",         // Line should have been bundled into facility fee
   "qty_mismatch",       // Quantity on bill doesn't match EOB quantity
   "eob_mismatch",       // Bill line amount differs from EOB allowed amount (non-denial)
   "overcharge",         // Above market benchmark (e.g. Medicare PFS) — low-signal only
+  // --- Non-medical (bill-grounded, no EOB). Added by Workstream B so the
+  // analyzer engine is category-capable, not medical-only. ---
+  "unauthorized_charge", // A line for a service/add-on the customer never ordered
+  "expired_promo",       // Intro/promo rate ended but the bill charges above the advertised/agreed rate
+  "fee_waiver",          // A late/convenience/admin fee that is routinely waivable (low-signal)
 ]);
 export type ErrorType = z.infer<typeof ErrorType>;
 
@@ -40,6 +46,29 @@ export const HIGH_CONFIDENCE_TYPES: ErrorType[] = [
   "denied_service",
   "balance_billing",
 ];
+
+/**
+ * Non-medical HIGH-confidence types. These are defensible from the bill
+ * alone (no EOB): a duplicate line, a charge the customer never ordered, or
+ * a charge above the advertised/agreed promo rate. fee_waiver, overcharge,
+ * etc. stay WORTH_REVIEWING — worth surfacing, not worth escalating on their
+ * own.
+ */
+const NON_MEDICAL_HIGH_TYPES: ErrorType[] = [
+  "duplicate",
+  "unauthorized_charge",
+  "expired_promo",
+];
+
+/**
+ * The HIGH-confidence rubric depends on the bill kind. Medical bills are
+ * graded against the EOB (denied_service, balance_billing); non-medical
+ * bills are graded against the bill itself. Defaults to the medical set so
+ * existing callers (and the analyzer's medical path) are unchanged.
+ */
+export function highTypesForKind(kind: BillKind = "medical"): ErrorType[] {
+  return kind === "medical" ? HIGH_CONFIDENCE_TYPES : NON_MEDICAL_HIGH_TYPES;
+}
 
 export const BillingError = z.object({
   line_quote: z.string().min(8).describe(
