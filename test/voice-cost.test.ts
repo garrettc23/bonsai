@@ -26,7 +26,9 @@ import { dialVoiceForUser } from "../src/server/voice-dial.ts";
 import { ensureUserDirs, userPaths } from "../src/lib/user-paths.ts";
 import { withUserContext } from "../src/lib/user-context.ts";
 import { createUser } from "../src/lib/auth.ts";
+import { setProfileConfig } from "../src/lib/user-settings.ts";
 import { addSpend } from "../src/lib/voice-spend.ts";
+import type { ElevenLabsAgentConfig } from "../src/voice/agent-config.ts";
 import type { AnalyzerResult } from "../src/types.ts";
 
 const TEST_DIR = join(tmpdir(), `bonsai-voice-cost-${process.pid}-${Date.now()}`);
@@ -225,5 +227,93 @@ describe("dial gates", () => {
     expect(result.dry_run).toBe(true);
     expect(result.conversation_id).toMatch(/^dryrun_/);
     expect(result.agent_id).toBe("agent-test");
+  });
+});
+
+describe("loop-me-in phone resolution (opt vs profile)", () => {
+  // A capturing stub records the agent config dialVoiceForUser hands to
+  // createAgent, so we can assert whether the transfer tool got wired in.
+  function capturingClient() {
+    let captured: ElevenLabsAgentConfig | null = null;
+    return {
+      get config() {
+        return captured;
+      },
+      client: {
+        async createAgent(config: ElevenLabsAgentConfig) {
+          captured = config;
+          return { agent_id: "agent-test" };
+        },
+      },
+    };
+  }
+
+  const toolNames = (cfg: ElevenLabsAgentConfig | null): string[] =>
+    (cfg?.conversation_config.agent.prompt.tools ?? []).map((t) => t.name);
+
+  test("explicit account_holder_phone enables transfer_to_number", async () => {
+    const user = await createUser(`ph1-${Date.now()}@test.example`, "supersecret", { acceptedTerms: true });
+    ensureUserDirs(userPaths(user.id));
+    const cap = capturingClient();
+    await withUserContext(user, () =>
+      dialVoiceForUser(user, {
+        run_id: "run-ph1",
+        analyzer: fakeAnalyzer(),
+        provider_phone: "+15555550100",
+        account_holder_phone: "(415) 555-0132",
+        agent_client: cap.client,
+      }),
+    );
+    expect(toolNames(cap.config)).toContain("transfer_to_number");
+    expect(toolNames(cap.config)).toContain("record_live_transfer");
+  });
+
+  test("explicit null phone forces no-transfer even if profile has one", async () => {
+    const user = await createUser(`ph2-${Date.now()}@test.example`, "supersecret", { acceptedTerms: true });
+    ensureUserDirs(userPaths(user.id));
+    const cap = capturingClient();
+    await withUserContext(user, async () => {
+      setProfileConfig({ phone: "+14155550132" });
+      await dialVoiceForUser(user, {
+        run_id: "run-ph2",
+        analyzer: fakeAnalyzer(),
+        provider_phone: "+15555550100",
+        account_holder_phone: null,
+        agent_client: cap.client,
+      });
+    });
+    expect(toolNames(cap.config)).not.toContain("transfer_to_number");
+  });
+
+  test("omitted phone resolves from the saved profile", async () => {
+    const user = await createUser(`ph3-${Date.now()}@test.example`, "supersecret", { acceptedTerms: true });
+    ensureUserDirs(userPaths(user.id));
+    const cap = capturingClient();
+    await withUserContext(user, async () => {
+      setProfileConfig({ phone: "415-555-0132" });
+      await dialVoiceForUser(user, {
+        run_id: "run-ph3",
+        analyzer: fakeAnalyzer(),
+        provider_phone: "+15555550100",
+        agent_client: cap.client,
+      });
+    });
+    expect(toolNames(cap.config)).toContain("transfer_to_number");
+  });
+
+  test("no phone anywhere omits the transfer tool", async () => {
+    const user = await createUser(`ph4-${Date.now()}@test.example`, "supersecret", { acceptedTerms: true });
+    ensureUserDirs(userPaths(user.id));
+    const cap = capturingClient();
+    await withUserContext(user, () =>
+      dialVoiceForUser(user, {
+        run_id: "run-ph4",
+        analyzer: fakeAnalyzer(),
+        provider_phone: "+15555550100",
+        agent_client: cap.client,
+      }),
+    );
+    expect(toolNames(cap.config)).not.toContain("transfer_to_number");
+    expect(toolNames(cap.config)).not.toContain("record_live_transfer");
   });
 });
