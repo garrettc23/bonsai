@@ -33,6 +33,19 @@ import {
 import { normalizeBillFile, thumbnailBillBytes } from "./lib/extract-bill.ts";
 import { transcribeBill } from "./lib/transcribe-bill.ts";
 import { groundTruthFromText } from "./lib/ground-truth.ts";
+import { channelInventoryLine } from "./lib/channel-inventory.ts";
+import { startAutonomyScheduler } from "./server/scheduler.ts";
+import {
+  ingestForwardedEmail,
+  defaultResolveUser,
+  userIdFromIngestAddresses,
+  claimMessageForIngest,
+  type ForwardedEmail,
+  type ForwardedAttachment,
+} from "./server/ingest-email.ts";
+import { processIngestedBill, type AuditedIngest } from "./server/ingest-pipeline.ts";
+import { getConsent, setConsent } from "./lib/autonomy-consent-store.ts";
+import { verifySvixSignature } from "./server/webhooks.ts";
 import { extractPdfText, ScannedPdfError } from "./lib/pdf-extract.ts";
 import type { AnalyzeInput } from "./lib/fixture-audit.ts";
 import type { Persona as EmailPersona } from "./simulate-reply.ts";
@@ -3614,6 +3627,191 @@ const PUBLIC_API_PATHS = new Set([
   "/api/public-config",
 ]);
 
+// ---------------------------------------------------------------------------
+// Autonomy consent API (Workstream A3) + email-forwarding ingestion (A2).
+// ---------------------------------------------------------------------------
+
+function handleGetConsent(user: User | null): Response {
+  if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
+  return Response.json({ consent: getConsent(user.id) });
+}
+
+async function handleSetConsent(req: Request): Promise<Response> {
+  const user = requireUser(req);
+  if (!user) return Response.json({ error: "unauthorized" }, { status: 401 });
+  const body = (await req.json()) as {
+    mode?: unknown;
+    auto_send_ceiling_usd?: unknown;
+    allowed_categories?: unknown;
+  };
+  // setConsent sanitizes everything (bad mode → copilot, etc.), so we pass
+  // the raw body straight through and echo the normalized result.
+  const stored = setConsent(user.id, body as Parameters<typeof setConsent>[1]);
+  return Response.json({ consent: stored });
+}
+
+/**
+ * Tolerant parse of Resend inbound shapes (string | {email} | arrays).
+ * Kept local so the ingest route doesn't depend on webhooks.ts internals.
+ */
+function ingestEmailString(v: { email?: string } | string | undefined): string {
+  if (!v) return "";
+  return typeof v === "string" ? v : (v.email ?? "");
+}
+function ingestEmailList(v: Array<{ email?: string } | string> | string | undefined): string[] {
+  if (!v) return [];
+  if (typeof v === "string") return [v];
+  return v.map(ingestEmailString).filter((s) => s.length > 0);
+}
+
+/**
+ * Audit a forwarded bill's bytes and persist a PendingRun. Mirrors the upload
+ * audit path (handleAudit) for the no-multipart case. Runs inside the target
+ * user's path context. Returns the facts the consent disposition needs.
+ */
+async function auditForwardedBillBytes(input: {
+  user: User;
+  filename: string;
+  content_base64: string;
+  bill_kind: BillKind;
+}): Promise<AuditedIngest> {
+  mkdirSync(uploadDir(), { recursive: true });
+  const uploadId = `ingest_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const ext = extensionOf(input.filename) ?? "pdf";
+  const billPath = join(uploadDir(), `${uploadId}-bill.${ext}`);
+  writeFileSync(billPath, Buffer.from(input.content_base64, "base64"));
+
+  const normalized = await normalizeBillFile(billPath, input.filename);
+  const transcript = await transcribeBill({ bill: normalized, role: "bill" });
+  const fixtureName = safeIdFromFilename(input.filename, uploadId);
+
+  const partial = await runAuditPhase({
+    billPdfPath: billPath,
+    billFixtureName: fixtureName,
+    analyzeInput: {
+      bill: [normalized],
+      eob: undefined,
+      billGroundTruth: groundTruthFromText(transcript, billPath),
+    },
+    channel: "persistent",
+    bill_kind: input.bill_kind,
+  });
+
+  const run: PendingRun = {
+    run_id: newRunId(),
+    fixture_name: fixtureName,
+    bill_path: billPath,
+    bill_paths: [billPath],
+    bill_names: [input.filename],
+    channel: "persistent",
+    partial_report: partial,
+    qa: [],
+    created_at: Date.now(),
+    status: "audited",
+    contact_status: "pending",
+    display_name: `Forwarded: ${input.filename}`,
+  };
+  savePending(run);
+  // Resolve provider contact in the background — same as an upload audit.
+  kickoffContactResolution(run.run_id).catch((err) =>
+    console.error(`[ingest contact ${run.run_id}]`, err),
+  );
+
+  return {
+    run_id: run.run_id,
+    high_confidence_total: partial?.analyzer?.summary?.high_confidence_total ?? 0,
+    has_contact: hasContactChannel(run.contact),
+  };
+}
+
+/** Flip an ingested run to negotiating and launch the agent. */
+async function startIngestedNegotiation(run_id: string): Promise<void> {
+  const run = loadPending(run_id);
+  if (!run) return;
+  run.status = "negotiating";
+  run.approved_at = Date.now();
+  savePending(run);
+  await kickoffNegotiation(run_id);
+}
+
+/**
+ * Live email-forwarding ingestion webhook (Workstream A2). A user forwards a
+ * bill to `bills+<userId>@<ingest-domain>`; Resend posts it here. We verify
+ * the signature, dedupe by message_id, route to the owner, and hand the bill
+ * to the consent-gated pipeline — all heavy work backgrounded so we ack fast.
+ */
+async function handleIngestEmail(req: Request): Promise<Response> {
+  const body = await req.text();
+  const secret = process.env.RESEND_WEBHOOK_SECRET;
+  if (secret) {
+    const ok = verifySvixSignature({
+      secret,
+      svixId: req.headers.get("svix-id") ?? "",
+      svixTimestamp: req.headers.get("svix-timestamp") ?? "",
+      svixSignature: req.headers.get("svix-signature") ?? "",
+      body,
+    });
+    if (!ok) return Response.json({ error: "invalid signature" }, { status: 401 });
+  } else if (process.env.NODE_ENV === "production") {
+    return Response.json({ error: "RESEND_WEBHOOK_SECRET not configured" }, { status: 500 });
+  } else {
+    console.warn("[ingest] RESEND_WEBHOOK_SECRET not set — accepting inbound without verification (dev only)");
+  }
+
+  let payload: {
+    data?: {
+      from?: { email?: string } | string;
+      to?: Array<{ email?: string } | string> | string;
+      subject?: string;
+      message_id?: string;
+      attachments?: Array<{ filename?: string; content_type?: string; content?: string; content_base64?: string }>;
+    };
+  };
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return Response.json({ error: "invalid json" }, { status: 400 });
+  }
+
+  const data = payload.data ?? {};
+  const to = ingestEmailList(data.to);
+  const from = ingestEmailString(data.from);
+  const attachments: ForwardedAttachment[] = (data.attachments ?? [])
+    .filter((a) => a && typeof a.filename === "string")
+    .map((a) => ({
+      filename: a.filename as string,
+      content_type: a.content_type,
+      content_base64: a.content_base64 ?? a.content ?? "",
+    }));
+  const email: ForwardedEmail = { to, from, subject: data.subject, attachments };
+
+  // Idempotency: a re-delivered webhook must not spawn a second audit.
+  const claimedUser = userIdFromIngestAddresses(to) ?? undefined;
+  if (!claimMessageForIngest(data.message_id, claimedUser)) {
+    return Response.json({ ok: true, deduped: true });
+  }
+
+  // Background the heavy work (audit hits the model); ack the webhook now.
+  void ingestForwardedEmail(email, {
+    resolveUser: defaultResolveUser,
+    onBillReceived: async ({ user, filename, content_base64 }) => {
+      await processIngestedBill(
+        { user, filename, content_base64 },
+        {
+          audit: (a) => withUserContext(a.user, () => auditForwardedBillBytes(a)),
+          startNegotiation: (rid) => withUserContext(user, () => startIngestedNegotiation(rid)),
+        },
+      );
+    },
+    onDropped: async ({ reason, from: f, to: t }) => {
+      // Surfaced, never silent: ops-visible dead-letter line.
+      console.error(`[ingest-dropped] ${reason} | from=${f} to=${t.join(",")}`);
+    },
+  }).catch((err) => console.error("[ingest] processing failed:", err));
+
+  return Response.json({ ok: true });
+}
+
 // Fail-fast on missing required env. The Anthropic SDK only complains
 // when the first audit fires, which is a confusing place for a "missing
 // API key" error to land. Catch it at boot so the operator gets a clear
@@ -3681,6 +3879,9 @@ const server = Bun.serve({
       // Resend's inbound webhook is unauthenticated — it carries an svix
       // HMAC signature instead of a session cookie. Lives outside the auth
       // gate so the email rep's reply lands without a 401.
+      if (req.method === "POST" && url.pathname === "/webhooks/ingest-email") {
+        return handleIngestEmail(req);
+      }
       if (req.method === "POST" && url.pathname === "/webhooks/resend-inbound") {
         const { handleResendInbound } = await import("./server/webhooks.ts");
         return handleResendInbound(req);
@@ -3735,6 +3936,8 @@ const server = Bun.serve({
         if (req.method === "GET" && url.pathname === "/api/fixtures") return handleListFixtures();
         if (req.method === "GET" && url.pathname === "/api/history") return handleHistory();
         if (req.method === "GET" && url.pathname === "/api/receipts") return handleReceipts();
+        if (req.method === "GET" && url.pathname === "/api/autonomy/consent") return handleGetConsent(requireUser(req));
+        if (req.method === "POST" && url.pathname === "/api/autonomy/consent") return handleSetConsent(req);
         if (req.method === "GET" && url.pathname === "/api/settings") return handleSettings();
         if (req.method === "POST" && url.pathname === "/api/settings/profile") return handleSaveProfile(req);
         if (req.method === "POST" && url.pathname === "/api/settings/tune") return handleSaveTune(req);
@@ -3817,8 +4020,10 @@ const server = Bun.serve({
 });
 
 console.log(`Bonsai server listening on http://localhost:${server.port}`);
+console.log(channelInventoryLine());
 
 scheduleBackups();
+startAutonomyScheduler();
 
 /**
  * Nightly backup scheduler. Disabled (no-op) when the four `BACKUP_S3_*`

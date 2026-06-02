@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.3.0.0] - 2026-06-02
+## [0.4.0.0] - 2026-06-02
 
 ### Added
 - **Ask Bonsai to price-check any recurring bill, no upload needed.** Type "I pay $250/mo for car insurance with State Farm" (or Comcast internet, or a 7% mortgage you want to refinance) into the Comparison tab and Bonsai parses it, then hunts for equivalent alternatives. Works across car/home insurance, internet, mobile, electricity, gas, streaming, mortgage refi, credit cards, and the existing medical categories — not just bills it parsed from a PDF. New `POST /api/compare` endpoint, rate-limited per user.
@@ -20,6 +20,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 - **`terms_url` is validated to http(s) before it can render as a link**, closing a `javascript:`-URL XSS path reachable through prompt injection. Untrusted offer fields are escaped, length-bounded, and clamped (no negative effective costs, capped baseline price). `POST /api/compare` is rate-limited per user.
+
+## [0.3.0.0] - 2026-06-02
+
+### Added
+- **Bills can arrive on their own — forward one and Bonsai takes it from there.** New email-ingestion webhook (`POST /webhooks/ingest-email`): forward a bill to `bills+<your-id>@<ingest-domain>` and Bonsai verifies the signature, dedupes re-deliveries, pulls the PDF, audits it, and lands it as a pending run. A forward that can't be routed or has no PDF is surfaced (dead-letter line), never silently dropped. The wedge: you stop uploading bills by hand.
+- **The agent can run on a clock, not just when you open the app.** New autonomy scheduler sweeps every user's persistent negotiations on an interval and advances them (e.g. escalates email→voice after 24 working hours of silence) with no human in the loop. Off by default — set `BONSAI_AUTONOMY=1`. An overlap guard means a slow sweep never stacks on the next tick.
+- **You decide what Bonsai may do without asking.** New consent boundary (`GET`/`POST /api/autonomy/consent`, persisted per-user in SQLite): `off` / `copilot` / `autonomous`, scoped by bill category and capped by a per-dispute dollar ceiling. Default is **copilot** — Bonsai drafts, you approve every send. Even in autonomous mode it never sends without resolved provider contact.
+- **The bill analyzer is no longer medical-only.** Category rule-packs for utility, telecom, and subscription bills (generic pack for insurance/financial/other) find grounded errors — unauthorized charges, expired promos, duplicates — quoting the bill verbatim, same grounding contract as the medical path. `analyze({ billKind })` selects the rule source; medical behavior is byte-for-byte unchanged.
+
+### Changed
+- **A real phone call can't assert a fabricated claim anymore.** Before placing a live voice call, Bonsai fact-checks the grounded claims the agent is scripted to speak and refuses to dial if they don't hold up (symmetric with the email redraft gate). Gated by `BONSAI_CROSSMODAL=1`, fail-open on verifier outage.
+- **The boot log tells you whether you're live or simulated.** New `[channels] email: REAL/SIMULATED | voice: … | cross-modal: … | provider-brain: …` line at startup — no more guessing whether a build actually contacts vendors.
+- **One place builds the Anthropic client.** `analyzer.ts` and `negotiate-email.ts` stopped each calling `new Anthropic()` directly; both route through the shared `getAnthropicClient()` accessor. Behavior-preserving; the full multi-turn `callLLM` migration of the negotiation loop remains a tracked follow-up.
+
+### Infrastructure
+- New SQLite tables: `autonomy_consent` (per-user, FK + cascade) and `ingested_messages` (ingestion idempotency ledger). Created on init via `CREATE TABLE IF NOT EXISTS`.
+- New env: `BONSAI_AUTONOMY` (scheduler on/off), `BONSAI_AUTONOMY_INTERVAL_MIN` (default 15). All new behaviors are off / copilot by default — turning autonomy on is an explicit ops choice, and real sending stays consent-gated.
+- The analyzer's detection logic — the trust contract that every claim is quoted from the bill — now has unit tests for the first time, plus tests for ground-truth, the non-medical/goodwill branch, orchestrator audit e2e, the voice fact-check gate, the real Resend wire path, consent persistence, the ingestion idempotency ledger, and the consent-gated ingestion disposition. ~50 new tests (571 → 621), `tsc` clean.
 
 ## [0.2.0.0] - 2026-05-09
 

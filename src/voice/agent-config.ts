@@ -82,6 +82,12 @@ function speakable(e: BillingError): string {
       return `${cpt} amount on the bill doesn't match the EOB allowed amount. ${dollars}.`;
     case "overcharge":
       return `${cpt} is above market benchmark. ${dollars}.`;
+    case "unauthorized_charge":
+      return `${cpt} is a charge the account holder never ordered. ${dollars} that should be removed.`;
+    case "expired_promo":
+      return `${cpt} is billed above the agreed/advertised rate after a promotional period. ${dollars} difference.`;
+    case "fee_waiver":
+      return `${cpt} is a fee that is routinely waived on request. ${dollars}.`;
   }
 }
 
