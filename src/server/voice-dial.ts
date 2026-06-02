@@ -40,6 +40,57 @@ import { rateLimit } from "../lib/rate-limit.ts";
 import type { User } from "../lib/auth.ts";
 import type { AnalyzerResult, BillKind } from "../types.ts";
 import { stateCallIdFor } from "./voice-webhooks.ts";
+import { generateAgentConfig } from "../voice/agent-config.ts";
+import { factCheck, violationsToFeedback } from "../skills/_harness/run-fact-check.ts";
+import { collectPreserveFacts } from "../negotiate-email.ts";
+import type { ProviderRunners } from "../llm/provider.ts";
+
+/**
+ * Pre-dial fact-check gate for REAL voice calls. The email loop redrafts
+ * before sending when fact-check fails; a live phone agent can't redraft
+ * mid-call, so the symmetric safety move is to verify the grounded claims
+ * the agent is scripted to speak (its first message + system prompt) survive
+ * cross-modal fact-check, and REFUSE TO DIAL if they don't. Closes the audit
+ * gap: "a real call can assert a fabricated claim under the user's name with
+ * no check."
+ *
+ * Gated by BONSAI_CROSSMODAL — factCheck returns skipped=true when off, so
+ * this is a no-op until ops enables cross-modal eval. Fail-open on verifier
+ * error (factCheck swallows OpenAI outages → passed): a verifier hiccup must
+ * never block a legitimate call.
+ *
+ * `runners` is a test seam (mirrors factCheck's). Production omits it and
+ * gets the real OpenAI runner.
+ */
+export async function voiceClaimsFactCheck(
+  opts: {
+    analyzer: AnalyzerResult;
+    webhook_base_url: string;
+    webhook_secret: string;
+    bill_kind?: BillKind;
+    account_holder_name: string | null;
+    final_acceptable_floor?: number;
+  },
+  runners?: ProviderRunners,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const cfg = generateAgentConfig({
+    result: opts.analyzer,
+    webhook_base_url: opts.webhook_base_url,
+    webhook_secret: opts.webhook_secret,
+    bill_kind: opts.bill_kind,
+    account_holder_name: opts.account_holder_name,
+    final_acceptable_floor: opts.final_acceptable_floor,
+  });
+  const prompt = cfg.conversation_config.agent.prompt.prompt;
+  const firstMessage = cfg.conversation_config.agent.first_message;
+  const res = await factCheck({
+    draft_subject: "voice call opening + scripted claims",
+    draft_body: `${firstMessage}\n\n${prompt}`,
+    preserve_facts: collectPreserveFacts(opts.analyzer),
+    runners,
+  });
+  return res.passed ? { ok: true } : { ok: false, detail: violationsToFeedback(res.violations) };
+}
 
 export const VOICE_DAILY_LIMIT_DEFAULT = 5;
 
@@ -219,6 +270,20 @@ export async function dialVoiceForUser(
       agent_id: cached.agent_id,
       agent_cached: cached.cached,
     };
+  }
+
+  // Real-call fact-check gate (no-op unless BONSAI_CROSSMODAL=1). Runs before
+  // any network call so a failed check costs nothing and never reaches Twilio.
+  const fc = await voiceClaimsFactCheck({
+    analyzer: opts.analyzer,
+    webhook_base_url: base,
+    webhook_secret: webhookSecret(),
+    bill_kind: opts.bill_kind,
+    account_holder_name: opts.account_holder_name ?? null,
+    final_acceptable_floor: opts.final_acceptable_floor,
+  });
+  if (!fc.ok) {
+    return { ok: false, status: 400, error: `voice fact-check failed before dial: ${fc.detail}` };
   }
 
   const phoneNumberId = process.env.ELEVENLABS_TWILIO_PHONE_NUMBER_ID?.trim();

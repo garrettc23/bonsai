@@ -21,6 +21,7 @@
  * any concessions at that floor.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { getAnthropicClient } from "./llm/anthropic-client.ts";
 import type { EmailClient, OutboundEmail, SentEmail, InboundEmail } from "./clients/email.ts";
 import type { AnalyzerResult, BillKind } from "./types.ts";
 import { generateAppealLetter } from "./appeal-letter.ts";
@@ -323,7 +324,7 @@ function floorContextString(state: NegotiationState): string {
   return parts.join("; ");
 }
 
-function collectPreserveFacts(result: AnalyzerResult): string[] {
+export function collectPreserveFacts(result: AnalyzerResult): string[] {
   const out: string[] = [];
   const m = result.metadata;
   if (m.claim_number) out.push(`Claim number: ${m.claim_number}`);
@@ -500,7 +501,7 @@ export interface StepOpts {
  */
 export async function stepNegotiation(opts: StepOpts): Promise<NegotiationState> {
   const { state, client } = opts;
-  const anthropic = opts.anthropic ?? new Anthropic();
+  const anthropic = opts.anthropic ?? getAnthropicClient();
 
   if (state.outcome.status !== "in_progress") return state;
 
@@ -820,7 +821,7 @@ export async function stepNegotiationOnUserPushBack(
   opts: UserPushBackOpts,
 ): Promise<NegotiationState> {
   const { state, client, note } = opts;
-  const anthropic = opts.anthropic ?? new Anthropic();
+  const anthropic = opts.anthropic ?? getAnthropicClient();
 
   if (state.outcome.status !== "awaiting_user_review") {
     // Idempotency / race: another mutation already advanced the state.

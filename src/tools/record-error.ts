@@ -10,7 +10,7 @@
  * Claude can self-correct on the next turn.
  */
 import type Anthropic from "@anthropic-ai/sdk";
-import { BillingError, HIGH_CONFIDENCE_TYPES, type ErrorType, type Confidence } from "../types.ts";
+import { BillingError, highTypesForKind, type ErrorType, type Confidence, type BillKind } from "../types.ts";
 import { quoteAppearsIn, type GroundTruth } from "../lib/ground-truth.ts";
 
 /**
@@ -109,6 +109,7 @@ export function executeRecordError(
   input: unknown,
   billGroundTruth: GroundTruth,
   existing: readonly BillingError[] = [],
+  billKind: BillKind = "medical",
 ): RecordErrorResult {
   const parsed = BillingError.safeParse(input);
   if (!parsed.success) {
@@ -119,11 +120,12 @@ export function executeRecordError(
   }
   const err = parsed.data;
 
-  // Confidence rubric enforcement.
-  if (err.confidence === "high" && !HIGH_CONFIDENCE_TYPES.includes(err.error_type)) {
+  // Confidence rubric enforcement — the HIGH set depends on the bill kind.
+  const highTypes = highTypesForKind(billKind);
+  if (err.confidence === "high" && !highTypes.includes(err.error_type)) {
     return {
       accepted: false,
-      reason: `confidence: "high" is only allowed for error_type in {duplicate, denied_service, balance_billing}. You reported error_type: "${err.error_type}" which must be confidence: "worth_reviewing". Re-call record_error with the corrected confidence.`,
+      reason: `confidence: "high" is only allowed for error_type in {${highTypes.join(", ")}} for a ${billKind} bill. You reported error_type: "${err.error_type}" which must be confidence: "worth_reviewing". Re-call record_error with the corrected confidence.`,
     };
   }
 

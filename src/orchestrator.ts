@@ -17,9 +17,10 @@
  * Every step is simulated end-to-end unless Resend/ElevenLabs env vars are
  * set. Swapping to real is a one-env-var flip.
  */
+import type Anthropic from "@anthropic-ai/sdk";
 import { analyze } from "./analyzer.ts";
 import { generateAppealLetter, type AppealLetter } from "./appeal-letter.ts";
-import type { AnalyzerResult } from "./types.ts";
+import type { AnalyzerResult, BillKind } from "./types.ts";
 import { loadFixtureAnalyzeInput, type AnalyzeInput } from "./lib/fixture-audit.ts";
 import { MockEmailClient, loadThread } from "./clients/email-mock.ts";
 import { autoEmailClient } from "./clients/email-resend.ts";
@@ -89,6 +90,14 @@ export interface RunBonsaiOpts {
    * voice-dial helper can stamp it onto the conversation meta envelope and
    * the SPA can join transcripts back to the bill row. */
   run_id?: string;
+  /** Test seam: inject an Anthropic client so the audit phase is
+   * deterministic without network. Omitted in production → analyze() builds
+   * its own real client. No behavior change when unset. */
+  anthropicClient?: Anthropic;
+  /** Bill category. Medical (default) runs the EOB-grounded analyzer; other
+   * kinds select a non-medical rule-pack. Comes from the user's Contact-tab
+   * selection. */
+  bill_kind?: BillKind;
 }
 
 export interface ThreadMessage {
@@ -175,6 +184,8 @@ export async function runAuditPhase(opts: RunBonsaiOpts): Promise<BonsaiReport> 
     bill: input.bill,
     eob: input.eob,
     billGroundTruth: input.billGroundTruth,
+    anthropicClient: opts.anthropicClient,
+    billKind: opts.bill_kind,
   });
 
   const appeal = generateAppealLetter(analyzer);

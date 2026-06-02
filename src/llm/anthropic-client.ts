@@ -13,7 +13,15 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { LLMRequest, LLMResponse, LLMTool } from "./provider.ts";
 
 let client: Anthropic | null = null;
-function getClient(): Anthropic {
+
+/**
+ * The one place the Anthropic client is constructed. Shared across the
+ * provider abstraction AND the multi-turn loops (analyzer, negotiate-email)
+ * that still drive the SDK directly. Centralizing construction here means a
+ * single config point and one reused connection pool instead of a fresh
+ * client per call. Tests inject their own client and never hit this.
+ */
+export function getAnthropicClient(): Anthropic {
   if (!client) client = new Anthropic();
   return client;
 }
@@ -23,7 +31,7 @@ export async function runAnthropic(req: LLMRequest): Promise<LLMResponse> {
   const tool_choice = req.force_tool
     ? ({ type: "tool", name: req.force_tool } as const)
     : undefined;
-  const resp = await getClient().messages.create({
+  const resp = await getAnthropicClient().messages.create({
     model: req.model,
     max_tokens: req.max_tokens,
     system: req.system,
