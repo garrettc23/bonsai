@@ -76,7 +76,7 @@ Bill / contract / statement
 
 **Negotiation.** A two-channel loop:
 - **Email** (`src/negotiate-email.ts`) — Claude drafts replies using only facts from grounded findings, has 3 tools (`send_email`, `mark_resolved`, `escalate_human`), and holds to a configurable floor. State persists in `out/threads/{thread_id}.state.json`.
-- **Voice** (`src/voice/`) — generates an ElevenLabs Conversational AI agent config with 5 server tools. Real outbound calls go through ElevenLabs + Twilio when the env is wired; otherwise a dual-Claude simulator role-plays both sides so day-to-day dev never burns minutes.
+- **Voice** (`src/voice/`) — generates an ElevenLabs Conversational AI agent config with our webhook-backed server tools plus ElevenLabs built-in system tools. The agent navigates phone menus by pressing keys (`play_keypad_touch_tone` for DTMF), waits quietly through holds (`skip_turn`), recognizes voicemail (`voicemail_detection`) and leaves one short callback message, and warm-transfers the live call to the account holder (`transfer_to_number`) when a rep needs something only they can give — an identity/security answer or sign-off on a payment. The transfer destination is the phone on the user's profile; without one the agent flags the call for a human instead. Real outbound calls go through ElevenLabs + Twilio when the env is wired; otherwise a dual-Claude simulator role-plays both sides so day-to-day dev never burns minutes.
 
 Negotiation runs in one of two **agent modes** (per-user setting, top of the Settings page):
 
@@ -275,7 +275,7 @@ bun run day1 ... day5     # stage-by-stage harnesses; see scripts/
 # Full pipeline
 bun run bonsai [bill] [eob] [channel] [persona]
 #   channel: auto | email | voice (default auto)
-#   persona: stall_then_concede | hostile | quick_concede | cooperative | voicemail | outright_deny
+#   persona: stall_then_concede | hostile | quick_concede | cooperative | voicemail | outright_deny | ivr | identity_challenge
 
 # Web server
 PORT=3333 bun run serve
@@ -331,7 +331,6 @@ test/                    # bun test
 What's next:
 
 - More analyzer rule packs per bill category (rent, taxes, subscriptions).
-- IVR navigation improvements for the voice agent.
 - Multi-tenant state (current `out/` artifacts are file-based; fine for self-host, not for shared deploys).
 
 Explicitly out of scope without a design doc:
