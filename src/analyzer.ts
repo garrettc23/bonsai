@@ -20,6 +20,7 @@
  * module just consumes a `GroundTruth` and doesn't care which.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import { getAnthropicClient } from "./llm/anthropic-client.ts";
 import type { GroundTruth } from "./lib/ground-truth.ts";
 import type { NormalizedBill } from "./lib/extract-bill.ts";
 import {
@@ -38,7 +39,9 @@ import type {
   BillingError,
   BillMetadata,
   AnalysisSummary,
+  BillKind,
 } from "./types.ts";
+import { analyzerRulesFor } from "./lib/analyzer-rules.ts";
 
 const MODEL = "claude-opus-4-7";
 const MAX_TOKENS = 4096;
@@ -179,6 +182,13 @@ export interface AnalyzeOptions {
   /** Ground truth text for line_quote validation. */
   billGroundTruth: GroundTruth;
   anthropicClient?: Anthropic;
+  /**
+   * Bill category. Medical (default) uses the EOB / bill-only prompts below.
+   * Any other kind selects a non-medical rule-pack (analyzerRulesFor) and is
+   * always graded bill-only — there is no EOB. Drives the HIGH-confidence
+   * rubric in executeRecordError too.
+   */
+  billKind?: BillKind;
 }
 
 function billContentBlock(
@@ -201,9 +211,18 @@ function billContentBlock(
 }
 
 export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
-  const client = opts.anthropicClient ?? new Anthropic();
+  const client = opts.anthropicClient ?? getAnthropicClient();
   const billGroundTruth = opts.billGroundTruth;
   const hasEob = !!opts.eob;
+  const billKind: BillKind = opts.billKind ?? "medical";
+  // Medical uses the EOB / bill-only prompts in this file; every other kind
+  // selects a non-medical rule-pack and is graded bill-only.
+  const systemPrompt =
+    billKind === "medical"
+      ? hasEob
+        ? SYSTEM_PROMPT_WITH_EOB
+        : SYSTEM_PROMPT_BILL_ONLY
+      : analyzerRulesFor(billKind);
   const bills = Array.isArray(opts.bill) ? opts.bill : [opts.bill];
 
   const t0 = Date.now();
@@ -249,7 +268,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: hasEob ? SYSTEM_PROMPT_WITH_EOB : SYSTEM_PROMPT_BILL_ONLY,
+      system: systemPrompt,
       tools: [RECORD_METADATA_TOOL, RECORD_ERROR_TOOL, FINALIZE_TOOL],
       messages,
     });
@@ -274,7 +293,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<AnalyzerResult> {
 
       for (const block of toolUseBlocks) {
         if (block.name === "record_error") {
-          const result: RecordErrorResult = executeRecordError(block.input, billGroundTruth, errors);
+          const result: RecordErrorResult = executeRecordError(block.input, billGroundTruth, errors, billKind);
           if (result.accepted && result.error) {
             errors.push(result.error);
             toolResults.push({
