@@ -27,7 +27,7 @@ export interface ElevenLabsAgentConfig {
         prompt: string;
         llm: string; // e.g. "gemini-2.0-flash-001" or "gpt-4o"
         temperature: number;
-        tools: ServerTool[];
+        tools: AgentTool[];
       };
       first_message: string;
       language: string;
@@ -44,6 +44,10 @@ export interface ElevenLabsAgentConfig {
   };
 }
 
+/** A tool in the agent's `prompt.tools` array — either one of our own
+ * webhook-backed server tools or an ElevenLabs built-in system tool. */
+export type AgentTool = ServerTool | SystemTool;
+
 export interface ServerTool {
   type: "webhook";
   name: string;
@@ -58,6 +62,54 @@ export interface ServerTool {
       properties: Record<string, { type: string; enum?: string[]; description?: string }>;
     };
   };
+}
+
+/**
+ * ElevenLabs built-in system tool. Unlike webhook tools, these modify the
+ * call's internal state (play DTMF, detect voicemail, wait on hold, transfer
+ * the live call) and never POST back to our server.
+ *
+ * Shapes follow the ElevenLabs system-tool docs (verified 2026-06):
+ *   - play_keypad_touch_tone → params: { systemToolType }
+ *   - transfer_to_number     → params: { transfers: [...] }
+ *   - voicemail_detection / skip_turn → minimal { type, name, description }
+ * If the API surface shifts, update the builders in generateAgentConfig only.
+ */
+export interface SystemTool {
+  type: "system";
+  name:
+    | "play_keypad_touch_tone"
+    | "voicemail_detection"
+    | "skip_turn"
+    | "transfer_to_number";
+  description: string;
+  params?: Record<string, unknown>;
+}
+
+export interface TransferRule {
+  transfer_destination: { type: "phone"; phone_number: string };
+  condition: string;
+  transfer_type: "conference" | "blind";
+}
+
+/**
+ * Normalize a user-entered phone into E.164 for ElevenLabs `transfer_to_number`
+ * (which wants `+15551234567`, no separators). Returns null when we can't
+ * confidently produce a valid number — the caller then omits the transfer tool
+ * and falls back to the offline `request_human_handoff` flag.
+ */
+export function toE164(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const hasPlus = trimmed.startsWith("+");
+  const digits = trimmed.replace(/\D/g, "");
+  if (hasPlus) {
+    // Already international; keep digits, require a plausible length.
+    return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : null;
+  }
+  if (digits.length === 10) return `+1${digits}`; // US/Canada, no country code
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return null;
 }
 
 /**
@@ -107,6 +159,14 @@ export interface AgentConfigOpts {
    * same way we talk about a hospital patient.
    */
   account_holder_name?: string | null;
+  /**
+   * The account holder's own phone number (from the Profile tab). When present
+   * and normalizable to E.164, it becomes the `transfer_to_number` destination
+   * for "loop me in" warm transfers and the callback number in the voicemail
+   * message. When absent, the transfer tool is omitted and the agent falls back
+   * to the offline `request_human_handoff` flag.
+   */
+  account_holder_phone?: string | null;
 }
 
 /**
@@ -201,8 +261,13 @@ const CALL_SYSTEM_PROMPT_TEMPLATE = (args: {
   floor: number;
   bill_kind: BillKind;
   account_holder_name: string | null;
+  /** E.164 callback number, or null when the user has no usable phone. */
+  callback_phone: string | null;
+  /** True when a transfer destination is available — gates the loop-me-in
+   * section. When false the agent uses request_human_handoff instead. */
+  transfer_available: boolean;
 }) => {
-  const { result, floor, bill_kind, account_holder_name } = args;
+  const { result, floor, bill_kind, account_holder_name, callback_phone, transfer_available } = args;
   const m = result.metadata;
   const noun = holderNoun(bill_kind);
   const holder = account_holder_name ?? m.patient_name ?? `[${noun.toUpperCase()} NAME]`;
@@ -232,9 +297,26 @@ Provider: ${m.provider_name ?? "[unknown]"}
 Account #: ${m.account_number ?? "[unknown]"}
 Current balance / monthly amount: $${m.bill_current_balance_due?.toFixed(2) ?? "[unknown]"}`;
 
-  const ivrLine = bill_kind === "medical"
-    ? `Navigate to "Billing" or "Patient Accounts". Say "billing" or press the matching digit.`
-    : `Navigate to "Billing", "Account services", or "Customer support". Say the matching word or press the matching digit.`;
+  const ivrTarget = bill_kind === "medical"
+    ? `"Billing" or "Patient Accounts"`
+    : `"Billing", "Account services", or "Customer support"`;
+
+  const transferSection = transfer_available
+    ? `## When to hand the call to the account holder (loop-me-in)
+
+Some things only the ${noun} can do. In exactly these two situations, bring the ${noun} onto the line:
+- The rep asks an identity/security question you do not have the answer to (full SSN, date of birth, security questions, a verification code).
+- The rep asks you to authorize a payment, agree to a payment method, or commit money on the spot.
+
+When that happens, do this in order:
+1. Tell the rep plainly: "I'll bring the account holder on now — one moment."
+2. Call \`record_live_transfer\` with the matching reason (\`identity_challenge\` or \`payment_authorization\`).
+3. Call \`transfer_to_number\`. In the message to the account holder, briefly say what is happening, e.g. "Hi, this is your Bonsai assistant. I have ${provider} billing on the line; they need to verify your identity before we continue. Connecting you now." Then stop — the ${noun} takes over from here.
+
+Do NOT transfer for ordinary negotiation pushback, holds, or hostility — handle those yourself (and use request_human_handoff for hostility/legal threats).`
+    : `## If only the account holder can continue
+
+If the rep demands an identity/security answer you don't have, or asks you to authorize a payment, you cannot complete that yourself and no live transfer number is on file. Call \`request_human_handoff\` with reason \`unclear\`, tell the rep the account holder will call back, and end the call.`;
 
   const goalLine = bill_kind === "medical"
     ? `Reduce the patient's balance due to no more than $${floor.toFixed(2)}. The current balance is $${m.bill_current_balance_due?.toFixed(2) ?? "unknown"}. The EOB-stated patient responsibility is $${m.eob_patient_responsibility?.toFixed(2) ?? "unknown"}. The defensible disputed total is $${result.summary.high_confidence_total.toFixed(2)}.`
@@ -242,11 +324,26 @@ Current balance / monthly amount: $${m.bill_current_balance_due?.toFixed(2) ?? "
 
   return `You are Bonsai, an automated ${advocateRole} making a phone call on behalf of ${holder}. You are calling ${provider}'s ${bill_kind === "medical" ? "billing department" : "customer support / billing line"} to ${high.length > 0 ? "dispute and resolve charges on" : "negotiate a lower amount on"} the account.
 
-## Identity and opening
+## Navigating the phone menu (IVR)
 
-When the call connects you will hear an IVR or a live rep. If you reach an IVR:
-- ${ivrLine}
-- If asked for an account number: say it slowly, digit by digit. Account number: ${m.account_number ?? "[ACCOUNT NUMBER]"}.
+When the call connects you will usually hear an automated menu (IVR) before a live rep.
+- Use the \`play_keypad_touch_tone\` tool to press keys — do NOT just say the number out loud, many systems only accept key presses. When the menu says "press 1 for billing," call \`play_keypad_touch_tone\` with "1".
+- Your goal in the menu is to reach ${ivrTarget}. Press the digit that matches, step by step, through multi-level menus until you reach a billing rep.
+- If the system asks you to key in an account number, extension, or PIN, use \`play_keypad_touch_tone\` and enter it digit by digit. Account number: ${m.account_number ?? "[ACCOUNT NUMBER]"}.
+- Use \`*\` or \`#\` only when the menu explicitly asks for them. If a menu offers "say or press," prefer pressing.
+- If you cannot find a billing option, press \`0\` or say "representative" to reach a human operator.
+
+## Holds and silence
+
+- If the rep puts you on hold or you hear hold music, call \`skip_turn\` and wait quietly. Do NOT keep talking into a hold.
+- Resume only when a person speaks again.
+
+## Voicemail
+
+- If you reach a voicemail box or recording (the \`voicemail_detection\` tool will flag this), leave one short message: "Hi, this is Bonsai calling on behalf of ${holder} about account ${m.account_number ?? "[the account on file]"}.${callback_phone ? ` Please call back at ${callback_phone}.` : ""} Thank you." Then call \`end_call\` with outcome \`voicemail_left\`.
+- Do not negotiate with a voicemail.
+
+## Reaching a live rep
 
 When you reach a live rep, ALWAYS open with this disclosure first: "Hi, this is Bonsai, an automated assistant calling on behalf of ${holder} regarding account ${m.account_number ?? "[ACCOUNT NUMBER]"}. This call may be recorded. Is this a good time to discuss the account?"
 
@@ -264,7 +361,6 @@ ${groundedSection}
 
 - Calm, confident, professional. You are representing the ${noun} — speak for them, not at them.
 - Short sentences. Pause after each fact so the rep can respond.
-- If they put you on hold, wait. Do not keep talking.
 - Never argue, never escalate tone. If they push back, restate the relevant figure.
 - Never make up an account number, date, or dollar figure. Use only the facts above.
 - If the rep asks a question you cannot answer, say "I don't have that on hand — I can have the ${noun} call back with that info."
@@ -273,11 +369,13 @@ ${groundedSection}
 
 ${tacticsBlock(bill_kind, m)}
 
+${transferSection}
+
 ## Hard rules
 
 ${hardRules(bill_kind, floor)}
 
-Begin the call now. When you hear silence or an IVR greeting, begin with the opening line above.`;
+Begin the call now. When you hear silence or an IVR greeting, begin by navigating the menu; when a person answers, begin with the opening disclosure above.`;
 };
 
 const FIRST_MESSAGE_TEMPLATE = (
@@ -315,12 +413,16 @@ export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfi
     ?? result.metadata.bill_current_balance_due
     ?? 0;
 
+  // Loop-me-in transfer is only offered when we have a usable callback number.
+  const callbackPhone = toE164(opts.account_holder_phone);
+  const transferAvailable = callbackPhone !== null;
+
   const authHeaders: Record<string, string> = {
     Authorization: `Bearer ${webhook_secret}`,
     "Content-Type": "application/json",
   };
 
-  const tools: ServerTool[] = [
+  const tools: AgentTool[] = [
     {
       type: "webhook",
       name: "get_disputed_line",
@@ -445,11 +547,81 @@ export function generateAgentConfig(opts: AgentConfigOpts): ElevenLabsAgentConfi
     },
   ];
 
+  // Loop-me-in: a checkpoint tool the agent calls right before the system
+  // `transfer_to_number` fires, so we can log the event and ping the user to
+  // pick up the incoming call. Only present when a transfer number exists.
+  if (transferAvailable) {
+    tools.push({
+      type: "webhook",
+      name: "record_live_transfer",
+      description:
+        "Call IMMEDIATELY before transfer_to_number when looping the account holder into the live call. Logs the reason and alerts the account holder to expect the call. After this, call transfer_to_number.",
+      api_schema: {
+        url: `${webhook_base_url}/record_live_transfer`,
+        method: "POST",
+        request_headers: authHeaders,
+        request_body_schema: {
+          type: "object",
+          required: ["reason"],
+          properties: {
+            reason: {
+              type: "string",
+              enum: ["identity_challenge", "payment_authorization"],
+            },
+          },
+        },
+      },
+    });
+  }
+
+  // ElevenLabs built-in system tools. These navigate the keypad, ride out
+  // holds, detect voicemail, and (when a number is on file) warm-transfer the
+  // live call to the account holder. Shapes per the system-tool docs (2026-06).
+  tools.push(
+    {
+      type: "system",
+      name: "play_keypad_touch_tone",
+      description:
+        "Play DTMF keypad tones to navigate phone menus (IVR), enter an account number, extension, or PIN. Use digits 0-9, * and #.",
+      params: { systemToolType: "play_keypad_touch_tone" },
+    },
+    {
+      type: "system",
+      name: "skip_turn",
+      description: "Stay silent and wait — use when placed on hold or asked to wait.",
+    },
+    {
+      type: "system",
+      name: "voicemail_detection",
+      description: "Detects when the call has reached a voicemail box rather than a person.",
+    },
+  );
+  if (transferAvailable) {
+    tools.push({
+      type: "system",
+      name: "transfer_to_number",
+      description:
+        "Warm-transfer the live call to the account holder. Use only for an identity/security challenge you can't answer or a payment authorization. Brief the account holder in the message, then drop off.",
+      params: {
+        transfers: [
+          {
+            transfer_destination: { type: "phone", phone_number: callbackPhone },
+            condition:
+              "The rep requires an identity/security answer the assistant does not have (SSN, DOB, security question, verification code) OR asks to authorize a payment or commit money.",
+            transfer_type: "conference",
+          } satisfies TransferRule,
+        ],
+      },
+    });
+  }
+
   const systemPrompt = CALL_SYSTEM_PROMPT_TEMPLATE({
     result,
     floor,
     bill_kind,
     account_holder_name,
+    callback_phone: callbackPhone,
+    transfer_available: transferAvailable,
   });
   const firstMessage = FIRST_MESSAGE_TEMPLATE(result, bill_kind, account_holder_name);
 

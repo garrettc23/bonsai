@@ -12,6 +12,8 @@
  *   bun run day5 bill-001 eob-001 stall_then_concede
  *   bun run day5 bill-001 eob-001 hostile
  *   bun run day5 bill-001 eob-001 voicemail
+ *   bun run day5 bill-001 eob-001 ivr                       # keypad navigation
+ *   bun run day5 bill-001 eob-001 identity_challenge +14155550132   # loop-me-in
  */
 import "../src/env.ts";
 import { validateRequiredEnv } from "../src/env.ts";
@@ -24,6 +26,9 @@ validateRequiredEnv();
 const billName = process.argv[2] ?? "bill-001";
 const eobName = process.argv[3] ?? "eob-001";
 const persona = (process.argv[4] as RepPersona) ?? "cooperative";
+// Optional 5th arg: account holder callback phone — enables the loop-me-in
+// transfer tool (use with the identity_challenge persona to see it fire).
+const accountHolderPhone = process.argv[5] ?? null;
 
 console.log(`Bonsai voice call simulator — ${billName}/${eobName} rep=${persona}\n`);
 
@@ -36,6 +41,7 @@ const { call_id, state, transcript } = await simulateCall({
   analyzer,
   persona,
   max_turns: 12,
+  account_holder_phone: accountHolderPhone,
 });
 
 console.log(`\n─── Call ${call_id} ─────────────────────────────────`);
@@ -59,6 +65,9 @@ if (state.outcome.commitment_notes) {
 }
 if (state.outcome.handoff_reason) {
   console.log(`Handoff reason: ${state.outcome.handoff_reason}`);
+}
+if (state.outcome.live_transfer_reason) {
+  console.log(`Live-transfer reason: ${state.outcome.live_transfer_reason}`);
 }
 console.log(`\nTool events: ${state.tool_events.length}`);
 console.log(`Transcript: out/calls/${call_id}.transcript.md`);

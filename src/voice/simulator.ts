@@ -42,7 +42,13 @@ function callsOutDir(): string {
 
 const MODEL = "claude-opus-4-7";
 
-export type RepPersona = "cooperative" | "stall_then_concede" | "hostile" | "voicemail";
+export type RepPersona =
+  | "cooperative"
+  | "stall_then_concede"
+  | "hostile"
+  | "voicemail"
+  | "ivr"
+  | "identity_challenge";
 
 const REP_PERSONA_PROMPTS: Record<RepPersona, string> = {
   cooperative: `You are Jenna, a cooperative patient-accounts representative answering the phone at a hospital billing department. You are helpful, willing to make adjustments when the EOB clearly supports a dispute, and empathetic to patient concerns.
@@ -73,6 +79,23 @@ Behavior:
 - Turn 3+: Refuse to discuss. Threaten collections or attorney referral.
 - Keep turns short (2–4 sentences). Technically professional tone but clearly coercive.`,
 
+  ivr: `You are an AUTOMATED phone menu (IVR) for a billing line — not a person. You only understand keypad presses.
+
+Behavior:
+- Turn 1 (greeting + menu): "Thank you for calling. For new service, press 1. For billing and payments, press 2. For technical support, press 3. To repeat this menu, press 9."
+- You will be told what the caller pressed via "[The caller pressed keypad: X]". If they SPEAK instead of pressing, respond: "I'm sorry, I didn't get that. Please use your keypad." and repeat the menu.
+- If they press 2 (billing): "You've reached billing. Please enter your account number followed by the pound sign." When they then enter digits ending in #, say: "Thank you. Connecting you to a billing representative." and from then on STOP being a menu — respond as a normal cooperative billing rep named Dana who can make adjustments.
+- If they press any other digit, route to a short dead-end and tell them to press 2 for billing.
+- Keep menu prompts short. Never label your messages or use quotes.`,
+
+  identity_challenge: `You are Marcus, a billing representative who is friendly but strict about identity verification before discussing any account details.
+
+Behavior:
+- Turn 1: Greet and ask how you can help.
+- When the caller (an automated assistant) explains the dispute, say you'd be happy to help but first you must verify the account holder. Ask for the account holder's full Social Security number and date of birth — and make clear you cannot proceed on any account changes without it.
+- If the assistant offers a callback or says it doesn't have that information, hold firm: "I really can't make any changes or even discuss specifics until I verify the account holder directly."
+- Do NOT concede anything before verification. Stay polite. Keep turns to 2-4 sentences. Never label your messages or use quotes.`,
+
   voicemail: `You are NOT a person. You are a voicemail system. The only thing you ever say is exactly:
 
 "You have reached St. Synthetic Regional Hospital Patient Accounts. Our office is currently closed. Our business hours are Monday through Friday, 8 AM to 5 PM Pacific. Please leave a message after the tone including your name, account number, and a callback number. Thank you. [BEEP]"
@@ -87,6 +110,9 @@ export interface SimulateCallOpts {
   final_acceptable_floor?: number;
   anthropic?: Anthropic;
   max_turns?: number;
+  /** When set, enables the loop-me-in transfer tool in the simulated agent
+   * config (exercises the identity_challenge / payment paths offline). */
+  account_holder_phone?: string | null;
 }
 
 export interface SimulateCallResult {
@@ -106,6 +132,7 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
     webhook_base_url: "https://simulated.local",
     webhook_secret: "simulated",
     final_acceptable_floor: opts.final_acceptable_floor,
+    account_holder_phone: opts.account_holder_phone ?? null,
   });
 
   let callState = newCallState({
@@ -115,24 +142,65 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
   });
   saveCallState(callState);
 
-  // Translate ElevenLabs server_tools → Anthropic tool schema so we can run
-  // the same agent config through the Messages API for simulation.
-  const anthropicTools: Anthropic.Tool[] = agentConfig.conversation_config.agent.prompt.tools.map(
-    (t: ServerTool) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: {
-        type: "object" as const,
-        required: t.api_schema.request_body_schema.required ?? [],
-        properties: Object.fromEntries(
-          Object.entries(t.api_schema.request_body_schema.properties).map(([k, v]) => [
-            k,
-            { type: v.type, description: v.description, ...(v.enum ? { enum: v.enum } : {}) },
-          ]),
-        ),
-      },
-    }),
+  // Translate ElevenLabs webhook server_tools → Anthropic tool schema so we can
+  // run the same agent config through the Messages API. System tools (keypad,
+  // skip_turn, voicemail, transfer) have no api_schema and can't hit a real
+  // server in simulation, so we synthesize minimal no-op schemas for the ones
+  // the agent can actively invoke — enough to prove the prompt logic decides
+  // to press the right key or trigger a transfer.
+  const configTools = agentConfig.conversation_config.agent.prompt.tools;
+  const webhookTools = configTools.filter((t): t is ServerTool => t.type === "webhook");
+  const webhookToolNames = new Set(webhookTools.map((t) => t.name));
+  const systemToolNames = new Set(
+    configTools.filter((t) => t.type === "system").map((t) => t.name),
   );
+
+  const anthropicTools: Anthropic.Tool[] = webhookTools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: {
+      type: "object" as const,
+      required: t.api_schema.request_body_schema.required ?? [],
+      properties: Object.fromEntries(
+        Object.entries(t.api_schema.request_body_schema.properties).map(([k, v]) => [
+          k,
+          { type: v.type, description: v.description, ...(v.enum ? { enum: v.enum } : {}) },
+        ]),
+      ),
+    },
+  }));
+
+  // Synthetic, simulator-only schemas for the invokable system tools.
+  if (systemToolNames.has("play_keypad_touch_tone")) {
+    anthropicTools.push({
+      name: "play_keypad_touch_tone",
+      description: "Press keypad digits (DTMF). Pass the digits to press, e.g. '2' or '12345#'.",
+      input_schema: {
+        type: "object",
+        required: ["digits"],
+        properties: { digits: { type: "string", description: "Keys to press, e.g. '2' or '5551234#'." } },
+      },
+    });
+  }
+  if (systemToolNames.has("skip_turn")) {
+    anthropicTools.push({
+      name: "skip_turn",
+      description: "Wait silently (e.g. while on hold).",
+      input_schema: { type: "object", properties: {} },
+    });
+  }
+  if (systemToolNames.has("transfer_to_number")) {
+    anthropicTools.push({
+      name: "transfer_to_number",
+      description: "Warm-transfer the live call to the account holder, then drop off.",
+      input_schema: {
+        type: "object",
+        properties: {
+          client_message: { type: "string", description: "Short briefing spoken to the account holder." },
+        },
+      },
+    });
+  }
 
   const systemPromptAgent = agentConfig.conversation_config.agent.prompt.prompt;
   const systemPromptRep = REP_PERSONA_PROMPTS[opts.persona];
@@ -168,6 +236,8 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
     // ── Agent turn ──
     let agentSpokenThisTurn = "";
     let agentEndedCall = false;
+    // Keypad presses the agent made this turn, surfaced to the IVR persona.
+    let dtmfThisTurn = "";
 
     // Allow the agent to do a small burst of tool calls then speak.
     for (let inner = 0; inner < 4; inner++) {
@@ -192,12 +262,30 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
       );
       const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
       for (const block of toolUses) {
-        const out = dispatchToolCall(callState, block.name, block.input ?? {});
-        // Reload state — handlers save to disk; reload so we always reflect latest outcome.
-        // dispatchToolCall mutated state and saved it; keep using the same ref.
+        const input = (block.input ?? {}) as Record<string, unknown>;
+        let out: unknown;
+        if (webhookToolNames.has(block.name)) {
+          // Webhook tools (incl. record_live_transfer, end_call) run through
+          // the real handler/dispatcher, mutating + saving CallState.
+          out = dispatchToolCall(callState, block.name, input);
+          if (block.name === "end_call") agentEndedCall = true;
+        } else if (block.name === "play_keypad_touch_tone") {
+          const digits = String(input.digits ?? "");
+          dtmfThisTurn += digits;
+          out = { result: { played: true, digits } };
+        } else if (block.name === "skip_turn") {
+          out = { result: { waited: true } };
+        } else if (block.name === "transfer_to_number") {
+          // Warm transfer: the AI briefs the account holder then drops off —
+          // terminal for the simulated agent.
+          agentEndedCall = true;
+          out = { result: { transferred: true } };
+        } else {
+          out = { error: `unknown tool: ${block.name}` };
+        }
         transcript.push({
           who: "tool",
-          text: `${block.name}(${JSON.stringify(block.input ?? {})}) → ${JSON.stringify(out).slice(0, 200)}`,
+          text: `${block.name}(${JSON.stringify(input)}) → ${JSON.stringify(out).slice(0, 200)}`,
           data: out,
         });
         toolResults.push({
@@ -205,7 +293,6 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
           tool_use_id: block.id,
           content: JSON.stringify(out),
         });
-        if (block.name === "end_call") agentEndedCall = true;
       }
       agentMessages.push({ role: "user", content: toolResults });
       if (agentEndedCall) break;
@@ -217,7 +304,10 @@ export async function simulateCall(opts: SimulateCallOpts): Promise<SimulateCall
     if (agentEndedCall) break;
 
     // ── Rep turn ──
-    const agentUtteranceForRep = agentSpokenThisTurn.trim() || "(the agent is silent)";
+    const spoken = agentSpokenThisTurn.trim();
+    const dtmfNote = dtmfThisTurn ? `[The caller pressed keypad: ${dtmfThisTurn}]` : "";
+    const agentUtteranceForRep =
+      [spoken, dtmfNote].filter(Boolean).join("\n") || "(the agent is silent)";
     repMessages.push({
       role: "user",
       content: `[The caller says:]\n\n${agentUtteranceForRep}\n\n[Respond naturally. Keep it to 2–4 sentences.]`,

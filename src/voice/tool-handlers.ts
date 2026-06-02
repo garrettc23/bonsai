@@ -28,10 +28,12 @@ export interface CallState {
   tool_events: Array<{ ts: string; tool: string; input: unknown; output: unknown }>;
   // final outcome committed by end_call
   outcome: {
-    status: "in_progress" | "success" | "partial" | "no_adjustment" | "handoff" | "voicemail_left" | "dropped";
+    status: "in_progress" | "success" | "partial" | "no_adjustment" | "handoff" | "live_transfer" | "voicemail_left" | "dropped";
     negotiated_amount?: number;
     commitment_notes?: string;
     handoff_reason?: string;
+    /** Reason the live call was handed to the account holder, if any. */
+    live_transfer_reason?: "identity_challenge" | "payment_authorization";
   };
   /**
    * Goodwill-mode discount proposals captured during the call. Populated by
@@ -154,6 +156,25 @@ export function handleRequestHumanHandoff(
   return out;
 }
 
+export function handleRecordLiveTransfer(
+  state: CallState,
+  input: { reason: "identity_challenge" | "payment_authorization" },
+): { result: { acknowledged: boolean } } {
+  // Don't stomp a recorded balance. If the agent already committed an amount
+  // (success OR partial) and only then hit an identity/payment wall, keep that
+  // outcome and just annotate the transfer reason — losing a negotiated figure
+  // because we looped the user in would be a silent data-loss bug.
+  if (state.outcome.negotiated_amount != null) {
+    state.outcome.live_transfer_reason = input.reason;
+  } else {
+    state.outcome = { status: "live_transfer", live_transfer_reason: input.reason };
+  }
+  const out = { result: { acknowledged: true } };
+  appendEvent(state, "record_live_transfer", input, out);
+  saveCallState(state);
+  return out;
+}
+
 export function handleProposeGeneralDiscount(
   state: CallState,
   input: { amount_off: number; reason: string },
@@ -205,6 +226,8 @@ export function dispatchToolCall(
       return handleProposeGeneralDiscount(state, input as { amount_off: number; reason: string });
     case "request_human_handoff":
       return handleRequestHumanHandoff(state, input as { reason: "hostile" | "legal_threat" | "supervisor_refused" | "unclear" | "voicemail" });
+    case "record_live_transfer":
+      return handleRecordLiveTransfer(state, input as { reason: "identity_challenge" | "payment_authorization" });
     case "end_call":
       return handleEndCall(state, input as { outcome: "success" | "partial" | "no_adjustment" | "handoff" | "voicemail_left" | "dropped" });
     default:
