@@ -2970,7 +2970,12 @@ function renderComparisonHuntingHero(view) {
 
   const stash = document.createElement("div");
   stash.style.display = "none";
-  while (view.firstChild) stash.appendChild(view.firstChild);
+  // Keep opted-in chrome (the free-form comparison intake) visible even in the
+  // empty/hunting state — it's the primary entry point for a user-stated bill.
+  for (const child of Array.from(view.childNodes)) {
+    if (child.nodeType === 1 && child.dataset && child.dataset.keepVisible) continue;
+    stash.appendChild(child);
+  }
 
   const elapsed0 = Math.max(0, Math.floor((Date.now() - offersPollStartedAt) / 1000));
   const hero = document.createElement("div");
@@ -3007,10 +3012,14 @@ function renderHeroEmptyView(view, { title, body, cta }) {
   // re-render would lose attached event listeners on the CTA.
   if (view.querySelector(":scope > .empty-hero")) return;
 
-  // Stash the existing children so we can swap them back later.
+  // Stash the existing children so we can swap them back later. Opt-in chrome
+  // marked data-keep-visible (the comparison intake box) stays mounted.
   const stash = document.createElement("div");
   stash.style.display = "none";
-  while (view.firstChild) stash.appendChild(view.firstChild);
+  for (const child of Array.from(view.childNodes)) {
+    if (child.nodeType === 1 && child.dataset && child.dataset.keepVisible) continue;
+    stash.appendChild(child);
+  }
 
   const hero = document.createElement("div");
   hero.className = "empty-hero";
@@ -3800,6 +3809,59 @@ function scoreLabelFor(score) {
 
 let offersFilter = "Recommended";
 
+// Free-form comparison intake. Lets a user kick off a comparison from a stated
+// bill ("I pay $250/mo for car insurance with State Farm") with no uploaded
+// document — POSTs to /api/compare, which parses it into a baseline and fires
+// the same offer hunt the bill flow uses. Wired once; the box is data-keep-
+// visible so it survives the empty/hunting hero swaps.
+async function submitComparisonIntake() {
+  const input = $("#offers-intake-input");
+  const btn = $("#offers-intake-btn");
+  if (!input || !btn) return;
+  const description = input.value.trim();
+  if (!description) { input.focus(); return; }
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = "Comparing…";
+  try {
+    const res = await apiFetch("/api/compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ description }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showToast(j.error || "Couldn't start that comparison. Try naming the service, provider, and price.");
+      return;
+    }
+    input.value = "";
+    if (j.run_id) markComparisonHuntStarted(j.run_id);
+    showToast("On it — hunting for cheaper equivalents.");
+    renderOffers();
+  } catch {
+    showToast("Network error. Try again.");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+function wireOffersIntake() {
+  const btn = $("#offers-intake-btn");
+  const input = $("#offers-intake-input");
+  if (btn && !btn._wired) {
+    btn._wired = true;
+    btn.addEventListener("click", submitComparisonIntake);
+  }
+  if (input && !input._wired) {
+    input._wired = true;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); submitComparisonIntake(); }
+    });
+  }
+}
+
 function renderOffers() {
   // Header always updates so the page title matches the active nav, even
   // mid-tour when card rendering is suppressed below.
@@ -3822,6 +3884,7 @@ function renderOffers() {
 
   const view = $("#view-offers");
   if (!view) return;
+  wireOffersIntake();
 
   // Empty + still polling → hunting spinner hero. Empty + idle → "drop a
   // bill" empty state. Both stash chrome via the empty-hero pattern so
@@ -3943,19 +4006,59 @@ function renderOffers() {
 
 }
 
+// "Effective monthly" / promo step-up / refi break-even note. The agent now
+// returns a normalized total-cost-of-ownership, so a teaser price that jumps
+// after the promo (or a refi that takes years to break even) gets called out
+// instead of being sold as a clean win.
+function offerCostNoteHtml(o) {
+  const parts = [];
+  const p = o.promo;
+  if (p && p.standard_price != null && p.promo_price != null && p.standard_price > p.promo_price) {
+    const mo = p.promo_months ? ` for ${p.promo_months} mo` : "";
+    parts.push(`Promo ${fmt$(p.promo_price)}${mo}, then ${fmt$(p.standard_price)}/mo`);
+  }
+  if (p && p.one_time_fees) parts.push(`${fmt$(p.one_time_fees)} one-time fees`);
+  if (o.refi && Number.isFinite(o.refi.break_even_months)) {
+    const term = o.refi.keeps_similar_term ? "similar term" : "longer term";
+    parts.push(`Breaks even in ${Math.round(o.refi.break_even_months)} mo · ${o.refi.new_rate_pct}% · ${term}`);
+  }
+  if (!parts.length) return "";
+  return `<div class="offer-note">${parts.map((t) => escapeHtml(t)).join(" • ")}</div>`;
+}
+
+// Keep / give up / gain — the heart of the comparison. Renders the agent's
+// equivalence delta so the user sees what switching actually costs them, not
+// just a cheaper number.
+function offerEquivalenceHtml(o) {
+  const eq = o.equivalence;
+  if (!eq) return "";
+  const row = (label, items, cls) =>
+    items && items.length
+      ? `<div class="offer-eq-row ${cls}"><span class="offer-eq-label">${label}</span><span class="offer-eq-items">${items.map((i) => escapeHtml(i)).join(", ")}</span></div>`
+      : "";
+  const body = [
+    row("Keeps", eq.keeps, "eq-keep"),
+    row("Gives up", eq.gives_up, "eq-give"),
+    row("Gains", eq.gains, "eq-gain"),
+  ].join("");
+  if (!body) return "";
+  return `<div class="offer-eq"><div class="offer-sub-title">What changes if you switch</div>${body}</div>`;
+}
+
 function buildOfferCard(o) {
   const card = document.createElement("div");
   card.className = "offer-card" + (o.recommended ? " recommended" : "");
-  // Card uses only fields the backend agent actually populates: category,
-  // source, current, offered, saves, why, terms_url, baseline. Older fields
-  // (confidence/icon/eta/friction/unit) are gone — adding them back means
-  // expanding the record_offer schema first.
+  // Card surfaces the comparison-engine fields the agent now populates:
+  // equivalence (keeps/gives_up/gains), normalized effective cost + promo
+  // step-up, refi break-even, and a verified badge — alongside the original
+  // category/source/price/savings/why.
+  const verifiedBadge = o.verified ? `<span class="offer-verified" title="Independently verified">✓ Verified</span>` : "";
   card.innerHTML = `
     <div class="offer-head">
       <div class="offer-ic">${ICONS.sparkle}</div>
       <div class="offer-head-main">
         <div class="offer-meta">${escapeHtml(offerCategoryLabel(o.category))}</div>
-        <div class="offer-source">${escapeHtml(o.source ?? "")}</div>
+        <div class="offer-source">${escapeHtml(o.source ?? "")} ${verifiedBadge}</div>
       </div>
     </div>
     <div class="offer-price-row">
@@ -3965,7 +4068,7 @@ function buildOfferCard(o) {
       </div>
       <div class="offer-arrow">${ICONS.arrow}</div>
       <div>
-        <div class="col-label">Offer</div>
+        <div class="col-label">${o.effective_monthly != null ? "Effective" : "Offer"}</div>
         <div class="offer-new">${o.offered ? `<span class="offer-amt">${fmt$(o.offered)}</span>` : "Free"}</div>
       </div>
       <div class="offer-pad"></div>
@@ -3974,7 +4077,9 @@ function buildOfferCard(o) {
         <div class="offer-saves"><span class="offer-amt">${fmt$(o.saves)}</span></div>
       </div>
     </div>
+    ${offerCostNoteHtml(o)}
     ${o.why ? `<div><div class="offer-sub-title">Why it fits</div><div class="offer-sub">${escapeHtml(o.why)}</div></div>` : ""}
+    ${offerEquivalenceHtml(o)}
     <div class="offer-actions">
       <button class="btn btn-ghost" data-action="dismiss">Dismiss</button>
       <button class="btn btn-ghost" data-action="compare">Compare</button>
@@ -4041,12 +4146,21 @@ function openCompareModal(offer, card) {
   $("#cmp-off-price").textContent = fmtPlain(offer.offered);
   $("#cmp-off-saves").innerHTML = `Saves <strong>${fmt$(offer.saves)}</strong>`;
   $("#cmp-why").textContent = offer.why || "—";
-  // friction/eta/confidence rows in the modal markup are no longer populated —
-  // the backend's record_offer schema doesn't carry those fields.
+  // friction + confidence now come from the comparison engine. eta isn't part
+  // of the schema, so it stays blank.
   const setIfExists = (sel, text) => { const el = $(sel); if (el) el.textContent = text; };
-  setIfExists("#cmp-friction", "—");
+  setIfExists("#cmp-friction", offer.switching_friction ?? "—");
   setIfExists("#cmp-eta", "—");
-  setIfExists("#cmp-confidence", "—");
+  setIfExists("#cmp-confidence", offer.confidence != null ? `${Math.round(offer.confidence * 100)}%` : "—");
+  // Prefer the agent's equivalence delta over the static "same coverage" copy.
+  if (offer.equivalence) {
+    const eq = offer.equivalence;
+    const bits = [];
+    if (eq.keeps?.length) bits.push(`Keeps: ${eq.keeps.join(", ")}`);
+    if (eq.gives_up?.length) bits.push(`Gives up: ${eq.gives_up.join(", ")}`);
+    if (eq.gains?.length) bits.push(`Gains: ${eq.gains.join(", ")}`);
+    if (bits.length) setIfExists("#cmp-cur-spec", bits.join(" · "));
+  }
 
   const switchBtn = $("#cmp-switch");
   switchBtn.disabled = false;
@@ -4094,6 +4208,12 @@ function switchSignupStep(offer) {
 }
 
 function switchMatchStep(offer) {
+  // When the comparison engine recorded what the alternative keeps, use it —
+  // it's specific to this offer. Fall back to category-generic copy otherwise.
+  const keeps = offer.equivalence?.keeps;
+  if (keeps && keeps.length) {
+    return `Match these so the comparison stays apples-to-apples: ${escapeHtml(keeps.join(", "))}.`;
+  }
   const cat = (offer.category ?? "").toLowerCase();
   if (cat.includes("prescription") || cat.includes("rx")) {
     return "Match the same medication, dose, and quantity so the price comparison stays apples-to-apples.";

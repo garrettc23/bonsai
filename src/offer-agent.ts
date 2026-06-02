@@ -16,6 +16,19 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getOrCreateOfferAgent } from "./lib/managed-agent-cache.ts";
 import { currentUserPaths } from "./lib/user-paths.ts";
+import {
+  dimensionsFor,
+  isFinancialCategory,
+  renderDimensionBlock,
+} from "./lib/comparison-dimensions.ts";
+import { verifyOffers } from "./skills/_harness/run-verify-offer.ts";
+
+/**
+ * Maximum break-even horizon (months) for a mortgage refi to be recommended.
+ * A refi whose closing costs take longer than this to recoup isn't a win even
+ * if it lowers the monthly payment.
+ */
+const REFI_BREAK_EVEN_CAP_MONTHS = 36;
 
 function offersOutDir(): string {
   return currentUserPaths().offersDir;
@@ -23,6 +36,7 @@ function offersOutDir(): string {
 
 export type OfferChannel = "email" | "voice";
 export type OfferCategory =
+  // medical (original set)
   | "prescription"
   | "insurance_plan"
   | "lab_work"
@@ -31,15 +45,79 @@ export type OfferCategory =
   | "dental"
   | "hospital_bill"
   | "urgent_care"
-  | "house_insurance";
+  | "house_insurance"
+  // general-purpose set (added in the comparison-engine rebuild)
+  | "car_insurance"
+  | "home_insurance"
+  | "internet"
+  | "mobile_phone"
+  | "electricity"
+  | "natural_gas"
+  | "streaming"
+  | "mortgage_refi"
+  | "credit_card"
+  | "other";
+
+export type SwitchingFriction = "low" | "medium" | "high";
+
+/**
+ * What switching actually means — the core of the comparison engine. The agent
+ * profiles the baseline and the alternative on the category's equivalence
+ * dimensions (see lib/comparison-dimensions.ts) and reports the delta so the UI
+ * can show "you keep X, give up Y, gain Z" instead of just a cheaper number.
+ */
+export interface OfferEquivalence {
+  /** Dimensions the alternative matches (e.g. "100/300 liability", "1Gbps"). */
+  keeps: string[];
+  /** Where the alternative is worse (e.g. "no roadside assistance"). */
+  gives_up: string[];
+  /** Where the alternative is better (e.g. "no annual contract"). */
+  gains: string[];
+  /** 0–1: how like-for-like the alternative is vs the baseline. */
+  parity_score: number;
+}
+
+/**
+ * True cost over a horizon, not a sticker price. Captures the promo→standard
+ * step-up and one-time fees that make a cheap teaser a false win.
+ */
+export interface OfferNormalizedCost {
+  /** What the plan really averages to per month over `horizon_months`. */
+  effective_monthly_usd: number;
+  /** Window the average covers (e.g. 24mo so a 12mo promo is half-weighted). */
+  horizon_months: number;
+  promo_price_usd?: number;
+  promo_months?: number;
+  /** Price after the promo ends. */
+  standard_price_usd?: number;
+  /** Install / equipment / activation / transfer fees. */
+  one_time_fees_usd?: number;
+}
+
+/** Financing/break-even block — populated only for financial categories. */
+export interface OfferRefi {
+  new_rate_pct: number;
+  new_term_months: number;
+  closing_costs_usd: number;
+  monthly_payment_usd: number;
+  /** closing_costs / (current monthly payment - new monthly payment). */
+  break_even_months: number;
+  /** True when the new term is close to what remains on the current loan. */
+  keeps_similar_term: boolean;
+}
 
 export interface Baseline {
   label: string;
   category: OfferCategory;
   current_provider: string;
-  /** Current monthly or per-procedure price in USD. */
+  /** Current monthly or per-procedure price in USD. Treated as the baseline's
+   * effective monthly cost for normalized comparison. */
   current_price: number;
-  /** Optional extra context passed to the agent (medication name, plan tier, lab panel). */
+  /** How current_price is quoted ("monthly premium", "monthly payment", …).
+   * Defaults from the category playbook when absent. */
+  cadence?: string;
+  /** Optional extra context passed to the agent (medication name, plan tier,
+   * coverage limits, current rate/term for refi). */
   specifics?: string;
   /** Zip or city so the agent can search regionally. */
   region?: string;
@@ -52,9 +130,27 @@ export interface OfferRecord {
   channel?: OfferChannel;
   notes?: string;
   recommended: boolean;
-  /** baseline.current_price - price_usd. Negative means worse than baseline. */
+  /** Normalized savings: baseline.current_price - normalized effective monthly.
+   * Negative means worse than baseline. Falls back to sticker delta when the
+   * agent didn't supply a normalized cost. */
   savings_vs_baseline: number;
+  // ---- comparison-engine fields (optional for back-compat with legacy files) ----
+  equivalence?: OfferEquivalence;
+  normalized_cost?: OfferNormalizedCost;
+  refi?: OfferRefi | null;
+  /** 0–1 confidence the recorded price/terms are real and current. Set/raised
+   * by the verify-offer pass; defaults to a neutral prior when unverified. */
+  confidence?: number;
+  verified?: boolean;
+  /** ISO date the price was confirmed against the terms page. */
+  price_as_of?: string;
+  switching_friction?: SwitchingFriction;
+  /** Composite rank — see netValueScore(). Higher is better. */
+  net_value_score?: number;
 }
+
+/** Alias documenting the upgraded shape; structurally identical to OfferRecord. */
+export type ComparisonOffer = OfferRecord;
 
 export interface OfferHuntResult {
   baseline: Baseline;
@@ -95,14 +191,10 @@ function fmt$(n: number | null | undefined): string {
 }
 
 function buildKickoffPrompt(baseline: Baseline): string {
-  const cadence =
-    baseline.category === "insurance_plan" || baseline.category === "dental"
-      ? "monthly premium"
-      : baseline.category === "hospital_bill"
-        ? "current balance"
-        : "per-month or per-procedure cost";
+  const cadence = baseline.cadence ?? dimensionsFor(baseline.category).cadence;
+  const financial = isFinancialCategory(baseline.category);
   return [
-    `Hunt for cheaper alternatives to the following baseline.`,
+    `Find equivalent alternatives to the following baseline and report what the customer would keep, give up, and gain by switching.`,
     ``,
     `Baseline: ${baseline.label}`,
     `Category: ${baseline.category}`,
@@ -111,7 +203,17 @@ function buildKickoffPrompt(baseline: Baseline): string {
     baseline.specifics ? `Specifics: ${baseline.specifics}` : "",
     baseline.region ? `Region: ${baseline.region}` : "",
     ``,
-    `Use web_search and web_fetch to find real, switchable alternatives. Record each via the record_offer tool with a real terms URL. When you've covered the realistic alternatives, call mark_exhausted. Begin researching alternatives now.`,
+    renderDimensionBlock(baseline.category),
+    ``,
+    `## How to record`,
+    `Use web_search and web_fetch to find real, switchable alternatives. For each one:`,
+    `1. Fetch the terms/pricing page and confirm the price before recording — never record a price you haven't seen on a real page.`,
+    `2. Fill the equivalence block (keeps / gives_up / gains relative to the dimensions above, plus a 0–1 parity_score).`,
+    `3. Fill normalized_cost with the true effective monthly cost over a 12–24 month horizon — capture any promo-vs-standard step-up and one-time fees.`,
+    financial
+      ? `4. Fill the refi block (new rate, term, closing costs, resulting monthly payment, and break-even months). Recommend only when break-even is reasonable AND the term is preserved.`
+      : `4. Set switching_friction (low/medium/high) based on how hard the switch is for a typical consumer.`,
+    `Record each via the record_offer tool with a real terms URL. When you've covered the realistic alternatives, call mark_exhausted. Begin now.`,
   ]
     .filter((l) => l !== "")
     .join("\n");
@@ -124,6 +226,124 @@ interface RecordOfferInput {
   channel?: unknown;
   notes?: unknown;
   recommended?: unknown;
+  equivalence?: unknown;
+  normalized_cost?: unknown;
+  refi?: unknown;
+  switching_friction?: unknown;
+  price_as_of?: unknown;
+}
+
+function clamp01(n: unknown): number {
+  const x = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function num(n: unknown): number | undefined {
+  const x = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(x) ? x : undefined;
+}
+
+function strArray(x: unknown): string[] {
+  if (!Array.isArray(x)) return [];
+  return x.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim());
+}
+
+function parseEquivalence(raw: unknown): OfferEquivalence {
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    keeps: strArray(obj.keeps),
+    gives_up: strArray(obj.gives_up),
+    gains: strArray(obj.gains),
+    // Neutral prior when the agent omits a score so a bare offer still ranks.
+    parity_score: obj.parity_score == null ? 0.6 : clamp01(obj.parity_score),
+  };
+}
+
+function parseNormalizedCost(raw: unknown, fallbackMonthly: number): OfferNormalizedCost {
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const horizon = Math.max(1, num(obj.horizon_months) ?? 12);
+  const promoPrice = num(obj.promo_price_usd);
+  const promoMonths = num(obj.promo_months);
+  const standardPrice = num(obj.standard_price_usd);
+  const oneTimeFees = num(obj.one_time_fees_usd);
+  // Prefer the agent's effective monthly. When it's omitted, DERIVE it from the
+  // promo→standard step-up + amortized one-time fees rather than falling back to
+  // the sticker price — otherwise a 12-mo teaser gets ranked/displayed as the
+  // real cost (Codex review finding). Sticker is the last resort.
+  let effective = num(obj.effective_monthly_usd);
+  if (effective == null) {
+    if (promoPrice != null && standardPrice != null && promoMonths != null) {
+      const pm = Math.min(Math.max(0, promoMonths), horizon);
+      effective = (promoPrice * pm + standardPrice * (horizon - pm)) / horizon + (oneTimeFees ?? 0) / horizon;
+    } else if (standardPrice != null) {
+      effective = standardPrice + (oneTimeFees ?? 0) / horizon;
+    } else {
+      effective = fallbackMonthly + (oneTimeFees ?? 0) / horizon;
+    }
+  }
+  return {
+    // Floor at 0: a negative/garbage effective cost would inflate displayed
+    // savings without bound (adversarial review finding).
+    effective_monthly_usd: Math.max(0, effective),
+    horizon_months: horizon,
+    promo_price_usd: promoPrice != null ? Math.max(0, promoPrice) : undefined,
+    promo_months: promoMonths,
+    standard_price_usd: standardPrice != null ? Math.max(0, standardPrice) : undefined,
+    one_time_fees_usd: oneTimeFees != null ? Math.max(0, oneTimeFees) : undefined,
+  };
+}
+
+function parseRefi(raw: unknown): OfferRefi | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const rate = num(obj.new_rate_pct);
+  const payment = num(obj.monthly_payment_usd);
+  if (rate == null && payment == null) return null;
+  return {
+    new_rate_pct: rate ?? 0,
+    new_term_months: num(obj.new_term_months) ?? 0,
+    closing_costs_usd: num(obj.closing_costs_usd) ?? 0,
+    monthly_payment_usd: payment ?? 0,
+    break_even_months: num(obj.break_even_months) ?? Number.POSITIVE_INFINITY,
+    keeps_similar_term: obj.keeps_similar_term === true,
+  };
+}
+
+function parseFriction(raw: unknown): SwitchingFriction {
+  return raw === "low" || raw === "high" ? raw : "medium";
+}
+
+const FRICTION_WEIGHT: Record<SwitchingFriction, number> = {
+  low: 1,
+  medium: 1.5,
+  high: 2.5,
+};
+
+/**
+ * Composite rank for an offer. Net value rewards real (normalized) savings,
+ * like-for-like parity, and confidence, and penalizes switching friction — so
+ * a clean $40/mo win outranks a $5/mo save that needs re-qualification. A
+ * mortgage refi scores zero unless it breaks even reasonably soon AND keeps a
+ * similar term (a lower payment from re-amortizing to 30y is not a real win).
+ */
+export function netValueScore(offer: OfferRecord, baseline: Baseline): number {
+  const eff = offer.normalized_cost?.effective_monthly_usd ?? offer.price_usd;
+  const savings = baseline.current_price - eff;
+  if (!(savings > 0) || baseline.current_price <= 0) return 0;
+  if (isFinancialCategory(baseline.category)) {
+    const refi = offer.refi;
+    // Fail closed: a financial offer with no refi block can't be verified as a
+    // real win (no break-even, no term preservation), so it never scores. A
+    // lower effective monthly alone is not enough for a refi/balance transfer.
+    if (!refi || refi.break_even_months > REFI_BREAK_EVEN_CAP_MONTHS || !refi.keeps_similar_term) {
+      return 0;
+    }
+  }
+  const savingsPct = Math.min(1, savings / baseline.current_price);
+  const parity = clamp01(offer.equivalence?.parity_score ?? 0.6);
+  const confidence = clamp01(offer.confidence ?? 0.5);
+  return (savingsPct * parity * confidence) / FRICTION_WEIGHT[offer.switching_friction ?? "medium"];
 }
 
 /**
@@ -176,6 +396,12 @@ function coerceRecordOffer(
   if (!provider || !termsUrl || !Number.isFinite(price) || price < 0) {
     return { offer: null, rejection: "rejected: invalid input (need provider, terms_url, non-negative price_usd)" };
   }
+  // terms_url is untrusted LLM output that the UI renders into an <a href>.
+  // Only allow http(s) so a prompt-injected `javascript:`/`data:` URL can't
+  // become a clickable XSS in the authenticated session.
+  if (!/^https?:\/\//i.test(termsUrl)) {
+    return { offer: null, rejection: "rejected: terms_url must be an http(s) URL to a real pricing/terms page." };
+  }
   const normalized = normalizeProviderName(provider);
   if (COMPETITOR_BLOCKLIST.has(normalized)) {
     return {
@@ -192,18 +418,37 @@ function coerceRecordOffer(
   const channel =
     input.channel === "email" || input.channel === "voice" ? input.channel : undefined;
   const notes = typeof input.notes === "string" ? input.notes : undefined;
-  return {
-    offer: {
-      provider,
-      price_usd: price,
-      terms_url: termsUrl,
-      channel,
-      notes,
-      recommended,
-      savings_vs_baseline: baseline.current_price - price,
-    },
-    rejection: null,
+
+  const equivalence = parseEquivalence(input.equivalence);
+  const normalized_cost = parseNormalizedCost(input.normalized_cost, price);
+  const refi = parseRefi(input.refi);
+  const switching_friction = parseFriction(input.switching_friction);
+  const price_as_of =
+    typeof input.price_as_of === "string" && input.price_as_of.trim()
+      ? input.price_as_of.trim()
+      : new Date().toISOString().slice(0, 10);
+
+  const offer: OfferRecord = {
+    provider,
+    price_usd: price,
+    terms_url: termsUrl,
+    channel,
+    notes,
+    recommended,
+    // Normalized savings: effective monthly vs the baseline, not sticker price.
+    savings_vs_baseline: baseline.current_price - normalized_cost.effective_monthly_usd,
+    equivalence,
+    normalized_cost,
+    refi,
+    // Unverified until the verify-offer pass runs; neutral prior so it ranks.
+    confidence: 0.5,
+    verified: false,
+    price_as_of,
+    switching_friction,
+    net_value_score: 0,
   };
+  offer.net_value_score = netValueScore(offer, baseline);
+  return { offer, rejection: null };
 }
 
 /**
@@ -339,10 +584,29 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
     }
   }
 
-  const recommended = offers.filter((o) => o.recommended && o.savings_vs_baseline > 0);
+  // Cross-model verification pass (BONSAI_CROSSMODAL-gated, fail-open): scores
+  // confidence + flags promo-only/eligibility-gated deals on recommended offers.
+  // Confidence feeds the rank, so recompute net_value_score after it runs.
+  await verifyOffers(offers, opts.baseline);
+  for (const o of offers) {
+    o.net_value_score = netValueScore(o, opts.baseline);
+    // Clear the agent's recommended flag when our server-side gate scored it
+    // zero (failed refi break-even/term, dropped coverage, promo-not-a-win).
+    // Otherwise the persisted record keeps recommended=true and the Comparison
+    // UI's Recommended tab shows a rejected offer with a Switch CTA (Codex).
+    if (o.recommended && (o.net_value_score ?? 0) <= 0) o.recommended = false;
+  }
+
+  // Rank on net value, not lowest sticker price: a clean, like-for-like,
+  // high-confidence, low-friction win should beat a thinly-cheaper option that
+  // drops coverage or needs re-qualification. netValueScore already returns 0
+  // for refis that don't break even / preserve term, so they can't win.
+  const recommended = offers.filter(
+    (o) => o.recommended && o.savings_vs_baseline > 0 && (o.net_value_score ?? 0) > 0,
+  );
   let best: OfferRecord | null = null;
   for (const o of recommended) {
-    if (!best || o.price_usd < best.price_usd) best = o;
+    if (!best || (o.net_value_score ?? 0) > (best.net_value_score ?? 0)) best = o;
   }
 
   let outcome: OfferHuntResult["outcome"];
@@ -351,7 +615,8 @@ export async function runOfferHunt(opts: RunOfferHuntOpts): Promise<OfferHuntRes
   if (best) {
     outcome = "lower_price_found";
     total_monthly_savings = best.savings_vs_baseline;
-    headline = `Found ${best.provider} at ${fmt$(best.price_usd)} vs your ${fmt$(opts.baseline.current_price)} — saves ${fmt$(total_monthly_savings)}/mo.`;
+    const eff = best.normalized_cost?.effective_monthly_usd ?? best.price_usd;
+    headline = `Found ${best.provider} at ${fmt$(eff)} vs your ${fmt$(opts.baseline.current_price)} — saves ${fmt$(total_monthly_savings)}/mo.`;
   } else if (offers.length > 0) {
     outcome = "current_is_lowest";
     headline = `Checked ${offers.length} alternative${offers.length === 1 ? "" : "s"}. None cleanly beat your current ${fmt$(opts.baseline.current_price)}.`;

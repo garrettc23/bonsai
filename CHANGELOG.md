@@ -4,13 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.3.1.0] - 2026-06-02
+## [0.4.1.0] - 2026-06-02
 
 ### Added
 - **The phone agent can get through the robot menu and pull you in when only you can answer.** Bonsai's voice agent now presses its way through keypad menus (DTMF) to reach a billing rep, keys in your account number digit-by-digit instead of reading it aloud, waits quietly through hold music instead of talking over it, and recognizes voicemail — leaving a short callback message and hanging up rather than negotiating with a recording. When a rep asks for something only you can give — an identity/security answer (SSN, date of birth) or sign-off to commit money — the agent briefs you, warm-transfers the live call to your phone, and drops off so you finish it. Looping you in uses the phone number from your profile; without one, it flags the call for you to handle instead.
 
 ### Changed
 - A call the agent hands to you on the line is reported as handled (escalated to you), not left as an unfinished negotiation — and it's finalized and cost-accounted at the moment of transfer instead of showing "active" indefinitely.
+
+## [0.4.0.0] - 2026-06-02
+
+### Added
+- **Ask Bonsai to price-check any recurring bill, no upload needed.** Type "I pay $250/mo for car insurance with State Farm" (or Comcast internet, or a 7% mortgage you want to refinance) into the Comparison tab and Bonsai parses it, then hunts for equivalent alternatives. Works across car/home insurance, internet, mobile, electricity, gas, streaming, mortgage refi, credit cards, and the existing medical categories — not just bills it parsed from a PDF. New `POST /api/compare` endpoint, rate-limited per user.
+- **Comparison now tells you what you'd keep, give up, and gain — not just a cheaper number.** Every alternative records an equivalence delta against the dimensions that matter for its category (liability limits and deductibles for car insurance, speed and data cap for internet, rate and term for a refi) plus a 0–1 parity score. The card shows it instead of the old hardcoded "same coverage" copy.
+- **Prices are normalized to true cost, so teasers can't masquerade as wins.** Offers capture promo-vs-standard pricing and one-time fees and blend them into an effective monthly cost over a 12–24 month horizon. A plan that's cheap for 12 months then jumps is no longer recorded as a clean win — the card calls out "then $X/mo" and it's ranked on the real number.
+- **Mortgage refinancing is a first-class, break-even-aware comparison.** Refi offers record the new rate, term, closing costs, and resulting payment, and compute break-even months. Bonsai only recommends a refi when it breaks even reasonably soon AND keeps a similar term — a lower payment from re-amortizing to a fresh 30 years isn't sold as a win.
+- **A second model verifies each recommended offer before you see it.** An independent GPT-5 pass scores confidence and flags promo-only or eligibility-gated deals; verified offers get a badge. Off by default — same `BONSAI_CROSSMODAL=1` gate as the negotiation eval passes.
+
+### Changed
+- **Recommendations are ranked on net value, not lowest sticker price.** The best offer is chosen by normalized savings × equivalence parity × confidence ÷ switching friction, so a clean like-for-like win beats a thinly-cheaper option that drops coverage or needs re-qualification. Offers that fail their category gate (a refi past break-even, a promo that isn't a real win) are no longer marked recommended.
+- **The comparison agent's prompt moved to a markdown skill.** Following the fat-skills/thin-harness pattern, `src/skills/comparison-agent.md` holds the system prompt so it can be iterated without a code redeploy; the managed agent auto-rebuilds when it changes. Two more skills (`parse-comparison-intake`, `verify-offer`) join it.
+- **Non-medical bills now produce comparison baselines too.** Baseline derivation routes by bill kind and provider name (Comcast → internet, Geico → car insurance, Rocket Mortgage → refi), so the parsed-bill flow finds alternatives for telecom, utility, insurance, and financial bills, not just medical.
+
+### Security
+- **`terms_url` is validated to http(s) before it can render as a link**, closing a `javascript:`-URL XSS path reachable through prompt injection. Untrusted offer fields are escaped, length-bounded, and clamped (no negative effective costs, capped baseline price). `POST /api/compare` is rate-limited per user.
 
 ## [0.3.0.0] - 2026-06-02
 

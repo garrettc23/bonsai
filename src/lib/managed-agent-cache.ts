@@ -13,46 +13,32 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
 import { getDb } from "./db.ts";
+import { loadSkill, renderSkill } from "../skills/_harness/skill-loader.ts";
 
 const PURPOSE = "offer-hunt";
 const AGENT_NAME = "Bonsai Offer Hunt";
 const ENVIRONMENT_NAME = "bonsai-offer-hunt";
 const MODEL: Anthropic.Beta.Agents.BetaManagedAgentsModel = "claude-opus-4-7";
 
-const SYSTEM_PROMPT = `You are Bonsai's offer-hunt research agent.
-
-## Your goal
-
-Find cheaper alternative providers of the same service the user is already buying. If the baseline is a Verizon phone plan, your job is to find a cheaper phone plan from a different carrier (Mint, T-Mobile, Visible, etc.) — NOT a service that promises to negotiate the Verizon bill on the user's behalf. The user already has Bonsai for that.
-
-Concretely, "alternative providers" means:
-- Other ISPs / cell carriers / utility companies for telecom + utility bills
-- Other pharmacies / discount programs (GoodRx, Costco, Mark Cuban Cost Plus) for prescriptions
-- Other insurers for insurance plans
-- Other clinics / labs / imaging centers for medical procedures
-- Other banks / credit unions for financial services
-
-It does NOT mean bill-management, bill-negotiation, or subscription-tracking apps. Those are Bonsai competitors.
-
-## Hard rules
-
-1. Use web search and web fetch to find REAL providers. Do not invent companies, prices, or URLs. Every offer you record must be traceable to a public terms-of-service or pricing page.
-
-2. **NEVER recommend bill-negotiation, bill-management, or subscription-tracking services.** Bonsai is one of those services; suggesting another one is a self-own. Block-listed (non-exhaustive): Goodbill, Trim, BillFixers, Truebill, Resolve, Billshark, Cushion, Rocket Money, BillTrim, BillCutterz, Hiatus, Buddy, Subby, Bobby, MoneyLion, Chime Bill Pay, Quicken Bills. If a search result surfaces any of these, skip it and keep looking for actual alternative service providers.
-
-3. **Each provider gets recorded once per baseline.** If you've already called record_offer for "Mint Mobile" in this session, do not record it again at a different price tier. Pick the best plan and move on.
-
-4. For each concrete alternative that beats the baseline price, call \`record_offer\` with:
-   - provider, price_usd, terms_url (required, real link to the price/plan page)
-   - channel ("email" or "voice") for how a customer would actually sign up
-   - notes: 1–2 sentences explaining why this provider beats the baseline
-   - recommended: true ONLY when the offer is materially cheaper AND switching is realistic for a typical consumer (no exotic eligibility, no esoteric paperwork)
-
-5. Set recommended=false for thinly-cheaper or hard-to-switch options so they show up as alternatives without being pushed.
-
-6. If after thorough searching no alternative beats the baseline, call \`mark_exhausted\` with current_provider_lowest=true. If you find offers but none cleanly beat baseline, still call \`mark_exhausted\` after recording them.
-
-Stop only after every credible offer is recorded or exhaustion is marked. All structured output goes through the custom tools — do not summarize in stdout.`;
+// Fat-skill / thin-harness: the system prompt lives in src/skills/comparison-agent.md
+// so it can be iterated without a code change. configHash() hashes this string, so
+// editing the markdown auto-rebuilds the managed agent on the next hunt. The skill
+// declares no inputs, so renderSkill({}) just returns the body verbatim.
+//
+// Guarded: this runs at module import, which is on the server's boot path. A
+// missing/malformed skill file would otherwise throw and take the WHOLE server
+// down at boot rather than degrading only the offer hunt. Fall back to a minimal
+// inline prompt so the server still boots (and the hunt still does something
+// sane) if the markdown is ever absent from a deploy.
+const FALLBACK_SYSTEM_PROMPT =
+  "You are Bonsai's comparison engine. Find cheaper, equivalent alternative providers for the user's bill using web_search and web_fetch. Record each via record_offer with a real http(s) terms_url, the keeps/gives_up/gains vs the baseline, and the true normalized monthly cost. Never recommend bill-negotiation or subscription-tracking services. Call mark_exhausted when done.";
+let SYSTEM_PROMPT: string;
+try {
+  SYSTEM_PROMPT = renderSkill(loadSkill("comparison-agent"), {});
+} catch (err) {
+  console.error("[managed-agent-cache] failed to load comparison-agent skill, using fallback prompt", err);
+  SYSTEM_PROMPT = FALLBACK_SYSTEM_PROMPT;
+}
 
 const TOOLS: Array<
   | Anthropic.Beta.Agents.BetaManagedAgentsAgentToolset20260401Params
@@ -70,20 +56,64 @@ const TOOLS: Array<
   {
     type: "custom",
     name: "record_offer",
-    description: "Record a found offer that the user could switch to.",
+    description:
+      "Record an equivalent alternative the user could switch to, with what they keep/give up/gain and the true normalized cost.",
     input_schema: {
       type: "object",
       required: ["provider", "price_usd", "terms_url", "recommended"],
       properties: {
         provider: { type: "string", description: "Name of the alternative provider." },
-        price_usd: { type: "number", description: "Price in USD on the same cadence as baseline." },
+        price_usd: { type: "number", description: "Advertised/sticker price in USD on the same cadence as baseline." },
         terms_url: {
           type: "string",
-          description: "Public URL where the price/plan can be verified.",
+          description: "Public URL where the price/plan was verified.",
         },
         channel: { type: "string", enum: ["email", "voice"] },
-        notes: { type: "string" },
+        notes: { type: "string", description: "1–2 sentences on why this fits." },
         recommended: { type: "boolean" },
+        price_as_of: {
+          type: "string",
+          description: "ISO date (YYYY-MM-DD) the price was confirmed on the terms page.",
+        },
+        switching_friction: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description: "How hard the switch is for a typical consumer.",
+        },
+        equivalence: {
+          type: "object",
+          description: "What switching means relative to the baseline's equivalence dimensions.",
+          properties: {
+            keeps: { type: "array", items: { type: "string" }, description: "Dimensions matched or beaten." },
+            gives_up: { type: "array", items: { type: "string" }, description: "Where the alternative is worse." },
+            gains: { type: "array", items: { type: "string" }, description: "Where the alternative is better." },
+            parity_score: { type: "number", description: "0–1: how like-for-like vs the baseline." },
+          },
+        },
+        normalized_cost: {
+          type: "object",
+          description: "True total cost of ownership, not the sticker price.",
+          properties: {
+            effective_monthly_usd: { type: "number", description: "Blended monthly average over the horizon." },
+            horizon_months: { type: "number", description: "Window the average covers (12–24)." },
+            promo_price_usd: { type: "number" },
+            promo_months: { type: "number" },
+            standard_price_usd: { type: "number", description: "Price after the promo ends." },
+            one_time_fees_usd: { type: "number", description: "Install/equipment/activation/transfer fees." },
+          },
+        },
+        refi: {
+          type: "object",
+          description: "Financial categories only (mortgage refi, balance transfer). Break-even, not a price swap.",
+          properties: {
+            new_rate_pct: { type: "number" },
+            new_term_months: { type: "number" },
+            closing_costs_usd: { type: "number" },
+            monthly_payment_usd: { type: "number" },
+            break_even_months: { type: "number", description: "closing costs ÷ monthly savings." },
+            keeps_similar_term: { type: "boolean" },
+          },
+        },
       },
     },
   },

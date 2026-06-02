@@ -59,9 +59,9 @@ Bill / contract / statement
   └─────┬─────┘
         │
         ▼
-  ┌───────────┐   When negotiation isn't the right path: surveys cheaper
-  │Comparison │   alternatives (insurance, telecom, utilities, credit) and
-  │           │   gates them on switch-probability before showing them.
+  ┌───────────┐   When negotiation isn't the right path: surveys equivalent
+  │Comparison │   alternatives (insurance, telecom, utilities, refi, credit),
+  │           │   normalizes them to true cost, and ranks on net value.
   └─────┬─────┘
         │
         ▼
@@ -85,7 +85,15 @@ Negotiation runs in one of two **agent modes** (per-user setting, top of the Set
 
 Notifications (durable in-app inbox + Resend email) are written by `src/lib/notify-user.ts` and read via `GET /api/notifications/inbox`.
 
-**Comparison.** When the cheaper move is to switch providers (insurance, telecom, utilities, credit), the comparison agent surveys alternatives via Anthropic managed agents and gates them on switch-probability before surfacing. The probability floor is configurable per category.
+**Comparison.** When the cheaper move is to switch providers, the comparison agent surveys alternatives via Anthropic managed agents and ranks them on **net value**, not lowest sticker price: normalized savings × equivalence parity × confidence ÷ switching friction. It works across car/home insurance, internet, mobile, electricity, gas, streaming, mortgage refi, credit cards, and medical — either from a parsed bill or from free-form intake (`POST /api/compare`, e.g. "I pay $250/mo for car insurance with State Farm").
+
+Three things make a comparison trustworthy instead of a cheaper number:
+
+- **Equivalence delta.** Every alternative records what you'd keep, give up, and gain against the dimensions that matter for its category (liability limits + deductibles for car insurance, speed + data cap for internet, rate + term for a refi), plus a 0–1 parity score. See `src/lib/comparison-dimensions.ts`.
+- **Effective cost.** Offers capture promo-vs-standard pricing and one-time fees and blend them into an effective monthly cost over a 12–24 month horizon, so a teaser that jumps after 12 months isn't recorded as a clean win. Refis additionally compute break-even months and only recommend when break-even is reasonably soon AND the term stays similar.
+- **Independent verification.** A second model (GPT-5) scores confidence and flags promo-only or eligibility-gated deals before a recommended offer is shown; verified offers get a badge. Off by default — same `BONSAI_CROSSMODAL=1` gate as the negotiation eval passes.
+
+The comparison agent's system prompt lives in `src/skills/comparison-agent.md` (fat-skills/thin-harness pattern, iterable without a code redeploy); `parse-comparison-intake.md` and `verify-offer.md` back the intake parse and the verification pass.
 
 ## Channel strategy
 
@@ -129,7 +137,7 @@ defensibleTotal =
 | Contact resolver | Live. Web search via Anthropic managed agents. |
 | Email negotiation | Live (Resend). Real outbound + svix-verified inbound webhook. Mock fallback for local dev. |
 | Voice negotiation | Live (ElevenLabs + Twilio). Simulator runs when any voice env var is unset. |
-| Comparison | Live. Probability-gated. Anthropic managed agents survey alternatives. |
+| Comparison | Live. Equivalence- + effective-cost- + break-even-aware ranking; free-form intake; optional second-model verify. Anthropic managed agents survey alternatives. |
 | Web UI | Live. Upload, audit, dashboard with receipts, agent-reasoning timeline. |
 
 ## Self-host on Railway
@@ -289,6 +297,7 @@ PORT=3333 bun run serve
 - `POST /api/threads/:id/accept` — co-pilot endpoint. The user accepts the agent's currently proposed resolution; thread transitions to `resolved`. Idempotency-keyed (5-minute TTL) so the UI's confirm-double-click can't double-advance state.
 - `POST /api/threads/:id/push-back` — co-pilot endpoint. The user counters the proposed resolution with free-text guidance for the agent's next turn. After `MAX_PUSH_BACK_ROUNDS` rounds the next call force-escalates to `escalated_human` instead of looping again. Idempotency-keyed identically.
 - `GET /api/notifications/inbox` — returns the calling user's notification inbox (durable JSONL written by `src/lib/notify-user.ts`), newest-first. Same records that drive the Resend "your input is needed" emails.
+- `POST /api/compare` — free-form comparison intake. Accepts a `description` (e.g. "I pay $250/mo for car insurance with State Farm") or structured `current_price` + `category` fields; parses missing fields with Opus (`parse-comparison-intake` skill), then fires a background managed-agent hunt for equivalent alternatives. No upload required. Rate-limited to 10/hour per user since each call can spawn an Opus parse, a full hunt, and a verify pass. Untrusted free-text is length-bounded and clamped before it reaches the LLM.
 
 ## Tests
 
@@ -306,7 +315,7 @@ src/
   appeal-letter.ts       # deterministic markdown generator
   negotiate-email.ts     # email negotiation loop (mutex + MAX_TURNS escalation + BCC)
   negotiate-agent.ts     # negotiation orchestration helpers
-  offer-agent.ts         # comparison agent (managed-agent-backed)
+  offer-agent.ts         # comparison agent (managed-agent-backed): net-value ranking + verify
   opps-filter.ts         # opportunity probability gate
   simulate-reply.ts      # role-playing rep for email simulator
   replay.ts              # scripted-inbound demo fallback when webhook unreachable
@@ -319,7 +328,9 @@ src/
   tools/                 # record-metadata, record-error (grounding contract), finalize
   voice/                 # agent-config, client, simulator, tool-handlers
   lib/                   # ground-truth, thread-store, provider-contact, pdf-extract,
-                         # auth, db, backup, rate-limit, user-settings, notify-user, etc.
+                         # comparison-dimensions (equivalence + effective-cost), auth, db,
+                         # backup, rate-limit, user-settings, notify-user, etc.
+  skills/                # markdown agent prompts (fat-skills/thin-harness) + _harness runners
 scripts/                 # day1-poc, day2..5, run-bonsai, voice-smoke, resend-inbound-smoke
 fixtures/                # synthetic bill + EOB markdown + generated PDFs
 public/                  # static web UI (index, landing, terms, privacy)
