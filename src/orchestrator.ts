@@ -440,6 +440,9 @@ export async function runNegotiationPhase(
         );
       }
       report.summary.outcome_detail = `Voice call ${state.outcome.status}. ${state.outcome.commitment_notes ?? ""}`;
+    } else if (state.outcome.status === "live_transfer") {
+      report.summary.outcome = "escalated";
+      report.summary.outcome_detail = `Voice call handed to the account holder on the live call${state.outcome.live_transfer_reason ? ` (${state.outcome.live_transfer_reason})` : ""}.`;
     } else if (state.outcome.status === "handoff" || state.outcome.status === "voicemail_left") {
       report.summary.outcome = "escalated";
       report.summary.outcome_detail = `Voice call ended with ${state.outcome.status}${state.outcome.handoff_reason ? ` (${state.outcome.handoff_reason})` : ""}.`;

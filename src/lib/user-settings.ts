@@ -10,7 +10,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { currentUserPaths } from "./user-paths.ts";
+import { currentUserPaths, userPaths } from "./user-paths.ts";
 
 function settingsPath(): string {
   return currentUserPaths().settingsPath;
@@ -161,6 +161,24 @@ export function setProfileConfig(
     else if (!willAck) delete p.hipaa_acknowledged_at;
   }
   save(next);
+}
+
+/**
+ * Read a user's profile phone directly off disk by user_id, bypassing the
+ * AsyncLocalStorage-backed `getProfileConfig()`. Background callers (the
+ * voice-dial path, webhook sweeps) may not have a request scope. Read order
+ * matches `getProfileConfig()`: profile.phone, then the legacy account_phone.
+ */
+export function getProfilePhoneForUser(user_id: string): string | null {
+  const path = userPaths(user_id).settingsPath;
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as PersistedSettings;
+    const phone = raw.profile?.phone?.trim() || raw.account_phone?.trim() || null;
+    return phone && phone.length > 0 ? phone : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface TuneConfig {

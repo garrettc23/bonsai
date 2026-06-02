@@ -35,6 +35,7 @@ import {
 } from "../lib/voice-cost-estimate.ts";
 import { addSpend, getDailyBudgetUsd, getTodaySpendUsd } from "../lib/voice-spend.ts";
 import { getOrCreateAgent } from "../lib/voice-agent-cache.ts";
+import { getProfilePhoneForUser } from "../lib/user-settings.ts";
 import { rateLimit } from "../lib/rate-limit.ts";
 import type { User } from "../lib/auth.ts";
 import type { AnalyzerResult, BillKind } from "../types.ts";
@@ -106,6 +107,12 @@ export interface DialVoiceOpts {
   provider_phone: string;
   bill_kind?: BillKind;
   account_holder_name?: string | null;
+  /**
+   * The account holder's callback phone for "loop me in" warm transfers.
+   * When omitted, resolved from the user's saved profile. Pass `null` in tests
+   * to force the no-transfer fallback.
+   */
+  account_holder_phone?: string | null;
   final_acceptable_floor?: number;
   /** Bypass the per-user rate limit. Used by tests; not exposed to HTTP. */
   skip_rate_limit?: boolean;
@@ -223,12 +230,20 @@ export async function dialVoiceForUser(
     };
   }
 
+  // Resolve the callback phone for loop-me-in: explicit opt wins (tests),
+  // otherwise the user's saved profile phone.
+  const account_holder_phone =
+    opts.account_holder_phone !== undefined
+      ? opts.account_holder_phone
+      : getProfilePhoneForUser(user.id);
+
   const cached = await getOrCreateAgent(user, {
     result: opts.analyzer,
     webhook_base_url: base,
     webhook_secret: webhookSecret(),
     bill_kind: opts.bill_kind,
     account_holder_name: opts.account_holder_name ?? null,
+    account_holder_phone,
     final_acceptable_floor: opts.final_acceptable_floor,
     client: opts.agent_client,
   });

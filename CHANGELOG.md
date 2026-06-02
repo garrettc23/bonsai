@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.1.0] - 2026-06-02
+
+### Added
+- **The phone agent can get through the robot menu and pull you in when only you can answer.** Bonsai's voice agent now presses its way through keypad menus (DTMF) to reach a billing rep, keys in your account number digit-by-digit instead of reading it aloud, waits quietly through hold music instead of talking over it, and recognizes voicemail — leaving a short callback message and hanging up rather than negotiating with a recording. When a rep asks for something only you can give — an identity/security answer (SSN, date of birth) or sign-off to commit money — the agent briefs you, warm-transfers the live call to your phone, and drops off so you finish it. Looping you in uses the phone number from your profile; without one, it flags the call for you to handle instead.
+
+### Changed
+- A call the agent hands to you on the line is reported as handled (escalated to you), not left as an unfinished negotiation — and it's finalized and cost-accounted at the moment of transfer instead of showing "active" indefinitely.
+
 ## [0.4.0.0] - 2026-06-02
 
 ### Added

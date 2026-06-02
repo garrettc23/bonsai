@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import {
   applyIntegrationsToEnv,
   getIntegrationsConfig,
+  getProfilePhoneForUser,
   setIntegrationsConfig,
 } from "../src/lib/user-settings.ts";
 import { withUserContext } from "../src/lib/user-context.ts";
@@ -89,6 +90,39 @@ beforeEach(() => {
 afterEach(() => {
   clearSettings();
   clearEnv();
+});
+
+describe("getProfilePhoneForUser (disk reader for loop-me-in)", () => {
+  // Reads by explicit user_id off disk — no withUserContext needed.
+  test("missing settings file returns null", () => {
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBeNull();
+  });
+
+  test("returns profile.phone when present", () => {
+    writeSettings({ profile: { phone: "+1-415-555-0132" } });
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBe("+1-415-555-0132");
+  });
+
+  test("falls back to legacy account_phone", () => {
+    writeSettings({ account_phone: "(212) 555-0144" });
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBe("(212) 555-0144");
+  });
+
+  test("profile.phone wins over legacy account_phone", () => {
+    writeSettings({ profile: { phone: "+14155550132" }, account_phone: "2125550144" });
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBe("+14155550132");
+  });
+
+  test("empty / whitespace phone returns null", () => {
+    writeSettings({ profile: { phone: "   " } });
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBeNull();
+  });
+
+  test("malformed settings JSON returns null (no throw)", () => {
+    mkdirSync(SETTINGS_DIR, { recursive: true });
+    writeFileSync(SETTINGS_PATH, "{ not valid json");
+    expect(getProfilePhoneForUser(TEST_USER.id)).toBeNull();
+  });
 });
 
 describe("getIntegrationsConfig", () => {

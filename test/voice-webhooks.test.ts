@@ -28,6 +28,7 @@ import {
 } from "../src/server/voice-webhooks.ts";
 import { newCallState, saveCallState } from "../src/voice/tool-handlers.ts";
 import { createUser } from "../src/lib/auth.ts";
+import { readInbox } from "../src/lib/notify-user.ts";
 import { ensureUserDirs, userPaths } from "../src/lib/user-paths.ts";
 import { withUserContext } from "../src/lib/user-context.ts";
 import { getTodaySpendUsd } from "../src/lib/voice-spend.ts";
@@ -214,6 +215,7 @@ describe("handleVoiceWebhook", () => {
     "propose_general_discount",
     "record_negotiated_amount",
     "request_human_handoff",
+    "record_live_transfer",
   ] as const) {
     test(`200 dispatches ${tool} via the webhook`, async () => {
       process.env.ELEVENLABS_WEBHOOK_SECRET = "right";
@@ -236,6 +238,8 @@ describe("handleVoiceWebhook", () => {
             return { amount: 150, commitment_notes: "Rep agreed to $150." };
           case "request_human_handoff":
             return { reason: "supervisor_refused" };
+          case "record_live_transfer":
+            return { reason: "identity_challenge" };
         }
       })();
       const res = await handleVoiceWebhook(
@@ -251,6 +255,41 @@ describe("handleVoiceWebhook", () => {
       expect(meta?.transcript[0].text).toBe(tool);
     });
   }
+
+  test("record_live_transfer mirrors live_transfer outcome into meta + pings the user", async () => {
+    process.env.ELEVENLABS_WEBHOOK_SECRET = "right";
+    const user = await createUser(`lt-${Date.now()}@test.example`, "supersecret", { acceptedTerms: true });
+    ensureUserDirs(userPaths(user.id));
+    const conv = "conv_live_transfer";
+    await withUserContext(user, async () => seedConversation({ user_id: user.id, conversation_id: conv }));
+
+    const res = await handleVoiceWebhook(
+      "record_live_transfer",
+      makeReq(
+        { conversation_id: conv, parameters: { reason: "payment_authorization" } },
+        { authorization: "Bearer right" },
+      ),
+    );
+    expect(res.status).toBe(200);
+
+    // Structural outcome is mirrored into the meta envelope for the SPA badge.
+    const meta = loadConversationMeta(user.id, conv);
+    expect(meta?.outcome.status).toBe("live_transfer");
+    expect(meta?.outcome.live_transfer_reason).toBe("payment_authorization");
+    // The call is finalized here (the agent drops off after a warm transfer;
+    // end_call never fires), so the meta must not stay stuck "active".
+    expect(meta?.status).toBe("ended");
+    expect(typeof meta?.ended_at).toBe("number");
+
+    // The heads-up is deferred via setImmediate (off the call lock); flush the
+    // macrotask queue, then confirm it landed in the user's durable inbox.
+    await new Promise((r) => setImmediate(r));
+    const inbox = readInbox(user.id);
+    expect(inbox.length).toBe(1);
+    expect(inbox[0].kind).toBe("awaiting_user_review");
+    expect(inbox[0].provider_name).toBe("Test Hospital");
+    expect(inbox[0].summary).toMatch(/authorize a payment/i);
+  });
 
   test("404 when conversation has no on-disk CallState", async () => {
     process.env.ELEVENLABS_WEBHOOK_SECRET = "right";

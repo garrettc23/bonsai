@@ -237,6 +237,9 @@ async function runVoiceAttempt(opts: {
   if (state.outcome.status === "success" || state.outcome.status === "partial") {
     outcome = "resolved";
     detail = `Voice ${state.outcome.status}. ${state.outcome.commitment_notes ?? ""}`;
+  } else if (state.outcome.status === "live_transfer") {
+    outcome = "escalated";
+    detail = `Voice handed to the account holder on the live call${state.outcome.live_transfer_reason ? ` (${state.outcome.live_transfer_reason})` : ""}.`;
   } else if (state.outcome.status === "handoff" || state.outcome.status === "voicemail_left") {
     outcome = "escalated";
     detail = `Voice ${state.outcome.status}${state.outcome.handoff_reason ? ` (${state.outcome.handoff_reason})` : ""}.`;

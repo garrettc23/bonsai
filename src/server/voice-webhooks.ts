@@ -35,6 +35,7 @@ import {
   type ConversationMeta,
 } from "../lib/call-store.ts";
 import { withUserContext } from "../lib/user-context.ts";
+import { notifyUser } from "../lib/notify-user.ts";
 import { addSpend } from "../lib/voice-spend.ts";
 import { estimateCallCost } from "../lib/voice-cost-estimate.ts";
 import {
@@ -50,6 +51,7 @@ export const VOICE_TOOL_NAMES = [
   "propose_general_discount",
   "record_negotiated_amount",
   "request_human_handoff",
+  "record_live_transfer",
   "end_call",
 ] as const;
 
@@ -180,8 +182,32 @@ async function runVoiceWebhook(
       if (state.outcome.commitment_notes && !meta.outcome.notes) {
         meta.outcome.notes = state.outcome.commitment_notes;
       }
+      // Surface structural status (live_transfer) for the SPA badge.
+      meta.outcome.status = state.outcome.status;
+      if (state.outcome.live_transfer_reason) {
+        meta.outcome.live_transfer_reason = state.outcome.live_transfer_reason;
+      }
 
-      if (toolName === "end_call") {
+      // Loop-me-in: ping the user to expect the incoming call. Deferred via
+      // setImmediate so NOTHING in notifyUser — not even its synchronous inbox
+      // read/write — runs inside the per-conversation lock that ElevenLabs is
+      // blocking on before it transfers. The lock releases first; the heads-up
+      // (and any email retry) runs on the next tick.
+      if (toolName === "record_live_transfer") {
+        const uid = owner.user_id;
+        setImmediate(() => {
+          notifyLiveTransfer(uid, meta, state).catch((err) =>
+            console.error("live-transfer notify failed:", err),
+          );
+        });
+      }
+
+      // end_call finalizes explicitly. record_live_transfer also finalizes:
+      // in conference (warm) transfer the agent briefs the account holder and
+      // drops off, so end_call never fires — without this the call would stay
+      // status="active" forever and the AI-portion spend would never be
+      // recorded against the daily budget.
+      if (toolName === "end_call" || toolName === "record_live_transfer") {
         finalizeCall(meta, state);
       }
 
@@ -191,6 +217,30 @@ async function runVoiceWebhook(
     }),
   );
   return out;
+}
+
+/**
+ * Heads-up to the account holder that the live call is being handed to them.
+ * Reuses the `awaiting_user_review` notification ("Bonsai needs your call").
+ */
+async function notifyLiveTransfer(
+  user_id: string,
+  meta: ConversationMeta,
+  state: CallState,
+): Promise<void> {
+  const provider = state.analyzer.metadata.provider_name ?? "the company";
+  const reason = state.outcome.live_transfer_reason;
+  const why =
+    reason === "payment_authorization"
+      ? "to authorize a payment"
+      : "to verify your identity";
+  await notifyUser({
+    user_id,
+    thread_id: meta.conversation_id,
+    kind: "awaiting_user_review",
+    provider_name: provider,
+    summary: `Bonsai is connecting you to a live call with ${provider} ${why}. Answer the incoming call.`,
+  });
 }
 
 function finalizeCall(meta: ConversationMeta, state: CallState): void {

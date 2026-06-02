@@ -62,7 +62,16 @@ export interface ConversationMeta {
   ended_at?: number;
   status: ConversationStatus;
   source: ConversationSource;
-  outcome: { negotiated_amount?: number; notes?: string };
+  outcome: {
+    negotiated_amount?: number;
+    notes?: string;
+    /** Terminal/structural status mirrored from CallState. Persisted so a
+     * future SPA "Transferred to you" badge can read it (SPA wiring is a
+     * follow-up — see PR notes). Optional for back-compat. */
+    status?: string;
+    /** When the live call was handed to the account holder, why. */
+    live_transfer_reason?: "identity_challenge" | "payment_authorization";
+  };
   transcript: TranscriptTurn[];
 }
 
