@@ -214,6 +214,20 @@ export function deleteUser(id: string): void {
   db.query("DELETE FROM users WHERE id = ?").run(id);
 }
 
+/**
+ * Every user, oldest first. Used by the autonomy scheduler to sweep
+ * persistent-mode negotiations across all accounts on a clock (not just the
+ * user currently polling the SPA). Small-scale fine; when the user table
+ * grows past a few thousand, page this.
+ */
+export function listAllUsers(): User[] {
+  const db = getDb();
+  const rows = db
+    .query(`SELECT ${USER_COLUMNS} FROM users ORDER BY created_at ASC`)
+    .all() as UserRow[];
+  return rows.map(rowToUser);
+}
+
 export function createSession(userId: string): Session {
   const db = getDb();
   const id = newSessionToken();
