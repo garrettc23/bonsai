@@ -19,6 +19,19 @@ export interface OfferCard {
   why: string;
   terms_url: string;
   baseline: { current_provider: string; specifics: string };
+  // ---- comparison-engine fields (optional; absent on legacy offer files) ----
+  /** What switching means relative to the baseline. */
+  equivalence?: { keeps: string[]; gives_up: string[]; gains: string[]; parity_score: number };
+  /** True effective monthly cost over the horizon, if the agent normalized it. */
+  effective_monthly?: number;
+  /** Promo step-up surfaced so the UI can warn "then $X after N months". */
+  promo?: { promo_price?: number; promo_months?: number; standard_price?: number; one_time_fees?: number };
+  /** Mortgage-refi break-even, when applicable. */
+  refi?: { break_even_months: number; new_rate_pct: number; new_term_months: number; keeps_similar_term: boolean } | null;
+  confidence?: number;
+  verified?: boolean;
+  switching_friction?: "low" | "medium" | "high";
+  net_value_score?: number;
 }
 
 export function offerCardFromRecord(
@@ -26,6 +39,13 @@ export function offerCardFromRecord(
   baseline: Baseline,
   o: OfferRecord,
 ): OfferCard {
+  // "saves" stays as the headline number; prefer normalized savings when the
+  // agent supplied a normalized cost, else fall back to the sticker delta so
+  // legacy offer files still render.
+  const effective = o.normalized_cost?.effective_monthly_usd;
+  const saves = effective != null
+    ? Math.max(0, baseline.current_price - effective)
+    : Math.max(0, baseline.current_price - o.price_usd);
   return {
     // Stable ID so the UI can dedupe / persist "seen" state across reloads.
     id: `${file}|${o.provider}|${o.price_usd}`,
@@ -33,14 +53,29 @@ export function offerCardFromRecord(
     category: baseline.category,
     source: o.provider,
     current: baseline.current_price,
-    offered: o.price_usd,
-    saves: Math.max(0, baseline.current_price - o.price_usd),
+    offered: effective ?? o.price_usd,
+    saves,
     why: o.notes ?? "",
     terms_url: o.terms_url,
     baseline: {
       current_provider: baseline.current_provider,
       specifics: baseline.specifics ?? "",
     },
+    equivalence: o.equivalence,
+    effective_monthly: effective,
+    promo: o.normalized_cost
+      ? {
+          promo_price: o.normalized_cost.promo_price_usd,
+          promo_months: o.normalized_cost.promo_months,
+          standard_price: o.normalized_cost.standard_price_usd,
+          one_time_fees: o.normalized_cost.one_time_fees_usd,
+        }
+      : undefined,
+    refi: o.refi ?? null,
+    confidence: o.confidence,
+    verified: o.verified,
+    switching_friction: o.switching_friction,
+    net_value_score: o.net_value_score,
   };
 }
 
@@ -103,9 +138,13 @@ export function projectOfferHistory(
 
   const cards: OfferCard[] = [];
   for (const { run, file } of runs) {
-    const sorted = [...run.offers].sort(
-      (a, b) => b.savings_vs_baseline - a.savings_vs_baseline,
-    );
+    // Rank by net value (parity × confidence ÷ friction-weighted savings) when
+    // present, falling back to raw savings for legacy files that predate it.
+    const sorted = [...run.offers].sort((a, b) => {
+      const av = a.net_value_score ?? a.savings_vs_baseline;
+      const bv = b.net_value_score ?? b.savings_vs_baseline;
+      return bv - av;
+    });
     for (const o of sorted) {
       if (isCompetitorProvider(o.provider)) continue;
       const key = normalize(o.provider);

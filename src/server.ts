@@ -57,9 +57,15 @@ import {
   saveOfferHunt,
   offersDir,
   type Baseline,
+  type OfferCategory,
   type OfferHuntResult,
 } from "./offer-agent.ts";
 import { deriveOfferBaselines } from "./lib/derive-offer-baselines.ts";
+import {
+  billKindForCategory,
+  dimensionsFor,
+} from "./lib/comparison-dimensions.ts";
+import { runSkill } from "./skills/_harness/skill-runner.ts";
 import { projectOfferHuntStatus, type OfferHuntStatusPayload } from "./lib/offer-hunt-status.ts";
 import { projectOfferHistory } from "./lib/offer-history.ts";
 import {
@@ -326,6 +332,14 @@ interface PendingRun {
     ended_at?: number;
     status: "in_flight" | "done";
   };
+  /**
+   * Comparison-only run (created by POST /api/compare). It exists solely to
+   * bind a free-form comparison's offer files to an active run_id so they
+   * surface in the Comparison view. It is NOT a bill: it has no uploaded
+   * document, no report, and must be excluded from the Bills/history list so
+   * it doesn't show up as a phantom completed bill with a balance.
+   */
+  comparison_only?: boolean;
 }
 
 /** Days after a resolved negotiation before we nudge the user to verify. */
@@ -2523,6 +2537,10 @@ async function handleHistory(): Promise<Response> {
   const seenNames = new Set(completed.map((c) => c.name));
   for (const run of pendingByName.values()) {
     if (seenNames.has(run.fixture_name)) continue;
+    // Comparison-only runs are not bills — keep them out of the Bills list so
+    // they don't appear as phantom "completed" rows with a balance. Their
+    // offers still surface in the Comparison view via run_id binding.
+    if (run.comparison_only) continue;
     const meta = run.partial_report?.analyzer?.metadata ?? {};
     const summary = run.partial_report?.summary ?? {};
     const outcome = run.status === "failed" ? "failed"
@@ -2679,6 +2697,190 @@ async function handleOfferHunt(req: Request): Promise<Response> {
   const saved_as = saveOfferHunt(result);
   return Response.json({ ...result, saved_as });
 }
+
+const VALID_OFFER_CATEGORIES: ReadonlySet<string> = new Set<OfferCategory>([
+  "prescription", "insurance_plan", "lab_work", "imaging", "specialty_infusion",
+  "dental", "hospital_bill", "urgent_care", "house_insurance",
+  "car_insurance", "home_insurance", "internet", "mobile_phone", "electricity",
+  "natural_gas", "streaming", "mortgage_refi", "credit_card", "other",
+]);
+
+/**
+ * Free-form comparison intake. The general-purpose entry point for "I pay $X/mo
+ * for Y — is there a cheaper equivalent?", independent of any parsed bill. An
+ * Opus pre-pass (parse-comparison-intake skill) turns the sentence into a
+ * structured Baseline; we create a lightweight comparison-shaped PendingRun so
+ * the hunt's offers bind to an active run (and therefore surface in the
+ * Comparison view), then drive the hunt via the same runOfferHuntsForRun path
+ * the bill flow uses. Structured callers can skip the LLM by passing
+ * current_price + category directly.
+ */
+async function handleComparisonIntake(req: Request): Promise<Response> {
+  // Each call can fire an Opus parse + a full background managed-agent hunt +
+  // GPT-5 verifies. Rate-limit per user so a scripted client can't spawn
+  // unbounded concurrent hunts (cost / resource exhaustion).
+  const rl = rateLimit({ key: `compare:${currentUserPaths().userId}`, max: 10, windowMs: 60 * 60 * 1000 });
+  if (!rl.ok) return rateLimitResponse(rl.retryAfterSec, "Too many comparison requests. Try again in a bit.");
+
+  const body = (await req.json().catch(() => null)) as {
+    description?: string;
+    current_provider?: string;
+    current_price?: number;
+    category?: string;
+    cadence?: string;
+    region?: string;
+    specifics?: string;
+  } | null;
+
+  // Bound untrusted free-text before it's persisted + fed to the LLM/agent.
+  const clampLen = (s: string, max: number) => (s.length > max ? s.slice(0, max) : s);
+  let provider = clampLen(body?.current_provider?.trim() || "", 200);
+  let price = typeof body?.current_price === "number" ? body.current_price : NaN;
+  let category = (body?.category && VALID_OFFER_CATEGORIES.has(body.category)
+    ? body.category
+    : "") as OfferCategory | "";
+  let cadence = clampLen(body?.cadence?.trim() || "", 64);
+  let region = clampLen(body?.region?.trim() || "", 200);
+  let specifics = clampLen(body?.specifics?.trim() || "", 1000);
+
+  // When the structured fields aren't fully supplied, parse the free-form
+  // description with Opus. Requires a description to work with.
+  if (!(price > 0) || !category) {
+    const description = clampLen(body?.description?.trim() || "", 2000);
+    if (!description) {
+      return Response.json(
+        { error: "Provide a description (e.g. \"I pay $250/mo for car insurance with State Farm\") or current_price + category." },
+        { status: 400 },
+      );
+    }
+    try {
+      const resp = await runSkill("parse-comparison-intake", {
+        vars: { description },
+        user: "Parse this into a comparison baseline via the parse_intake tool.",
+        tools: [PARSE_INTAKE_TOOL],
+      });
+      const parsed = (resp.tool_use?.input ?? {}) as Record<string, unknown>;
+      if (!provider) provider = typeof parsed.current_provider === "string" ? parsed.current_provider.trim() : "";
+      if (!(price > 0)) {
+        const p = typeof parsed.current_price === "number" ? parsed.current_price : Number(parsed.current_price);
+        if (Number.isFinite(p)) price = p;
+      }
+      if (!category && typeof parsed.category === "string" && VALID_OFFER_CATEGORIES.has(parsed.category)) {
+        category = parsed.category as OfferCategory;
+      }
+      if (!cadence && typeof parsed.cadence === "string") cadence = parsed.cadence.trim();
+      if (!region && typeof parsed.region === "string") region = parsed.region.trim();
+      if (!specifics && typeof parsed.specifics === "string") specifics = parsed.specifics.trim();
+    } catch (err) {
+      console.error("[compare intake] parse failed", err);
+      return Response.json({ error: "Couldn't understand that. Try naming the service, provider, and price." }, { status: 422 });
+    }
+  }
+
+  if (!(price > 0)) {
+    return Response.json({ error: "Couldn't find a price to compare against." }, { status: 422 });
+  }
+  if (price > 1_000_000) {
+    return Response.json({ error: "That price looks too large to compare against." }, { status: 422 });
+  }
+  if (!category) category = "other";
+  if (!provider) provider = "Current provider";
+
+  const dims = dimensionsFor(category);
+  const baseline: Baseline = {
+    label: `${provider} ${dims.label.toLowerCase()}`,
+    category,
+    current_provider: provider,
+    current_price: price,
+    cadence: cadence || dims.cadence,
+    specifics: specifics || undefined,
+    region: region || undefined,
+  };
+
+  const billKind = billKindForCategory(category);
+  const fixtureName = `compare-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const partial: BonsaiReport = {
+    analyzer: {
+      metadata: {
+        patient_name: "",
+        provider_name: provider,
+        provider_billing_address: "",
+        claim_number: "",
+        date_of_service: "",
+        insurer_name: "",
+        eob_patient_responsibility: 0,
+        bill_current_balance_due: price,
+        account_number: "",
+        bill_kind: billKind,
+      },
+      errors: [],
+      summary: {
+        high_confidence_total: 0,
+        worth_reviewing_total: 0,
+        bill_total_disputed: 0,
+        headline: `Comparison: ${baseline.label}`,
+      },
+      grounding_failures: [],
+      meta: { model: "claude-opus-4-7", input_tokens: 0, output_tokens: 0, elapsed_ms: 0, tool_turns: 0 },
+    },
+    appeal: { markdown: "", subject: "", defensible_total: 0, used_placeholders: [] },
+    strategy: { chosen: "persistent", reason: "Comparison-only: hunting for cheaper equivalents." },
+    summary: {
+      original_balance: price,
+      defensible_disputed: 0,
+      final_balance: null,
+      patient_saved: null,
+      channel_used: "persistent",
+      outcome: "in_progress",
+      outcome_detail: "Comparing against alternatives.",
+    },
+  };
+
+  const run: PendingRun = {
+    run_id: newRunId(),
+    fixture_name: fixtureName,
+    bill_path: "",
+    bill_paths: [],
+    bill_names: [],
+    channel: "persistent",
+    partial_report: partial,
+    qa: [],
+    created_at: Date.now(),
+    status: "completed",
+    completed_at: Date.now(),
+    display_name: baseline.label,
+    // Not a bill — excluded from the Bills/history list (handleHistory skips
+    // comparison_only runs). Its offers still bind to this run_id for the
+    // Comparison view.
+    comparison_only: true,
+  };
+  savePending(run);
+
+  // Drive the hunt in the background via the shared path (offer_hunt status +
+  // saveOfferHunt with run_id). The client navigates to Comparison and polls.
+  void runOfferHuntsForRun(run.run_id, [baseline]).catch((err) => {
+    console.error(`[compare intake ${run.run_id}]`, err);
+  });
+
+  return Response.json({ run_id: run.run_id, baseline });
+}
+
+const PARSE_INTAKE_TOOL = {
+  name: "parse_intake",
+  description: "Structured comparison baseline parsed from the customer's description.",
+  input_schema: {
+    type: "object" as const,
+    required: ["current_price", "category"],
+    properties: {
+      current_provider: { type: "string" },
+      current_price: { type: "number" },
+      cadence: { type: "string" },
+      category: { type: "string" },
+      specifics: { type: "string" },
+      region: { type: "string" },
+    },
+  },
+};
 
 async function handleOfferHistory(): Promise<Response> {
   // Comparison follows Negotiation: only show offers tied to a bill that
@@ -3744,6 +3946,7 @@ const server = Bun.serve({
         if (req.method === "POST" && url.pathname === "/api/account/delete") return handleDeleteAccount(req, user);
         if (req.method === "GET" && url.pathname === "/api/offer-history") return handleOfferHistory();
         if (req.method === "POST" && url.pathname === "/api/offer-hunt") return handleOfferHunt(req);
+        if (req.method === "POST" && url.pathname === "/api/compare") return handleComparisonIntake(req);
         const offerHuntStatusMatch = url.pathname.match(/^\/api\/offer-hunt\/status\/([a-zA-Z0-9_-]+)$/);
         if (req.method === "GET" && offerHuntStatusMatch) return Response.json(getOfferHuntStatus(offerHuntStatusMatch[1]));
         const offerRunMatch = url.pathname.match(/^\/api\/offer-run\/([a-zA-Z0-9._-]+)$/);
