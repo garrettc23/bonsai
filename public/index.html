@@ -110,11 +110,14 @@
           <div class="view view-overview" id="view-overview">
 
             <div class="receipts-block" id="receipts-block" hidden>
-              <div class="receipts-hero">
-                <div class="receipts-hero-label">Total saved by Bonsai</div>
-                <div class="receipts-hero-amount" id="receipts-total">$0</div>
-                <div class="receipts-hero-sub" id="receipts-sub">Across <span id="receipts-count">0</span> bills</div>
-              </div>
+              <button type="button" class="receipts-hero" id="receipts-toggle" aria-expanded="true" aria-controls="receipts-rows" title="Show or hide the saved bills">
+                <div class="receipts-hero-text">
+                  <div class="receipts-hero-label">Total saved by Bonsai</div>
+                  <div class="receipts-hero-amount" id="receipts-total">$0</div>
+                  <div class="receipts-hero-sub" id="receipts-sub">Across <span id="receipts-count">0</span> bills</div>
+                </div>
+                <svg class="receipts-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              </button>
               <div class="receipts-rows" id="receipts-rows"></div>
             </div>
 

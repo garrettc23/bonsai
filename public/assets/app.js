@@ -1299,6 +1299,23 @@ function renderReceipts() {
   const subEl = document.getElementById("receipts-sub");
   const rowsEl = document.getElementById("receipts-rows");
   if (!block || !totalEl || !rowsEl) return;
+
+  // Collapse toggle: clicking the hero hides/shows the per-bill list while the
+  // total-saved hero stays visible. State persists across reloads.
+  const toggle = document.getElementById("receipts-toggle");
+  if (toggle && !toggle.dataset.wired) {
+    toggle.dataset.wired = "1";
+    const startCollapsed = localStorage.getItem("bonsai_receipts_collapsed") === "1";
+    block.classList.toggle("collapsed", startCollapsed);
+    toggle.setAttribute("aria-expanded", startCollapsed ? "false" : "true");
+    toggle.addEventListener("click", () => {
+      const collapsed = !block.classList.contains("collapsed");
+      block.classList.toggle("collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      try { localStorage.setItem("bonsai_receipts_collapsed", collapsed ? "1" : "0"); } catch (_) {}
+    });
+  }
+
   const data = receiptsCache ?? { rows: [], total_saved: 0, count: 0 };
   if (!data.rows || data.rows.length === 0) {
     block.hidden = true;
