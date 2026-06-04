@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.3.1] - 2026-06-04
+
+### Fixed
+- **Ship the `scripts/` directory in the Docker image so ops scripts can run in production.** `.dockerignore` excluded `scripts/`, so `scripts/seed-demo-account.ts` was never in the deployed container and `railway ssh -- bun run scripts/seed-demo-account.ts` failed with "Module not found". Stopped excluding `scripts/`; the entrypoint never imports them, so they stay inert at runtime.
+
 ## [0.4.3.0] - 2026-06-04
 
 ### Fixed

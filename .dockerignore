@@ -5,7 +5,10 @@
 out
 node_modules
 test
-scripts
+# NOTE: scripts/ is intentionally NOT excluded — ops scripts like
+# seed-demo-account.ts are run in-container via
+# `railway ssh -- bun run scripts/<name>.ts`. They're inert at runtime
+# (the server entrypoint never imports them).
 *.md
 !README.md
 .context
