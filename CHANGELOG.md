@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.2.0] - 2026-06-04
+
+### Added
+- **One command spins up a full demo account so you can present Bonsai without doing live audits.** A new `bun run seed-demo` script creates (or reuses) the `gcgeester04@gmail.com` account and fills it with hand-authored, fully offline fake data covering every use case: five bill negotiations across medical, telecom, utility, insurance, and financial — three finished wins ($3,612, $360, $75 saved), one negotiation in progress, and one audited bill awaiting approval — plus seven comparison hunts (car insurance, internet, mobile, electricity, prescription, mortgage refi, credit card), each with a recommended like-for-like switch. It's idempotent (re-running wipes and reseeds only that account) and makes no LLM or network calls. The account is created as a password user, but Google sign-in links to it by email, so the seeded data shows up after the demo logs in with Google. Run it inside the Railway container so writes land on the data volume: `railway ssh -- bun run scripts/seed-demo-account.ts`.
+
 ## [0.4.1.0] - 2026-06-02
 
 ### Added

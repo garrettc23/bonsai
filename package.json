@@ -1,6 +1,6 @@
 {
   "name": "bill-agent",
-  "version": "0.4.1.0",
+  "version": "0.4.2.0",
   "description": "Agents to manage personal bills — open-source agents that audit, dispute, and renegotiate insurance, utilities, medical, credit, and subscription costs.",
   "license": "MIT",
   "private": true,
@@ -12,6 +12,7 @@
     "day4": "bun run scripts/day4-negotiate-email.ts",
     "day5": "bun run scripts/day5-voice-call.ts",
     "bonsai": "bun run scripts/run-bonsai.ts",
+    "seed-demo": "bun run scripts/seed-demo-account.ts",
     "serve": "bun run src/server.ts",
     "typecheck": "bunx --bun tsc --noEmit",
     "test": "bun test",
