@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.3.0] - 2026-06-04
+
+### Fixed
+- **The demo seeder now enables both Google and email/password sign-in on the same account.** Previously, if the demo account was first created by signing in with Google (which stores a random password), the seeder reused that account but left password login broken. The seeder now always (re)sets the demo password, so `gcgeester04@gmail.com` can be reached with either Google sign-in or the email + `BonsaiDemo!2026`, and the Google link stays intact. Idempotent and offline as before.
+
 ## [0.4.2.0] - 2026-06-04
 
 ### Added
