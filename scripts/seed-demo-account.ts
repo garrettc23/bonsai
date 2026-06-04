@@ -35,6 +35,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createUser, getUserByEmail, type User } from "../src/lib/auth.ts";
+import { getDb } from "../src/lib/db.ts";
 import { ensureUserDirs, userPaths, type UserPaths } from "../src/lib/user-paths.ts";
 import { withUserContext } from "../src/lib/user-context.ts";
 import { setProfileConfig } from "../src/lib/user-settings.ts";
@@ -753,6 +754,17 @@ async function main(): Promise<void> {
     console.log(`[seed] created account ${DEMO_EMAIL} (${user.id})`);
   }
   if (user.email !== DEMO_EMAIL) throw new Error(`refusing to seed: resolved user email ${user.email} != ${DEMO_EMAIL}`);
+
+  // Always (re)set the demo password so email+password sign-in works with
+  // DEMO_PASSWORD — even when the account was first created via Google OAuth
+  // (which stores a random hash) or by a prior seed run. Mirrors the argon2id
+  // hashing the rest of auth.ts uses. Google sign-in still works in parallel:
+  // the OAuth callback links by email and password login reads this hash.
+  const password_hash = await Bun.password.hash(DEMO_PASSWORD, { algorithm: "argon2id" });
+  getDb()
+    .query("UPDATE users SET password_hash = ?, email_verified_at = COALESCE(email_verified_at, ?), accepted_terms_at = COALESCE(accepted_terms_at, ?) WHERE id = ?")
+    .run(password_hash, now, now, user.id);
+  console.log(`[seed] password set — email+password login enabled (${DEMO_EMAIL} / ${DEMO_PASSWORD})`);
 
   const P = userPaths(user.id);
   wipeDemoArtifacts(P);
