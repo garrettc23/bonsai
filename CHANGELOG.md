@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.5.0] - 2026-06-04
+
+### Added
+- **The "Total saved by Bonsai" card on Home is now collapsible.** Click the hero (it has a chevron) to hide the per-bill list while the headline total and "Across N bills" stay visible — handy for a clean screen without losing the savings number. The collapsed/expanded state is remembered across reloads, and the toggle is keyboard-accessible.
+
 ## [0.4.4.0] - 2026-06-04
 
 ### Added

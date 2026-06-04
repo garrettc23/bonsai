@@ -1781,10 +1781,32 @@ em { font-style: italic; font-family: var(--font-display); font-size: 1.05em; le
 }
 .receipts-block[hidden] { display: none; }
 .receipts-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
   padding: 24px 28px 20px;
+  border: none;
   border-bottom: 1px solid var(--ink-faint, rgba(0, 0, 0, 0.08));
   background: var(--surface-alt, #fafaf7);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
 }
+.receipts-hero:hover { background: var(--surface, #fff); }
+.receipts-hero:focus-visible { outline: 2px solid var(--green); outline-offset: -2px; }
+.receipts-hero-text { min-width: 0; }
+.receipts-chevron {
+  flex: none;
+  color: var(--ink-mute);
+  transition: transform 0.2s ease;
+}
+.receipts-block.collapsed .receipts-chevron { transform: rotate(-90deg); }
+.receipts-block.collapsed .receipts-hero { border-bottom: none; }
+.receipts-block.collapsed .receipts-rows { display: none; }
 .receipts-hero-label {
   font-family: var(--font-mono);
   font-size: 11px;
