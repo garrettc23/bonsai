@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.4.0] - 2026-06-04
+
+### Added
+- **The demo account can seed itself at server startup — no SSH required.** Set `SEED_DEMO_ACCOUNT=1` in the environment and the server seeds `gcgeester04@gmail.com` on boot. This sidesteps the serverless-sleep/SSH dance entirely: set the variable, redeploy, open the site, and the demo data is there. It's idempotent — once seeded, later cold starts detect the existing data and skip the rewrite, so boots stay fast — and it can never block startup (a seed failure is logged, not fatal). The account works with either Google sign-in or email `gcgeester04@gmail.com` / `BonsaiDemo!2026`.
+
+### Changed
+- Moved the demo seed logic into `src/lib/seed-demo.ts` (exported `seedDemoAccount()`) so it ships in the Docker image and can be imported by the server. `scripts/seed-demo-account.ts` is now a thin wrapper that force-reseeds for manual runs.
+
 ## [0.4.3.1] - 2026-06-04
 
 ### Fixed

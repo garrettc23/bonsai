@@ -3827,6 +3827,21 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
+// Optionally seed the presentation demo account at boot. Gated behind an env
+// var so it only runs where we want it (e.g. set SEED_DEMO_ACCOUNT=1 in
+// Railway). Idempotent — skips the heavy write once the account is seeded, so
+// repeated cold starts are cheap. Wrapped so a seed failure can never stop the
+// server from coming up (the healthcheck must still pass).
+if (process.env.SEED_DEMO_ACCOUNT === "1") {
+  try {
+    const { seedDemoAccount } = await import("./lib/seed-demo.ts");
+    const r = await seedDemoAccount();
+    console.log(`[seed-demo] ${r.seeded ? "seeded demo account" : "demo account already present"} (${r.userId})`);
+  } catch (err) {
+    console.error("[seed-demo] non-fatal seed failure:", err);
+  }
+}
+
 const server = Bun.serve({
   port: PORT,
   // Bind to all interfaces so Railway's edge proxy (and any other
